@@ -1,4 +1,5 @@
 import Cocoa
+import SwiftUI
 import ServiceManagement
 
 class MenuBarManager {
@@ -35,8 +36,22 @@ class MenuBarManager {
         try? SMAppService.mainApp.register()
     }
     
+    var settingsWindow: NSWindow?
+    
     @objc func openSettings() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        if settingsWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 500, height: 400),
+                styleMask: [.titled, .closable, .miniaturizable],
+                backing: .buffered, defer: false)
+            window.title = "TypeFlow Settings"
+            window.contentView = NSHostingView(rootView: SettingsView())
+            window.center()
+            window.isReleasedWhenClosed = false
+            self.settingsWindow = window
+        }
+        
+        settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
     
