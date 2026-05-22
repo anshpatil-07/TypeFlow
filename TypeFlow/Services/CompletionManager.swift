@@ -28,18 +28,25 @@ class CompletionManager {
     }
     
     private func triggerGeneration() {
-        guard let context = accessibilityMonitor?.getTextBeforeCaret() else { return }
+        guard let activeLine = accessibilityMonitor?.getTextBeforeCaret() else { return }
+        
+        var aggregatedContext = ContextAggregator.shared.gatherContext(activeLine: activeLine)
+        let fullText = accessibilityMonitor?.getFullFieldText()
+        
+        aggregatedContext = AggregatedContext(
+            clipboardText: aggregatedContext.clipboardText,
+            screenText: aggregatedContext.screenText,
+            fullFieldText: fullText,
+            activeLineText: aggregatedContext.activeLineText
+        )
+        
+        let prompt = PromptBuilder.shared.buildPrompt(context: aggregatedContext)
         
         Task {
-            let completion = await LLMEngine.shared.generateCompletion(context: context)
+            let completion = await LLMEngine.shared.generateCompletion(context: prompt)
             
             DispatchQueue.main.async {
                 self.currentCompletion = completion
-                // The overlay window will be updated with the caret position. We can update its text here.
-                if let overlay = self.overlayWindowController?.overlayWindow?.contentView?.subviews.first as? NSTextField {
-                    // Update text, but wait, the overlay uses SwiftUI currently!
-                    // Let's implement an update method in OverlayWindowController
-                }
                 self.overlayWindowController?.updateText(completion)
             }
         }

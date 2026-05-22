@@ -109,4 +109,50 @@ class AccessibilityMonitor {
         }
         return nil
     }
+    
+    func getFullFieldText() -> String? {
+        let systemWideElement = AXUIElementCreateSystemWide()
+        var focusedElement: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+        
+        if err == .success, let element = focusedElement {
+            let axElement = element as! AXUIElement
+            
+            // Try to get the entire value first
+            var valueRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef) == .success {
+                if let stringValue = valueRef as? String {
+                    // Truncate if too long (e.g. 4000 chars)
+                    if stringValue.count > 4000 {
+                        return "..." + String(stringValue.suffix(4000))
+                    }
+                    return stringValue
+                }
+            }
+            
+            // If that fails, try to fetch a large range around the caret
+            var selectedRangeRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success {
+                let rangeValue = selectedRangeRef as! AXValue
+                var range = CFRange(location: 0, length: 0)
+                AXValueGetValue(rangeValue, .cfRange, &range)
+                
+                let length = min(2000, range.location)
+                let startLocation = range.location - length
+                // Fetch 2000 before and 2000 after
+                let fetchRange = CFRange(location: startLocation, length: length + 2000)
+                
+                var fetchRangeValue = fetchRange
+                guard let axFetchRange = AXValueCreate(.cfRange, &fetchRangeValue) else { return nil }
+                
+                var stringRef: CFTypeRef?
+                if AXUIElementCopyParameterizedAttributeValue(axElement, kAXStringForRangeParameterizedAttribute as CFString, axFetchRange, &stringRef) == .success {
+                    if let string = stringRef as? String {
+                        return string
+                    }
+                }
+            }
+        }
+        return nil
+    }
 }
