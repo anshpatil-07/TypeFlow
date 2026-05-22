@@ -1,5 +1,14 @@
 # TypeFlow
 
+## Current Milestone: v1.1 Bug Fixes & Model UI
+
+**Goal:** Fix critical accessibility and injection bugs from v1.0 and implement the AI model selection UI.
+
+**Target features:**
+- Fix Accessibility permission loop
+- Implement AI model UI (downloads, progress, activation)
+- Fix ghost text injection and CGEvent monitor issues
+
 ## What This Is
 
 TypeFlow is a system-wide AI autocomplete macOS menu bar app that works in every Mac application. It monitors the active text field using Accessibility APIs and injects ghost-text completions inline, powered by a local LLM running entirely on-device via Apple's MLX framework. It provides contextual completions by combining active text, surrounding screen text via Vision OCR, and clipboard contents.
