@@ -27,7 +27,9 @@ class AccessibilityMonitor {
                 if type == .keyDown {
                     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                     if keyCode == 48 { // Tab
-                        print("Tab pressed")
+                        if CompletionManager.shared.handleTabPressed() {
+                            return nil // Consume the event
+                        }
                     } else {
                         // After typing, try to find the caret
                         if let monitor = refcon {
@@ -36,6 +38,7 @@ class AccessibilityMonitor {
                             DispatchQueue.main.async {
                                 if let rect = obj.getCurrentCaretRect() {
                                     obj.onCaretMoved?(rect)
+                                    CompletionManager.shared.onTextChanged()
                                 }
                             }
                         }
@@ -68,6 +71,39 @@ class AccessibilityMonitor {
                     var rect = CGRect.zero
                     AXValueGetValue(bounds as! AXValue, .cgRect, &rect)
                     return rect
+                }
+            }
+        }
+        return nil
+    }
+
+    func getTextBeforeCaret() -> String? {
+        let systemWideElement = AXUIElementCreateSystemWide()
+        var focusedElement: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+        
+        if err == .success, let element = focusedElement {
+            let axElement = element as! AXUIElement
+            var selectedRangeRef: CFTypeRef?
+            
+            if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success {
+                let rangeValue = selectedRangeRef as! AXValue
+                var range = CFRange(location: 0, length: 0)
+                AXValueGetValue(rangeValue, .cfRange, &range)
+                
+                // Get up to 200 characters before the caret
+                let length = min(200, range.location)
+                let startLocation = range.location - length
+                let fetchRange = CFRange(location: startLocation, length: length)
+                
+                var fetchRangeValue = fetchRange
+                guard let axFetchRange = AXValueCreate(.cfRange, &fetchRangeValue) else { return nil }
+                
+                var stringRef: CFTypeRef?
+                if AXUIElementCopyParameterizedAttributeValue(axElement, kAXStringForRangeParameterizedAttribute as CFString, axFetchRange, &stringRef) == .success {
+                    if let string = stringRef as? String {
+                        return string
+                    }
                 }
             }
         }

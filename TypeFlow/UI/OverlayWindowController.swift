@@ -3,12 +3,13 @@ import SwiftUI
 
 class OverlayWindowController: NSWindowController {
     var overlayWindow: NSWindow!
+    private var hostingView: NSHostingView<Text>?
     
     init() {
         let text = Text(" ghost completion")
             .foregroundColor(Color(NSColor.secondaryLabelColor))
             .font(.system(size: 13, weight: .regular))
-        let hostingView = NSHostingView(rootView: text)
+        hostingView = NSHostingView(rootView: text)
         
         overlayWindow = NSWindow(
             contentRect: CGRect(x: 0, y: 0, width: 200, height: 20),
@@ -39,5 +40,12 @@ class OverlayWindowController: NSWindowController {
             let newFrame = CGRect(x: rect.origin.x + rect.width, y: flippedY, width: 200, height: 20)
             overlayWindow.setFrame(newFrame, display: true)
         }
+    }
+    
+    func updateText(_ newText: String) {
+        let text = Text(newText)
+            .foregroundColor(Color(NSColor.secondaryLabelColor))
+            .font(.system(size: 13, weight: .regular))
+        hostingView?.rootView = text
     }
 }

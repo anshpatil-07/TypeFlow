@@ -13,6 +13,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         accessibilityMonitor = AccessibilityMonitor { [weak self] rect in
             self?.overlayWindowController?.moveOverlay(to: rect)
         }
+        
+        if let monitor = accessibilityMonitor, let overlay = overlayWindowController {
+            CompletionManager.shared.setup(accessibilityMonitor: monitor, overlayWindowController: overlay)
+        }
+        
         accessibilityMonitor?.start()
     }
 }
