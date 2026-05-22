@@ -29,13 +29,13 @@
 
 ### Personalization (PERS)
 - [x] **PERS-01**: Custom AI instructions textarea with per-app overrides
-- [ ] **PERS-02**: Tone detection and profile management
-- [ ] **PERS-03**: Snippet auto-detection and manual shortcodes
+- [x] **PERS-02**: Tone detection and profile management
+- [x] **PERS-03**: Snippet auto-detection and manual shortcodes
 - [x] **PERS-04**: Custom hotkeys for alternative actions (rewrite, cycle tone)
 
 ### App Control (APP)
-- [ ] **APP-01**: Per-app disable/enable toggles
-- [ ] **APP-02**: Per-app and per-domain (browser) overrides (model, tone, length)
+- [x] **APP-01**: Per-app disable/enable toggles
+- [x] **APP-02**: Per-app and per-domain (browser) overrides (model, tone, length)
 
 ## v2 Requirements
 - Syncing custom instructions via iCloud (if privacy allows)
