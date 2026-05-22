@@ -20,6 +20,13 @@ class CompletionManager {
         // Clear existing completion immediately when user types
         clearCompletion()
         
+        if let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier {
+            if SettingsManager.shared.isAppExcluded(bundleId: bundleId) {
+                clearCompletion()
+                return
+            }
+        }
+        
         // Debounce generation
         debounceTimer?.invalidate()
         debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in

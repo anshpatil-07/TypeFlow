@@ -26,7 +26,8 @@ class AccessibilityMonitor {
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
                 if type == .keyDown {
                     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-                    if keyCode == 48 { // Tab
+                    if (keyCode == 48 && SettingsManager.shared.acceptShortcut == "Tab") ||
+                       (keyCode == 124 && SettingsManager.shared.acceptShortcut == "Right Arrow") {
                         if CompletionManager.shared.handleTabPressed() {
                             return nil // Consume the event
                         }
