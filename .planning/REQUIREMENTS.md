@@ -12,14 +12,14 @@
 
 ### AI & Inference (AI)
 - [x] **AI-01**: Local LLM inference via Apple MLX
-- [ ] **AI-02**: Fast model vs Quality model auto-switching based on context length
+- [x] **AI-02**: Fast model vs Quality model auto-switching based on context length
 - [x] **AI-03**: Zero network calls for inference
 
 ### Context Pipeline (CTX)
 - [x] **CTX-01**: Active text context via Accessibility API
-- [ ] **CTX-02**: Surrounding screen text via Vision framework OCR
-- [ ] **CTX-03**: Clipboard contents context
-- [ ] **CTX-04**: Date/time awareness injection
+- [x] **CTX-02**: Surrounding screen text via Vision framework OCR
+- [x] **CTX-03**: Clipboard contents context
+- [x] **CTX-04**: Date/time awareness injection
 
 ### Menu & Settings (UI)
 - [x] **UI-01**: Launch at login
