@@ -3,8 +3,8 @@
 ## v1 Requirements
 
 ### Core Injection (CORE)
-- [ ] **CORE-01**: System-wide text field monitoring via Accessibility API
-- [ ] **CORE-02**: Floating transparent overlay window anchored to caret coordinates
+- [x] **CORE-01**: System-wide text field monitoring via Accessibility API
+- [x] **CORE-02**: Floating transparent overlay window anchored to caret coordinates
 - [ ] **CORE-03**: Inject ghost-text inline
 - [ ] **CORE-04**: Accept next word with Tab
 - [ ] **CORE-05**: Accept full line with configurable hotkey
@@ -22,8 +22,8 @@
 - [ ] **CTX-04**: Date/time awareness injection
 
 ### Menu & Settings (UI)
-- [ ] **UI-01**: Launch at login
-- [ ] **UI-02**: Menu bar icon with quick actions (disable, words saved, settings)
+- [x] **UI-01**: Launch at login
+- [x] **UI-02**: Menu bar icon with quick actions (disable, words saved, settings)
 - [ ] **UI-03**: Multi-pane SwiftUI Settings window (Setup, General, Context, etc.)
 - [ ] **UI-04**: Suggestion delay and opacity sliders
 
