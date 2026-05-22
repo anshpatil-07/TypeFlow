@@ -1,0 +1,22 @@
+name: TypeFlow
+options:
+  bundleIdPrefix: com.cotyper
+targets:
+  TypeFlow:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: TypeFlow
+    info:
+      path: TypeFlow/Info.plist
+      properties:
+        LSUIElement: true
+        NSAccessibilityUsageDescription: "TypeFlow needs Accessibility access to detect typing and inject completions."
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+    entitlements:
+      path: TypeFlow/TypeFlow.entitlements
+      properties:
+        com.apple.security.app-sandbox: false
+        com.apple.security.get-task-allow: true
