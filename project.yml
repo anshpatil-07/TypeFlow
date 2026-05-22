@@ -1,6 +1,10 @@
 name: TypeFlow
 options:
   bundleIdPrefix: com.cotyper
+packages:
+  mlx-swift:
+    url: https://github.com/ml-explore/mlx-swift
+    from: 0.12.0
 targets:
   TypeFlow:
     type: application
@@ -8,6 +12,11 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: TypeFlow
+    dependencies:
+      - package: mlx-swift
+        product: MLX
+      - package: mlx-swift
+        product: MLXRandom
     info:
       path: TypeFlow/Info.plist
       properties:
