@@ -45,4 +45,26 @@
 - Non-Apple Silicon Macs (requires MLX)
 
 ## Traceability
-*(To be filled by roadmap)*
+- **CORE-01** -> Phase 1
+- **CORE-02** -> Phase 1
+- **CORE-03** -> Phase 2
+- **CORE-04** -> Phase 2
+- **CORE-05** -> Phase 4
+- **CORE-06** -> Phase 2
+- **AI-01** -> Phase 2
+- **AI-02** -> Phase 3
+- **AI-03** -> Phase 2
+- **CTX-01** -> Phase 2
+- **CTX-02** -> Phase 3
+- **CTX-03** -> Phase 3
+- **CTX-04** -> Phase 3
+- **UI-01** -> Phase 1
+- **UI-02** -> Phase 1
+- **UI-03** -> Phase 4
+- **UI-04** -> Phase 4
+- **PERS-01** -> Phase 4
+- **PERS-02** -> Phase 5
+- **PERS-03** -> Phase 5
+- **PERS-04** -> Phase 4
+- **APP-01** -> Phase 5
+- **APP-02** -> Phase 5
