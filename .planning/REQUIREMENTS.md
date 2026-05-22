@@ -21,4 +21,8 @@
 - Non-Apple Silicon Macs — Requires MLX and Neural Engine for on-device performance (macOS 14+ Apple Silicon only)
 
 ## Traceability
-*(To be populated by roadmap)*
+- **BUGS-01** -> Phase 6
+- **BUGS-02** -> Phase 6
+- **MODELS-01** -> Phase 7
+- **MODELS-02** -> Phase 7
+- **MODELS-03** -> Phase 7

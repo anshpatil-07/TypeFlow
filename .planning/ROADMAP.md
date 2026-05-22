@@ -26,3 +26,20 @@
 | 3. Advanced Context Pipeline         | v1.0      | 1/1            | Complete    | 2026-05-23 |
 | 4. Settings & Personalization        | v1.0      | 1/1            | Complete    | 2026-05-23 |
 | 5. Tone, Snippets & App Overrides    | v1.0      | 1/1            | Complete    | 2026-05-23 |
+| 6. Critical Bug Fixes                | v1.1      | 0/1            | Pending     |            |
+| 7. Model UI & Downloads              | v1.1      | 0/1            | Pending     |            |
+
+## Phase 6: Critical Bug Fixes
+**Goal**: Fix accessibility loops and injection monitor bugs.
+**Requirements**: BUGS-01, BUGS-02
+**Success Criteria**:
+- App launches without prompting for Accessibility if already granted.
+- Ghost text injects correctly into standard text fields using CGEvent.
+
+## Phase 7: Model UI & Downloads
+**Goal**: Add model management UI for MLX downloads and activation.
+**Requirements**: MODELS-01, MODELS-02, MODELS-03
+**Success Criteria**:
+- Model Management tab exists in Settings.
+- User can download Gemma 4 E2B and Qwen 2.5 1.5B with progress indication.
+- User can activate a downloaded model.
