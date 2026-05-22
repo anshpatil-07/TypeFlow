@@ -1,0 +1,13 @@
+# Xcode
+build/
+*.pbxproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+.swiftpm/
+
+# OS X
+.DS_Store
+
+# xcodegen
+TypeFlow.xcodeproj/
