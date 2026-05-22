@@ -37,6 +37,25 @@ class CompletionManager {
     private func triggerGeneration() {
         guard let activeLine = accessibilityMonitor?.getTextBeforeCaret() else { return }
         
+        let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
+        let effectiveConfig = SettingsManager.shared.getEffectiveConfig(for: bundleId)
+        
+        if !effectiveConfig.isEnabled { return }
+        
+        // Snippets check
+        let snippets = SettingsManager.shared.getSnippets()
+        for (key, value) in snippets {
+            if activeLine.hasSuffix(key) {
+                // If it ends with the snippet, we can inject directly.
+                // Wait, if it ends with snippet, we might want to replace it. For now, just generate the value as completion.
+                DispatchQueue.main.async {
+                    self.currentCompletion = value
+                    self.overlayWindowController?.updateText(value)
+                }
+                return
+            }
+        }
+        
         var aggregatedContext = ContextAggregator.shared.gatherContext(activeLine: activeLine)
         let fullText = accessibilityMonitor?.getFullFieldText()
         
@@ -47,7 +66,7 @@ class CompletionManager {
             activeLineText: aggregatedContext.activeLineText
         )
         
-        let prompt = PromptBuilder.shared.buildPrompt(context: aggregatedContext)
+        let prompt = PromptBuilder.shared.buildPrompt(context: aggregatedContext, tone: effectiveConfig.tone, instructions: effectiveConfig.instructions)
         
         Task {
             let completion = await LLMEngine.shared.generateCompletion(context: prompt)

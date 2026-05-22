@@ -13,11 +13,11 @@ struct SettingsView: View {
                 }
                 .pickerStyle(SegmentedPickerStyle())
                 
-                VStack(alignment: .leading) {
-                    Text("Excluded Apps (Bundle Identifiers, comma separated):")
-                    TextEditor(text: $settings.excludedApps)
-                        .frame(height: 100)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.5)))
+                Picker("Completion Tone:", selection: $settings.tone) {
+                    Text("Neutral").tag("Neutral")
+                    Text("Professional").tag("Professional")
+                    Text("Casual").tag("Casual")
+                    Text("Concise").tag("Concise")
                 }
                 .padding(.top)
             }
@@ -44,7 +44,27 @@ struct SettingsView: View {
             .tabItem {
                 Label("Persona", systemImage: "person.text.rectangle")
             }
+            
+            // Snippets Tab
+            Form {
+                Text("Snippets UI Placeholder")
+                // A complete list/add/remove UI would go here, updating SettingsManager.shared.saveSnippets()
+            }
+            .padding()
+            .tabItem {
+                Label("Snippets", systemImage: "text.badge.plus")
+            }
+            
+            // Apps Tab
+            Form {
+                Text("App Overrides UI Placeholder")
+                // A complete list/add/remove UI would go here, updating SettingsManager.shared.saveAppConfigs()
+            }
+            .padding()
+            .tabItem {
+                Label("Apps", systemImage: "app.badge")
+            }
         }
-        .frame(width: 450, height: 300)
+        .frame(width: 500, height: 350)
     }
 }
