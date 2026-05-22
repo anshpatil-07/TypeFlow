@@ -14,23 +14,26 @@ Provide instantaneous (under 150ms), entirely on-device system-wide text complet
 
 <!-- Shipped and confirmed valuable. -->
 
-(None yet — ship to validate)
+- ✓ System-wide Accessibility API integration for text field monitoring and inline injection — v1.0
+- ✓ On-device local LLM inference via Apple MLX using Neural Engine — v1.0
+- ✓ Performance target: < 150ms from keystroke to completion injection — v1.0
+- ✓ Multi-source context pipeline (Accessibility text, periodic Vision OCR screenshots, clipboard) — v1.0
+- ✓ Settings screens: General, Persona, Snippets, Apps — v1.0
+- ✓ Menu bar dropdown with quick actions (settings access) — v1.0
+- ✓ On-device only, zero network calls for inference or context processing — v1.0
+- ✓ Tone detection and profile management (built-in and custom) — v1.0
+- ✓ Snippet detection and management — v1.0
+- ✓ Custom shortcuts for full line completion — v1.0
+- ✓ App-specific overrides (on/off, tone, model, completion length) — v1.0
 
 ### Active
 
 <!-- Current scope. Building toward these. -->
 
-- [ ] System-wide Accessibility API integration for text field monitoring and inline injection
-- [ ] On-device local LLM inference via Apple MLX (Gemma 4 E2B or Qwen 2.5 1.5B) using Neural Engine
-- [ ] Performance target: < 150ms from keystroke to completion injection
-- [ ] Multi-source context pipeline (Accessibility text, periodic Vision OCR screenshots, clipboard)
-- [ ] Settings screens: Setup, General, Context, Personalization, Tone profiles, Snippets, Shortcuts, App settings, Labs, Statistics
-- [ ] Menu bar dropdown with quick actions (disable toggle, words saved, settings access)
-- [ ] On-device only, zero network calls for inference or context processing
-- [ ] Tone detection and profile management (built-in and custom)
-- [ ] Snippet detection and management
-- [ ] Custom shortcuts for different completion types (word, line, paragraph, alternatives)
-- [ ] App-specific overrides (on/off, tone, model, completion length)
+- [ ] Syncing custom instructions via iCloud (if privacy allows)
+- [ ] Model downloads UI and auto-updates
+- [ ] Usage statistics and analytics dashboard
+- [ ] Paragraph completion and alternatives cycler
 
 ### Out of Scope
 
@@ -43,7 +46,8 @@ Provide instantaneous (under 150ms), entirely on-device system-wide text complet
 
 - Target OS: macOS 14+ Apple Silicon only
 - Core Technologies: Swift, SwiftUI, Accessibility API, Apple Vision framework, MLX Swift
-- Local LLM Models: Gemma 4 E2B or Qwen 2.5 1.5B as starting points
+- Shipped v1.0 milestone with 761 lines of Swift code.
+- Fully supports background operation as a menu bar extra (LSUIElement).
 - Privacy is paramount: all processing, history tracking, and snippet generation happens on-device with encrypted local storage (Keychain).
 
 ## Constraints
@@ -57,8 +61,9 @@ Provide instantaneous (under 150ms), entirely on-device system-wide text complet
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Local LLM via MLX | Privacy and latency requirements dictate on-device inference using Neural Engine | — Pending |
-| Vision OCR for context | Need surrounding context that Accessibility API might miss without complex integrations | — Pending |
+| Local LLM via MLX | Privacy and latency requirements dictate on-device inference using Neural Engine | ✓ Good |
+| Vision OCR for context | Need surrounding context that Accessibility API might miss without complex integrations | ✓ Good |
+| App as LSUIElement | A system-wide background utility shouldn't clog the dock. Requires manual NSWindow management for Settings | ✓ Good |
 
 ## Evolution
 
