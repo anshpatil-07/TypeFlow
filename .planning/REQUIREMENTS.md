@@ -5,18 +5,18 @@
 ### Core Injection (CORE)
 - [x] **CORE-01**: System-wide text field monitoring via Accessibility API
 - [x] **CORE-02**: Floating transparent overlay window anchored to caret coordinates
-- [ ] **CORE-03**: Inject ghost-text inline
-- [ ] **CORE-04**: Accept next word with Tab
+- [x] **CORE-03**: Inject ghost-text inline
+- [x] **CORE-04**: Accept next word with Tab
 - [ ] **CORE-05**: Accept full line with configurable hotkey
-- [ ] **CORE-06**: Sub-150ms total completion cycle time
+- [x] **CORE-06**: Sub-150ms total completion cycle time
 
 ### AI & Inference (AI)
-- [ ] **AI-01**: Local LLM inference via Apple MLX
+- [x] **AI-01**: Local LLM inference via Apple MLX
 - [ ] **AI-02**: Fast model vs Quality model auto-switching based on context length
-- [ ] **AI-03**: Zero network calls for inference
+- [x] **AI-03**: Zero network calls for inference
 
 ### Context Pipeline (CTX)
-- [ ] **CTX-01**: Active text context via Accessibility API
+- [x] **CTX-01**: Active text context via Accessibility API
 - [ ] **CTX-02**: Surrounding screen text via Vision framework OCR
 - [ ] **CTX-03**: Clipboard contents context
 - [ ] **CTX-04**: Date/time awareness injection
