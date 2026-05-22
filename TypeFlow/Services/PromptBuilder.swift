@@ -3,12 +3,12 @@ class PromptBuilder {
     
     private init() {}
     
-    func buildPrompt(context: AggregatedContext) -> String {
+    func buildPrompt(context: AggregatedContext, tone: String, instructions: String) -> String {
         var prompt = "You are a system-wide macOS autocomplete AI.\n"
+        prompt += "Adopt a \(tone) tone.\n"
         
-        let customInstructions = SettingsManager.shared.customInstructions
-        if !customInstructions.isEmpty {
-            prompt += "<custom_instructions>\n\(customInstructions)\n</custom_instructions>\n"
+        if !instructions.isEmpty {
+            prompt += "<custom_instructions>\n\(instructions)\n</custom_instructions>\n"
         }
         
         if let clipboard = context.clipboardText, !clipboard.isEmpty {
