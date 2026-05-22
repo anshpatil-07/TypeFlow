@@ -7,7 +7,7 @@
 - [x] **CORE-02**: Floating transparent overlay window anchored to caret coordinates
 - [x] **CORE-03**: Inject ghost-text inline
 - [x] **CORE-04**: Accept next word with Tab
-- [ ] **CORE-05**: Accept full line with configurable hotkey
+- [x] **CORE-05**: Accept full line with configurable hotkey
 - [x] **CORE-06**: Sub-150ms total completion cycle time
 
 ### AI & Inference (AI)
@@ -24,14 +24,14 @@
 ### Menu & Settings (UI)
 - [x] **UI-01**: Launch at login
 - [x] **UI-02**: Menu bar icon with quick actions (disable, words saved, settings)
-- [ ] **UI-03**: Multi-pane SwiftUI Settings window (Setup, General, Context, etc.)
-- [ ] **UI-04**: Suggestion delay and opacity sliders
+- [x] **UI-03**: Multi-pane SwiftUI Settings window (Setup, General, Context, etc.)
+- [x] **UI-04**: Suggestion delay and opacity sliders
 
 ### Personalization (PERS)
-- [ ] **PERS-01**: Custom AI instructions textarea with per-app overrides
+- [x] **PERS-01**: Custom AI instructions textarea with per-app overrides
 - [ ] **PERS-02**: Tone detection and profile management
 - [ ] **PERS-03**: Snippet auto-detection and manual shortcodes
-- [ ] **PERS-04**: Custom hotkeys for alternative actions (rewrite, cycle tone)
+- [x] **PERS-04**: Custom hotkeys for alternative actions (rewrite, cycle tone)
 
 ### App Control (APP)
 - [ ] **APP-01**: Per-app disable/enable toggles
