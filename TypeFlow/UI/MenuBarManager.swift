@@ -41,16 +41,17 @@ class MenuBarManager {
     @objc func openSettings() {
         if settingsWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 500, height: 400),
+                contentRect: NSRect(x: 0, y: 0, width: 520, height: 400),
                 styleMask: [.titled, .closable, .miniaturizable],
                 backing: .buffered, defer: false)
             window.title = "TypeFlow Settings"
-            window.contentView = NSHostingView(rootView: SettingsView())
-            window.center()
             window.isReleasedWhenClosed = false
+            window.center()
             self.settingsWindow = window
         }
         
+        // Always refresh the content view to pick up any code changes
+        settingsWindow?.contentView = NSHostingView(rootView: SettingsView())
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

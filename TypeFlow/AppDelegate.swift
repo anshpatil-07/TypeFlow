@@ -18,6 +18,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             CompletionManager.shared.setup(accessibilityMonitor: monitor, overlayWindowController: overlay)
         }
         
-        accessibilityMonitor?.start()
+        // Delay start by 1 second: AXIsProcessTrusted() can return false immediately
+        // on launch even when permission IS already granted in System Settings,
+        // because the sandbox trust status hasn't propagated yet.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.accessibilityMonitor?.startWithRetry()
+        }
     }
 }

@@ -22,9 +22,11 @@ class OverlayWindowController: NSWindowController {
         overlayWindow.ignoresMouseEvents = true
         overlayWindow.isOpaque = false
         overlayWindow.contentView = hostingView
+        overlayWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
         super.init(window: overlayWindow)
-        overlayWindow.makeKeyAndOrderFront(nil)
+        // Use orderFront (not makeKeyAndOrderFront) so we never steal keyboard focus
+        overlayWindow.orderFront(nil)
     }
     
     required init?(coder: NSCoder) {

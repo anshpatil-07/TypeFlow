@@ -4,17 +4,42 @@ class AccessibilityMonitor {
     var eventTap: CFMachPort?
     var runLoopSource: CFRunLoopSource?
     var onCaretMoved: ((CGRect) -> Void)?
+    private var retryTimer: Timer?
     
     init(onCaretMoved: @escaping (CGRect) -> Void) {
         self.onCaretMoved = onCaretMoved
     }
     
-    func start() {
-        if !AXIsProcessTrusted() {
-            print("Accessibility permissions not granted. Waiting for user to grant them in Settings.")
-            return
-        }
+    /// Called once at launch (after 1-second delay). Retries every 2 seconds
+    /// until Accessibility is trusted AND the event tap is successfully created.
+    func startWithRetry() {
+        guard !isRunning else { return }
         
+        if tryStart() {
+            print("[TypeFlow] Accessibility monitor started successfully.")
+        } else {
+            print("[TypeFlow] Accessibility not ready yet, retrying in 2s...")
+            retryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+                guard let self = self else { timer.invalidate(); return }
+                if self.tryStart() {
+                    print("[TypeFlow] Accessibility monitor started (retry succeeded).")
+                    timer.invalidate()
+                    self.retryTimer = nil
+                }
+            }
+        }
+    }
+    
+    private var isRunning: Bool { eventTap != nil }
+    
+    @discardableResult
+    private func tryStart() -> Bool {
+        guard AXIsProcessTrusted() else { return false }
+        start()
+        return eventTap != nil
+    }
+    
+    func start() {
         let eventMask = (1 << CGEventType.keyDown.rawValue)
         eventTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
