@@ -1,5 +1,5 @@
 ---
-status: partial
+status: diagnosed
 phase: 07-model-ui-downloads
 source:
   - 01-SUMMARY.md
@@ -49,6 +49,10 @@ skipped: 2
   reason: "User reported: fail — there is no Models tab visible in the Settings window at all. The tab does not exist in the UI."
   severity: major
   test: 1
-  artifacts: []
-  missing: []
+  root_cause: "Placing a `List` inside a `Form` in macOS SwiftUI causes the `List` to collapse to 0 height or fail to render entirely due to nested scroll views, making the entire Models tab blank/missing."
+  artifacts:
+    - path: "TypeFlow/UI/SettingsView.swift"
+      issue: "`List` is nested inside `Form` which breaks the layout on macOS."
+  missing:
+    - "Remove `List` and use `ForEach` directly inside `Form` OR replace `Form` with a `List` for the entire tab."
 
