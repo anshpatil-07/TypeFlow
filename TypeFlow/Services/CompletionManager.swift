@@ -18,6 +18,7 @@ class CompletionManager: @unchecked Sendable {
     }
     
     func onTextChanged() {
+        print("[TypeFlow-Debug] onTextChanged called")
         currentGenerationTask?.cancel()
         currentGenerationTask = nil
         
@@ -34,20 +35,19 @@ class CompletionManager: @unchecked Sendable {
         // Debounce generation
         debounceTimer?.invalidate()
         debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+            print("[TypeFlow-Debug] Debounce timer fired!")
             self?.triggerGeneration()
         }
     }
     
     private func triggerGeneration() {
-        print("[TypeFlow] triggerGeneration called")
+        print("[TypeFlow-Debug] triggerGeneration started")
         let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
-        print("[TypeFlow] Active line: \(activeLine)")
         
         let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
         let effectiveConfig = SettingsManager.shared.getEffectiveConfig(for: bundleId)
         
         if !effectiveConfig.isEnabled {
-            print("[TypeFlow] App \(bundleId) is excluded")
             return
         }
         
@@ -55,7 +55,6 @@ class CompletionManager: @unchecked Sendable {
         let snippets = SettingsManager.shared.getSnippets()
         for (key, value) in snippets {
             if activeLine.hasSuffix(key) {
-                print("[TypeFlow] Snippet match for key: \(key)")
                 DispatchQueue.main.async {
                     self.currentCompletion = value
                     self.overlayWindowController?.updateText(value)
@@ -75,12 +74,15 @@ class CompletionManager: @unchecked Sendable {
         )
         
         let prompt = PromptBuilder.shared.buildPrompt(context: aggregatedContext, tone: effectiveConfig.tone, instructions: effectiveConfig.instructions)
-        print("[TypeFlow] Dispatching LLM generation task...")
+        print("[TypeFlow-Debug] Dispatching LLM generation task. Prompt sent to model:\n\(prompt)")
         
         currentGenerationTask = Task {
             let completion = await LLMEngine.shared.generateCompletion(context: prompt)
-            if Task.isCancelled { return }
-            print("[TypeFlow] Got completion: \(completion)")
+            print("[TypeFlow-Debug] Raw model output: '\(completion)'")
+            if Task.isCancelled {
+                print("[TypeFlow-Debug] Task was cancelled, ignoring output.")
+                return 
+            }
             
             var processedCompletion = completion.trimmingCharacters(in: .whitespacesAndNewlines)
             
@@ -100,14 +102,21 @@ class CompletionManager: @unchecked Sendable {
                 processedCompletion = String(processedCompletion.dropFirst(overlapLength))
             }
             
+            print("[TypeFlow-Debug] Processed completion (after stripping \(overlapLength) chars overlap): '\(processedCompletion)'")
+            
             DispatchQueue.main.async {
                 self.currentCompletion = processedCompletion
                 if !processedCompletion.isEmpty {
                     if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
+                        print("[TypeFlow-Debug] Telling overlay to move to caret rect: \(rect)")
                         self.overlayWindowController?.moveOverlay(to: rect)
+                    } else {
+                        print("[TypeFlow-Debug] Caret rect was nil, NOT moving overlay!")
                     }
+                    print("[TypeFlow-Debug] Telling overlay to update text to: '\(processedCompletion)'")
                     self.overlayWindowController?.updateText(processedCompletion)
                 } else {
+                    print("[TypeFlow-Debug] Processed completion was empty, telling overlay to hide (empty string).")
                     self.overlayWindowController?.updateText("")
                 }
             }

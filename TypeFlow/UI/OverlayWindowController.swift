@@ -79,16 +79,20 @@ class OverlayWindowController: NSWindowController {
             width: textWidth,
             height: 24
         )
+        print("[TypeFlow-Debug] OverlayWindowController rendering window at frame: \(newFrame) with text: '\(completionModel.text)'")
         overlayWindow.setFrame(newFrame, display: true)
     }
     
     func updateText(_ newText: String) {
+        print("[TypeFlow-Debug] OverlayWindowController updateText received: '\(newText)'")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.completionModel.text = newText
             if newText.isEmpty {
+                print("[TypeFlow-Debug] Hiding overlay window")
                 self.overlayWindow.orderOut(nil)
             } else {
+                print("[TypeFlow-Debug] Showing overlay window")
                 self.repositionWindow()
                 self.overlayWindow.orderFront(nil)
             }
