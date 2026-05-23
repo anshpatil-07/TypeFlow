@@ -27,7 +27,7 @@
 | 4. Settings & Personalization        | v1.0      | 1/1            | Complete    | 2026-05-23 |
 | 5. Tone, Snippets & App Overrides    | v1.0      | 1/1            | Complete    | 2026-05-23 |
 | 6. Critical Bug Fixes                | v1.1      | 1/1 | Complete    | 2026-05-23 |
-| 7. Model UI & Downloads              | v1.1      | 1/1 | Complete    | 2026-05-23 |
+| 7. Model UI & Downloads              | v1.1      | 2/2 | Complete    | 2026-05-23 |
 
 ## Phase 6: Critical Bug Fixes
 **Goal**: Fix accessibility loops and injection monitor bugs.
