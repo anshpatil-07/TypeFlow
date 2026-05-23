@@ -4,28 +4,38 @@ class PromptBuilder {
     private init() {}
     
     func buildPrompt(context: AggregatedContext, tone: String, instructions: String) -> String {
-        var prompt = "You are a system-wide macOS autocomplete AI.\n"
-        prompt += "Adopt a \(tone) tone.\n"
+        var prompt = ""
+        prompt += "<instruction>\n"
+        prompt += "You are a fast, system-wide macOS autocomplete AI.\n"
+        prompt += "Your ONLY task is to predict the next 2-5 words the user will type.\n"
+        prompt += "CRITICAL RULE: NEVER repeat the input text. ONLY output the immediate continuation.\n"
+        prompt += "</instruction>\n\n"
         
+        prompt += "<examples>\n"
+        prompt += "Input: The quick brown \n"
+        prompt += "Continuation: fox jumps over\n\n"
+        prompt += "Input: func calculateTotal\n"
+        prompt += "Continuation: (items: [Item]) -> Double {\n"
+        prompt += "</examples>\n\n"
+        
+        prompt += "<context>\n"
+        prompt += "Tone: \(tone)\n"
         if !instructions.isEmpty {
-            prompt += "<custom_instructions>\n\(instructions)\n</custom_instructions>\n"
+            prompt += "Custom rules: \(instructions)\n"
         }
-        
         if let clipboard = context.clipboardText, !clipboard.isEmpty {
-            prompt += "<clipboard>\n\(clipboard)\n</clipboard>\n"
+            prompt += "Clipboard: \(clipboard)\n"
         }
-        
         if let screen = context.screenText, !screen.isEmpty {
-            prompt += "<screen_context>\n\(screen)\n</screen_context>\n"
+            prompt += "Screen: \(screen)\n"
         }
-        
         if let document = context.fullFieldText, !document.isEmpty {
-            prompt += "<document>\n\(document)\n</document>\n"
+            prompt += "Surrounding text: \(document)\n"
         }
+        prompt += "</context>\n\n"
         
-        prompt += "\nComplete the following text seamlessly. Output ONLY the completion, no explanations.\n"
-        prompt += "Text: \(context.activeLineText)"
-        
+        prompt += "Input: \(context.activeLineText)\n"
+        prompt += "Continuation: "
         return prompt
     }
 }

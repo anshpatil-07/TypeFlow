@@ -2,14 +2,16 @@ import Cocoa
 
 class TextInjector {
     static let shared = TextInjector()
+    var isInjecting = false
     
     private init() {}
     
     func inject(text: String) {
-        guard let source = CGEventSource(stateID: .hidSystemState) else { return }
+        guard let source = CGEventSource(stateID: .combinedSessionState) else { return }
         
-        // We will type out the characters using keyboardSetUnicodeString
-        // To do this, we create a dummy keyDown and keyUp event, then set its unicode value
+        isInjecting = true
+        defer { isInjecting = false }
+        
         let utf16Chars = Array(text.utf16)
         
         for char in utf16Chars {
@@ -18,13 +20,13 @@ class TextInjector {
             // Create KeyDown event
             if let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
                 keyDownEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
-                keyDownEvent.post(tap: .cghidEventTap)
+                keyDownEvent.post(tap: .cgSessionEventTap)
             }
             
             // Create KeyUp event
             if let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
                 keyUpEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
-                keyUpEvent.post(tap: .cghidEventTap)
+                keyUpEvent.post(tap: .cgSessionEventTap)
             }
         }
     }

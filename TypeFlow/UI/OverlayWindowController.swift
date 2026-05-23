@@ -1,18 +1,41 @@
 import Cocoa
 import SwiftUI
 
+class CompletionModel: ObservableObject {
+    @Published var text: String = ""
+}
+
+struct CompletionOverlayView: View {
+    @ObservedObject var model: CompletionModel
+    
+    var body: some View {
+        if model.text.isEmpty {
+            Color.clear
+        } else {
+            Text(model.text)
+                .foregroundColor(Color.secondary)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color(NSColor.windowBackgroundColor).opacity(0.9))
+                )
+                .font(.system(size: 13, weight: .regular))
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        }
+    }
+}
+
 class OverlayWindowController: NSWindowController {
     var overlayWindow: NSWindow!
-    private var hostingView: NSHostingView<Text>?
+    private let completionModel = CompletionModel()
+    private var lastCaretRect = CGRect.zero
     
     init() {
-        let text = Text(" ghost completion")
-            .foregroundColor(Color(NSColor.secondaryLabelColor))
-            .font(.system(size: 13, weight: .regular))
-        hostingView = NSHostingView(rootView: text)
+        let hostingView = NSHostingView(rootView: CompletionOverlayView(model: completionModel))
         
         overlayWindow = NSWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 200, height: 20),
+            contentRect: CGRect(x: 0, y: 0, width: 200, height: 24),
             styleMask: .borderless,
             backing: .buffered,
             defer: false
@@ -25,8 +48,6 @@ class OverlayWindowController: NSWindowController {
         overlayWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
         super.init(window: overlayWindow)
-        // Use orderFront (not makeKeyAndOrderFront) so we never steal keyboard focus
-        overlayWindow.orderFront(nil)
     }
     
     required init?(coder: NSCoder) {
@@ -34,20 +55,43 @@ class OverlayWindowController: NSWindowController {
     }
     
     func moveOverlay(to rect: CGRect) {
+        lastCaretRect = rect
+        repositionWindow()
+    }
+    
+    private func repositionWindow() {
+        guard !completionModel.text.isEmpty else { return }
+        
+        let font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        let attributes = [NSAttributedString.Key.font: font]
+        let size = (completionModel.text as NSString).size(withAttributes: attributes)
+        let textWidth = size.width + 12 // text width + horizontal padding
+        
         // macOS screen coordinates: (0,0) is bottom-left, but AX returns coordinates from top-left.
-        // We need to flip the y coordinate.
-        if let screen = NSScreen.main {
-            let flippedY = screen.frame.height - rect.origin.y - rect.height
-            // Move it slightly to the right of the caret
-            let newFrame = CGRect(x: rect.origin.x + rect.width, y: flippedY, width: 200, height: 20)
-            overlayWindow.setFrame(newFrame, display: true)
-        }
+        // We need to flip the y coordinate based on the main display bounds.
+        let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
+        let flippedY = displayHeight - lastCaretRect.origin.y - lastCaretRect.height
+        
+        // Move it slightly to the right of the caret (approx 2 pixels) and size it exactly to fit the text
+        let newFrame = CGRect(
+            x: lastCaretRect.origin.x + lastCaretRect.width + 2,
+            y: flippedY,
+            width: textWidth,
+            height: 24
+        )
+        overlayWindow.setFrame(newFrame, display: true)
     }
     
     func updateText(_ newText: String) {
-        let text = Text(newText)
-            .foregroundColor(Color(NSColor.secondaryLabelColor))
-            .font(.system(size: 13, weight: .regular))
-        hostingView?.rootView = text
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.completionModel.text = newText
+            if newText.isEmpty {
+                self.overlayWindow.orderOut(nil)
+            } else {
+                self.repositionWindow()
+                self.overlayWindow.orderFront(nil)
+            }
+        }
     }
 }
