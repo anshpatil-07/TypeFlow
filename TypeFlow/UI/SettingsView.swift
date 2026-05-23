@@ -29,7 +29,7 @@ struct SettingsView: View {
             
             // Models Tab
             Form {
-                List(modelManager.models) { model in
+                ForEach(modelManager.models) { model in
                     HStack {
                         Text(model.name)
                             .font(.headline)
