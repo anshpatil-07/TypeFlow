@@ -11,33 +11,41 @@ class AccessibilityMonitor {
     }
     
     /// Called once at launch (after 1-second delay). Retries every 2 seconds
-    /// until Accessibility is trusted AND the event tap is successfully created.
+    /// until the CGEvent tap is successfully created.
+    ///
+    /// WHY: AXIsProcessTrusted() is unreliable — it can return false after a
+    /// fresh build even when permission IS granted in System Settings (the binary
+    /// path changed so macOS revoked the cached trust). CGEvent.tapCreate is the
+    /// definitive OS-level permission check: if it returns non-nil, we're trusted.
     func startWithRetry() {
         guard !isRunning else { return }
         
-        if tryStart() {
+        // Attempt tap creation directly — no pre-check via AXIsProcessTrusted()
+        start()
+        
+        if isRunning {
             print("[TypeFlow] Accessibility monitor started successfully.")
-        } else {
-            print("[TypeFlow] Accessibility not ready yet, retrying in 2s...")
-            retryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
-                guard let self = self else { timer.invalidate(); return }
-                if self.tryStart() {
-                    print("[TypeFlow] Accessibility monitor started (retry succeeded).")
-                    timer.invalidate()
-                    self.retryTimer = nil
-                }
+            return
+        }
+        
+        // Tap creation failed = permission actually denied.
+        // Show the system prompt once, then poll every 2 seconds.
+        print("[TypeFlow] Accessibility permission required. Showing system prompt...")
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        AXIsProcessTrustedWithOptions(options as CFDictionary)
+        
+        retryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+            guard let self = self else { timer.invalidate(); return }
+            self.start()
+            if self.isRunning {
+                print("[TypeFlow] Accessibility monitor started after permission grant.")
+                timer.invalidate()
+                self.retryTimer = nil
             }
         }
     }
     
     private var isRunning: Bool { eventTap != nil }
-    
-    @discardableResult
-    private func tryStart() -> Bool {
-        guard AXIsProcessTrusted() else { return false }
-        start()
-        return eventTap != nil
-    }
     
     func start() {
         let eventMask = (1 << CGEventType.keyDown.rawValue)
