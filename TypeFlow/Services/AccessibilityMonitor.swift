@@ -20,15 +20,29 @@ class AccessibilityMonitor {
     func startWithRetry() {
         guard !isRunning else { return }
         
-        // Attempt tap creation directly — no pre-check via AXIsProcessTrusted()
-        start()
-        
-        if isRunning {
-            print("[TypeFlow] Accessibility monitor started successfully.")
+        let isAlreadyTrusted = AXIsProcessTrusted()
+        if isAlreadyTrusted {
+            print("[TypeFlow] Accessibility is already trusted. Attempting to start event tap...")
+            start()
+            if isRunning {
+                print("[TypeFlow] Accessibility monitor started successfully.")
+                return
+            }
+            
+            print("[TypeFlow] Event tap creation failed despite trust status. Starting retry loop without prompt...")
+            retryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+                guard let self = self else { timer.invalidate(); return }
+                self.start()
+                if self.isRunning {
+                    print("[TypeFlow] Accessibility monitor started successfully after retry.")
+                    timer.invalidate()
+                    self.retryTimer = nil
+                }
+            }
             return
         }
         
-        // Tap creation failed = permission actually denied.
+        // Tap creation failed / not trusted = permission actually denied.
         // Show the system prompt once, then poll every 2 seconds.
         print("[TypeFlow] Accessibility permission required. Showing system prompt...")
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
@@ -55,12 +69,22 @@ class AccessibilityMonitor {
             options: .defaultTap,
             eventsOfInterest: CGEventMask(eventMask),
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                if TextInjector.shared.isInjecting {
+                    return Unmanaged.passRetained(event)
+                }
+                
                 if type == .keyDown {
                     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                    print("[TypeFlow] keyDown detected: keyCode=\(keyCode)")
+                    
                     if (keyCode == 48 && SettingsManager.shared.acceptShortcut == "Tab") ||
                        (keyCode == 124 && SettingsManager.shared.acceptShortcut == "Right Arrow") {
+                        print("[TypeFlow] Trigger key pressed (Tab/Right)")
                         if CompletionManager.shared.handleTabPressed() {
+                            print("[TypeFlow] Tab consumed by CompletionManager")
                             return nil // Consume the event
+                        } else {
+                            print("[TypeFlow] Tab not consumed")
                         }
                     } else {
                         // After typing, try to find the caret
@@ -68,8 +92,14 @@ class AccessibilityMonitor {
                             let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
                             let obj = unmanaged.takeUnretainedValue()
                             DispatchQueue.main.async {
+                                print("[TypeFlow] Checking caret rect...")
                                 if let rect = obj.getCurrentCaretRect() {
+                                    print("[TypeFlow] Caret rect found: \(rect)")
                                     obj.onCaretMoved?(rect)
+                                    CompletionManager.shared.onTextChanged()
+                                } else {
+                                    print("[TypeFlow] Caret rect not found! Calling onTextChanged anyway for debugging.")
+                                    // For debugging, call it anyway
                                     CompletionManager.shared.onTextChanged()
                                 }
                             }
@@ -98,19 +128,70 @@ class AccessibilityMonitor {
         var focusedElement: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
         
-        if err == .success, let element = focusedElement {
-            let axElement = element as! AXUIElement
-            var selectedRange: CFTypeRef?
-            if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &selectedRange) == .success {
-                let range = selectedRange as! AXValue
-                var bounds: CFTypeRef?
-                if AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, range, &bounds) == .success {
-                    var rect = CGRect.zero
-                    AXValueGetValue(bounds as! AXValue, .cgRect, &rect)
+        guard err == .success, let element = focusedElement else { return nil }
+        let axElement = element as! AXUIElement
+        
+        var selectedRangeRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success {
+            let rangeValue = selectedRangeRef as! AXValue
+            var range = CFRange(location: 0, length: 0)
+            AXValueGetValue(rangeValue, .cfRange, &range)
+            
+            // Try getting the bounds of the range directly
+            var bounds: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, rangeValue, &bounds) == .success {
+                var rect = CGRect.zero
+                AXValueGetValue(bounds as! AXValue, .cgRect, &rect)
+                if rect.width > 0 || rect.height > 0 {
                     return rect
                 }
             }
+            
+            // If the range length is 0 (caret only), try to query range of length 1 around it
+            if range.length == 0 {
+                // Try char before caret
+                if range.location > 0 {
+                    var fallbackRange = CFRange(location: range.location - 1, length: 1)
+                    if let fallbackValue = AXValueCreate(.cfRange, &fallbackRange) {
+                        var charBounds: CFTypeRef?
+                        if AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, fallbackValue, &charBounds) == .success {
+                            var rect = CGRect.zero
+                            AXValueGetValue(charBounds as! AXValue, .cgRect, &rect)
+                            if rect.width > 0 || rect.height > 0 {
+                                return CGRect(x: rect.origin.x + rect.width, y: rect.origin.y, width: 0, height: rect.height)
+                            }
+                        }
+                    }
+                }
+                
+                // Try char at caret
+                var fallbackRange = CFRange(location: range.location, length: 1)
+                if let fallbackValue = AXValueCreate(.cfRange, &fallbackRange) {
+                    var charBounds: CFTypeRef?
+                    if AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, fallbackValue, &charBounds) == .success {
+                        var rect = CGRect.zero
+                        AXValueGetValue(charBounds as! AXValue, .cgRect, &rect)
+                        if rect.width > 0 || rect.height > 0 {
+                            return CGRect(x: rect.origin.x, y: rect.origin.y, width: 0, height: rect.height)
+                        }
+                    }
+                }
+            }
         }
+        
+        // Fallback: use focused element's position and size
+        var positionVal: CFTypeRef?
+        var sizeVal: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, kAXPositionAttribute as CFString, &positionVal) == .success,
+           AXUIElementCopyAttributeValue(axElement, kAXSizeAttribute as CFString, &sizeVal) == .success {
+            var pos = CGPoint.zero
+            var size = CGSize.zero
+            AXValueGetValue(positionVal as! AXValue, .cgPoint, &pos)
+            AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
+            print("[TypeFlow] Caret bounds failed, falling back to element bounds: pos=\(pos), size=\(size)")
+            return CGRect(x: pos.x + 5, y: pos.y + 5, width: 0, height: 15)
+        }
+        
         return nil
     }
 

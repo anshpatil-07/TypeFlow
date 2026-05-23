@@ -13,6 +13,8 @@ class ScreenContextManager {
     }
     
     func start() {
+        checkAndRequestPermission()
+        
         // Run OCR every 5 seconds
         timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.performOCR()
@@ -21,12 +23,26 @@ class ScreenContextManager {
         performOCR()
     }
     
+    func checkAndRequestPermission() {
+        if !CGPreflightScreenCaptureAccess() {
+            print("[TypeFlow] Requesting Screen Recording permission...")
+            CGRequestScreenCaptureAccess()
+        } else {
+            print("[TypeFlow] Screen Recording permission is already granted.")
+        }
+    }
+    
     func stop() {
         timer?.invalidate()
         timer = nil
     }
     
     private func performOCR() {
+        guard CGPreflightScreenCaptureAccess() else {
+            print("[TypeFlow] Skipping OCR because Screen Recording permission is not granted.")
+            return
+        }
+        
         queue.async {
             guard let screen = NSScreen.main else { return }
             
