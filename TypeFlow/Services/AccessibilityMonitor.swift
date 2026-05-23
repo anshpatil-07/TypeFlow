@@ -11,9 +11,7 @@ class AccessibilityMonitor {
     
     func start() {
         if !AXIsProcessTrusted() {
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-            AXIsProcessTrustedWithOptions(options as CFDictionary)
-            print("Requesting Accessibility Permissions")
+            print("Accessibility permissions not granted. Waiting for user to grant them in Settings.")
             return
         }
         
@@ -52,9 +50,14 @@ class AccessibilityMonitor {
         
         if let tap = eventTap {
             runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+            CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
             CGEvent.tapEnable(tap: tap, enable: true)
         }
+    }
+    
+    func requestPermission() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
     
     func getCurrentCaretRect() -> CGRect? {
