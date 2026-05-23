@@ -26,7 +26,7 @@
 | 3. Advanced Context Pipeline         | v1.0      | 1/1            | Complete    | 2026-05-23 |
 | 4. Settings & Personalization        | v1.0      | 1/1            | Complete    | 2026-05-23 |
 | 5. Tone, Snippets & App Overrides    | v1.0      | 1/1            | Complete    | 2026-05-23 |
-| 6. Critical Bug Fixes                | v1.1      | 0/1            | Pending     |            |
+| 6. Critical Bug Fixes                | v1.1      | 1/1 | Complete    | 2026-05-23 |
 | 7. Model UI & Downloads              | v1.1      | 0/1            | Pending     |            |
 
 ## Phase 6: Critical Bug Fixes
