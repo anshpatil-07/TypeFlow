@@ -43,3 +43,23 @@
 - Model Management tab exists in Settings.
 - User can download Gemma 4 E2B and Qwen 2.5 1.5B with progress indication.
 - User can activate a downloaded model.
+
+### Phase 8: Completions Overhaul
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 7
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 8 to break down)
+
+### Phase 9: Completions Overhaul
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 8
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 9 to break down)
