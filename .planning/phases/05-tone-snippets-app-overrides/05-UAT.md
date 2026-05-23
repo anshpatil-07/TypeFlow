@@ -1,5 +1,5 @@
 ---
-status: partial
+status: complete
 phase: 05-tone-snippets-app-overrides
 source:
   - 05-SUMMARY.md
