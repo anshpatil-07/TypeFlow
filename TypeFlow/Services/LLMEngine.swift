@@ -60,51 +60,63 @@ class LLMEngine {
         return availableBytes >= twoGB
     }
 
-    /// Generate a completion for the given prompt string.
-    /// Returns empty string if the model isn't loaded yet or if inference fails.
     func generateCompletion(context: String) async -> String {
+        print("[TypeFlow-Debug] LLMEngine: generateCompletion called")
         await loadModelIfNeeded()
         
         guard let container = modelContainer else {
+            print("[TypeFlow-Debug] LLMEngine: modelContainer is nil after loadModelIfNeeded! Returning empty string.")
+            if let error = loadError {
+                print("[TypeFlow-Debug] LLMEngine: Previous load error: \(error)")
+            }
             return ""
         }
         
         // Guard to cancel inference if available memory drops below 2GB
         guard checkMemoryStatus() else {
-            print("[TypeFlow] Low memory guard triggered! Cancelling generation.")
+            print("[TypeFlow-Debug] LLMEngine: Low memory guard triggered! Cancelling generation.")
             return ""
         }
         
-        print("[TypeFlow] Generating completion for prompt: \(context)")
-        let result = try? await container.perform { modelContext in
-            do {
-                let input = UserInput(prompt: context)
-                let prepared = try await modelContext.processor.prepare(input: input)
-                let params = GenerateParameters(maxTokens: 30, temperature: 0.3)
-                let stream = try MLXLMCommon.generate(
-                    input: prepared,
-                    parameters: params,
-                    context: modelContext
-                )
-                var outputText = ""
-                for await generation in stream {
-                    if case .chunk(let text) = generation {
-                        outputText += text
-                        print("[TypeFlow] Chunk: \(text)")
+        print("[TypeFlow-Debug] LLMEngine: Calling container.perform to generate...")
+        do {
+            let result = try await container.perform { modelContext -> String in
+                do {
+                    print("[TypeFlow-Debug] LLMEngine: Preparing input...")
+                    let input = UserInput(prompt: context)
+                    let prepared = try await modelContext.processor.prepare(input: input)
+                    print("[TypeFlow-Debug] LLMEngine: Input prepared. Starting generate stream...")
+                    let params = GenerateParameters(maxTokens: 30, temperature: 0.3)
+                    let stream = try MLXLMCommon.generate(
+                        input: prepared,
+                        parameters: params,
+                        context: modelContext
+                    )
+                    var outputText = ""
+                    for await generation in stream {
+                        if case .chunk(let text) = generation {
+                            outputText += text
+                            print("[TypeFlow-Debug] LLMEngine Chunk: '\(text)'")
+                        }
                     }
+                    print("[TypeFlow-Debug] LLMEngine: Stream finished. Total output: '\(outputText)'")
+                    return outputText
+                } catch {
+                    print("[TypeFlow-Debug] LLMEngine Error in generation loop: \(error)")
+                    throw error
                 }
-                return outputText
-            } catch {
-                print("[TypeFlow] Error in generation loop: \(error)")
-                throw error
             }
+            
+            // Clear cached tensors after inference to release unified memory buffers
+            MLX.Memory.clearCache()
+            
+            print("[TypeFlow-Debug] LLMEngine: Generation successful. Result: '\(result)'")
+            return result.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+        } catch {
+            print("[TypeFlow-Debug] LLMEngine Error during container.perform: \(error)")
+            return ""
         }
-        
-        // Clear cached tensors after inference to release unified memory buffers
-        MLX.Memory.clearCache()
-        
-        print("[TypeFlow] Generation result: \(result ?? "nil")")
-        return (result ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // ── Model loading (MLXLLM) ────────────────────────────────────────────────

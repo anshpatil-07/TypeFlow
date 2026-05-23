@@ -19,8 +19,6 @@ class CompletionManager: @unchecked Sendable {
     
     func onTextChanged() {
         print("[TypeFlow-Debug] onTextChanged called")
-        currentGenerationTask?.cancel()
-        currentGenerationTask = nil
         
         // Clear existing completion immediately when user types
         clearCompletion()
@@ -41,7 +39,10 @@ class CompletionManager: @unchecked Sendable {
     }
     
     private func triggerGeneration() {
-        print("[TypeFlow-Debug] triggerGeneration started")
+        print("[TypeFlow-Debug] triggerGeneration started. Cancelling any previous inflight task...")
+        currentGenerationTask?.cancel()
+        currentGenerationTask = nil
+        
         let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
         
         let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
