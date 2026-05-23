@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
+    @StateObject var modelManager = ModelManager()
     
     var body: some View {
         TabView {
@@ -24,6 +25,45 @@ struct SettingsView: View {
             .padding()
             .tabItem {
                 Label("General", systemImage: "gear")
+            }
+            
+            // Models Tab
+            Form {
+                List(modelManager.models) { model in
+                    HStack {
+                        Text(model.name)
+                            .font(.headline)
+                        
+                        Spacer()
+                        
+                        if settings.activeModelId == model.id {
+                            Text("Active")
+                                .foregroundColor(.green)
+                                .font(.subheadline)
+                                .padding(.trailing, 8)
+                        } else if model.status == .downloaded {
+                            Button("Activate") {
+                                modelManager.activateModel(id: model.id)
+                            }
+                        }
+                        
+                        if model.status == .notDownloaded {
+                            Button("Download") {
+                                modelManager.downloadModel(id: model.id)
+                            }
+                        } else if model.status == .downloading {
+                            ProgressView(value: model.progress)
+                                .frame(width: 100)
+                            Text("\(Int(model.progress * 100))%")
+                                .font(.caption)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            .padding()
+            .tabItem {
+                Label("Models", systemImage: "cpu")
             }
             
             // Persona Tab

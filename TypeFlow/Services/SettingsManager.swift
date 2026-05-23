@@ -11,6 +11,7 @@ class SettingsManager: ObservableObject {
     @AppStorage("tone") var tone: String = "Neutral"
     @AppStorage("snippetsData") var snippetsData: Data = Data()
     @AppStorage("appConfigsData") var appConfigsData: Data = Data()
+    @AppStorage("activeModelId") var activeModelId: String = "gemma-4-e2b"
     
     private init() {}
     
