@@ -1,6 +1,6 @@
 import Cocoa
 
-class CompletionManager {
+class CompletionManager: @unchecked Sendable {
     static let shared = CompletionManager()
     
     var currentCompletion: String?
@@ -8,6 +8,7 @@ class CompletionManager {
     weak var overlayWindowController: OverlayWindowController?
     
     private var debounceTimer: Timer?
+    private var currentGenerationTask: Task<Void, Never>?
     
     private init() {}
     
@@ -17,6 +18,9 @@ class CompletionManager {
     }
     
     func onTextChanged() {
+        currentGenerationTask?.cancel()
+        currentGenerationTask = nil
+        
         // Clear existing completion immediately when user types
         clearCompletion()
         
@@ -29,25 +33,29 @@ class CompletionManager {
         
         // Debounce generation
         debounceTimer?.invalidate()
-        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
             self?.triggerGeneration()
         }
     }
     
     private func triggerGeneration() {
-        guard let activeLine = accessibilityMonitor?.getTextBeforeCaret() else { return }
+        print("[TypeFlow] triggerGeneration called")
+        let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+        print("[TypeFlow] Active line: \(activeLine)")
         
         let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
         let effectiveConfig = SettingsManager.shared.getEffectiveConfig(for: bundleId)
         
-        if !effectiveConfig.isEnabled { return }
+        if !effectiveConfig.isEnabled {
+            print("[TypeFlow] App \(bundleId) is excluded")
+            return
+        }
         
         // Snippets check
         let snippets = SettingsManager.shared.getSnippets()
         for (key, value) in snippets {
             if activeLine.hasSuffix(key) {
-                // If it ends with the snippet, we can inject directly.
-                // Wait, if it ends with snippet, we might want to replace it. For now, just generate the value as completion.
+                print("[TypeFlow] Snippet match for key: \(key)")
                 DispatchQueue.main.async {
                     self.currentCompletion = value
                     self.overlayWindowController?.updateText(value)
@@ -67,13 +75,41 @@ class CompletionManager {
         )
         
         let prompt = PromptBuilder.shared.buildPrompt(context: aggregatedContext, tone: effectiveConfig.tone, instructions: effectiveConfig.instructions)
+        print("[TypeFlow] Dispatching LLM generation task...")
         
-        Task {
+        currentGenerationTask = Task {
             let completion = await LLMEngine.shared.generateCompletion(context: prompt)
+            if Task.isCancelled { return }
+            print("[TypeFlow] Got completion: \(completion)")
+            
+            var processedCompletion = completion.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            var overlapLength = 0
+            let maxOverlap = min(activeLine.count, processedCompletion.count)
+            if maxOverlap > 0 {
+                for i in (1...maxOverlap).reversed() {
+                    let suffix = activeLine.suffix(i)
+                    let prefix = processedCompletion.prefix(i)
+                    if suffix.lowercased() == prefix.lowercased() {
+                        overlapLength = i
+                        break
+                    }
+                }
+            }
+            if overlapLength > 0 {
+                processedCompletion = String(processedCompletion.dropFirst(overlapLength))
+            }
             
             DispatchQueue.main.async {
-                self.currentCompletion = completion
-                self.overlayWindowController?.updateText(completion)
+                self.currentCompletion = processedCompletion
+                if !processedCompletion.isEmpty {
+                    if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
+                        self.overlayWindowController?.moveOverlay(to: rect)
+                    }
+                    self.overlayWindowController?.updateText(processedCompletion)
+                } else {
+                    self.overlayWindowController?.updateText("")
+                }
             }
         }
     }
