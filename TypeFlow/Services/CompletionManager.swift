@@ -10,7 +10,24 @@ class CompletionManager: @unchecked Sendable {
     private var debounceTimer: Timer?
     private var currentGenerationTask: Task<Void, Never>?
     
-    private init() {}
+    private var pendingCompletionRequest: String?
+    
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: Notification.Name("TypeFlowModelLoadingStateChanged"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self else { return }
+            if let isLoading = notification.object as? Bool, !isLoading {
+                if let pending = self.pendingCompletionRequest {
+                    print("[TypeFlow-Debug] Model finished loading. Firing pending completion request: '\(pending)'")
+                    self.pendingCompletionRequest = nil
+                    self.triggerGeneration(with: pending)
+                }
+            }
+        }
+    }
     
     func setup(accessibilityMonitor: AccessibilityMonitor, overlayWindowController: OverlayWindowController) {
         self.accessibilityMonitor = accessibilityMonitor
@@ -38,14 +55,20 @@ class CompletionManager: @unchecked Sendable {
         }
     }
     
-    private func triggerGeneration() {
+    private func triggerGeneration(with text: String? = nil) {
         print("[TypeFlow-Debug] triggerGeneration started. Cancelling any previous inflight task...")
         currentGenerationTask?.cancel()
         currentGenerationTask = nil
         
-        let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+        let activeLine = text ?? accessibilityMonitor?.getTextBeforeCaret() ?? ""
         guard !activeLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             print("[TypeFlow-Debug] Active line is empty, skipping generation.")
+            return
+        }
+        
+        if !LLMEngine.shared.isModelReady {
+            print("[TypeFlow-Debug] Model is not ready yet. Queuing request: '\(activeLine)'")
+            pendingCompletionRequest = activeLine
             return
         }
         

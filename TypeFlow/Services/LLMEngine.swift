@@ -23,6 +23,8 @@ class LLMEngine {
     private var modelContainer: ModelContainer?
     private var isLoading = false
     private var loadError: Error?
+    
+    var isModelReady: Bool { modelContainer != nil }
 
     private init() {
         // Limit MLX cache size to 128 MB to avoid growing RAM usage unbounded
@@ -147,6 +149,7 @@ class LLMEngine {
     private func loadModelIfNeeded() async {
         guard modelContainer == nil, !isLoading else { return }
         isLoading = true
+        NotificationCenter.default.post(name: Notification.Name("TypeFlowModelLoadingStateChanged"), object: true)
 
         do {
             // Gemma 3 4B 4-bit (Gemma 4 E2B) ≈ 3.2 GB
@@ -162,5 +165,6 @@ class LLMEngine {
         }
 
         isLoading = false
+        NotificationCenter.default.post(name: Notification.Name("TypeFlowModelLoadingStateChanged"), object: false)
     }
 }
