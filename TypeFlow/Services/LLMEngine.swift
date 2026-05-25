@@ -82,19 +82,18 @@ class LLMEngine {
         }
         
         // ── Build the chat messages ──────────────────────────────────────────
-        // Using Chat.Message so the model's built-in chat template wraps tokens
-        // correctly with <start_of_turn> / <end_of_turn> (Gemma) or equivalent.
-        var systemContent = "You are a macOS text autocomplete engine. Your ONLY job is to predict the next 2-5 words the user will type. Output ONLY those words — nothing else."
+        // Using Chat.Message so the model's built-in chat template wraps tokens.
+        // Bare minimum prompt without system message, XML tags, or conversational instructions.
+        var userPrompt = "Complete this text with 2-5 words only:\n\n\(textBeforeCaret)"
         if !tone.isEmpty && tone != "neutral" {
-            systemContent += " Tone: \(tone)."
+            userPrompt += "\nTone: \(tone)"
         }
         if !customInstructions.isEmpty {
-            systemContent += " Additional rules: \(customInstructions)"
+            userPrompt += "\nRules: \(customInstructions)"
         }
         
         let messages: [Chat.Message] = [
-            .system(systemContent),
-            .user("Complete this text (output ONLY the next 2-5 words, no repetition):\n\(textBeforeCaret)"),
+            .user(userPrompt)
         ]
         
         print("[TypeFlow-Debug] LLMEngine: Input text: '\(textBeforeCaret)'")

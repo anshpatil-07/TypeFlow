@@ -126,6 +126,8 @@ class CompletionManager: @unchecked Sendable {
     
     func handleTabPressed() -> Bool {
         if let completion = currentCompletion, !completion.isEmpty {
+            // Append the accepted completion to the keystroke buffer to maintain context
+            accessibilityMonitor?.appendCompletionToKeystrokeBuffer(completion)
             // Inject the text
             TextInjector.shared.inject(text: completion)
             clearCompletion()
