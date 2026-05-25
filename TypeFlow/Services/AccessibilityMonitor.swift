@@ -204,8 +204,8 @@ class AccessibilityMonitor {
             var size = CGSize.zero
             AXValueGetValue(positionVal as! AXValue, .cgPoint, &pos)
             AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
-            print("[TypeFlow] Caret bounds failed, falling back to element bounds: pos=\(pos), size=\(size)")
-            return CGRect(x: pos.x + 5, y: pos.y + 5, width: 0, height: 15)
+            print("[TypeFlow] Caret bounds failed, falling back to element center: pos=\(pos), size=\(size)")
+            return CGRect(x: pos.x + size.width / 2, y: pos.y + size.height / 2, width: 0, height: 15)
         }
         
         return nil
@@ -222,6 +222,18 @@ class AccessibilityMonitor {
     func clearKeystrokeBuffer() {
         keystrokeBuffer = ""
         print("[TypeFlow-Debug] Keystroke buffer cleared")
+    }
+    
+    private func capKeystrokeBuffer() {
+        if keystrokeBuffer.count > 150 {
+            keystrokeBuffer = String(keystrokeBuffer.suffix(150))
+        }
+    }
+    
+    func appendCompletionToKeystrokeBuffer(_ completion: String) {
+        keystrokeBuffer += completion
+        capKeystrokeBuffer()
+        print("[TypeFlow-Debug] Appended completion '\(completion)' to buffer. Buffer is now '\(keystrokeBuffer)'")
     }
     
     func handleKeystroke(keyCode: Int64, event: CGEvent) {
@@ -257,9 +269,7 @@ class AccessibilityMonitor {
             let filtered = characters.filter { !$0.isASCII || ($0.asciiValue ?? 0) >= 32 }
             if !filtered.isEmpty {
                 keystrokeBuffer += filtered
-                if keystrokeBuffer.count > 200 {
-                    keystrokeBuffer = String(keystrokeBuffer.suffix(200))
-                }
+                capKeystrokeBuffer()
                 print("[TypeFlow-Debug] Typed: '\(filtered)', buffer is now '\(keystrokeBuffer)'")
             }
         }
