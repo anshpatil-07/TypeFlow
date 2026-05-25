@@ -200,32 +200,56 @@ class AccessibilityMonitor {
         var focusedElement: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
         
-        if err == .success, let element = focusedElement {
-            let axElement = element as! AXUIElement
-            var selectedRangeRef: CFTypeRef?
-            
-            if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success {
-                let rangeValue = selectedRangeRef as! AXValue
-                var range = CFRange(location: 0, length: 0)
-                AXValueGetValue(rangeValue, .cfRange, &range)
-                
-                // Get up to 200 characters before the caret
-                let length = min(200, range.location)
-                let startLocation = range.location - length
-                let fetchRange = CFRange(location: startLocation, length: length)
-                
-                var fetchRangeValue = fetchRange
-                guard let axFetchRange = AXValueCreate(.cfRange, &fetchRangeValue) else { return nil }
-                
-                var stringRef: CFTypeRef?
-                if AXUIElementCopyParameterizedAttributeValue(axElement, kAXStringForRangeParameterizedAttribute as CFString, axFetchRange, &stringRef) == .success {
-                    if let string = stringRef as? String {
-                        return string
-                    }
-                }
-            }
+        guard err == .success, let element = focusedElement else {
+            print("[TypeFlow-Debug] AX: No focused element found")
+            return nil
         }
-        return nil
+        let axElement = element as! AXUIElement
+        
+        // 1. Get full text via kAXValueAttribute
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef) == .success,
+              let val = valueRef else {
+            print("[TypeFlow-Debug] AX: kAXValueAttribute failed")
+            return nil
+        }
+        
+        var fullText: String = ""
+        if let stringValue = val as? String {
+            fullText = stringValue
+        } else if CFGetTypeID(val) == CFAttributedStringGetTypeID() {
+            let attrString = val as! CFAttributedString
+            fullText = CFAttributedStringGetString(attrString) as String
+        } else {
+            print("[TypeFlow-Debug] AX: kAXValueAttribute returned unknown type: \(CFGetTypeID(val))")
+            return nil
+        }
+        
+        // 2. Get cursor position via kAXSelectedTextRangeAttribute
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let rangeVal = rangeRef else {
+            print("[TypeFlow-Debug] AX: kAXSelectedTextRangeAttribute failed — returning full text suffix")
+            return String(fullText.suffix(200))
+        }
+        
+        var range = CFRange(location: 0, length: 0)
+        AXValueGetValue(rangeVal as! AXValue, .cfRange, &range)
+        let cursorIndex = range.location
+        
+        // 3. Slice text before cursor safely using UTF-16 representation
+        let utf16 = fullText.utf16
+        let safeCursorIndex = max(0, min(cursorIndex, utf16.count))
+        
+        if let sliceEnd = utf16.index(utf16.startIndex, offsetBy: safeCursorIndex, limitedBy: utf16.endIndex) {
+            let textBeforeCursor = String(fullText[..<sliceEnd])
+            print("[TypeFlow-Debug] AX: text before cursor (\(safeCursorIndex) UTF-16 chars): '\(textBeforeCursor.suffix(50))'")
+            return String(textBeforeCursor.suffix(200))
+        } else {
+            let textBeforeCursor = String(fullText.prefix(safeCursorIndex))
+            print("[TypeFlow-Debug] AX: text before cursor fallback: '\(textBeforeCursor.suffix(50))'")
+            return String(textBeforeCursor.suffix(200))
+        }
     }
     
     func getFullFieldText() -> String? {
@@ -238,13 +262,22 @@ class AccessibilityMonitor {
             
             // Try to get the entire value first
             var valueRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef) == .success {
-                if let stringValue = valueRef as? String {
+            if AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef) == .success,
+               let val = valueRef {
+                var stringValue: String?
+                if let str = val as? String {
+                    stringValue = str
+                } else if CFGetTypeID(val) == CFAttributedStringGetTypeID() {
+                    let attrStr = val as! CFAttributedString
+                    stringValue = CFAttributedStringGetString(attrStr) as String
+                }
+                
+                if let stringVal = stringValue {
                     // Truncate if too long (e.g. 4000 chars)
-                    if stringValue.count > 4000 {
-                        return "..." + String(stringValue.suffix(4000))
+                    if stringVal.count > 4000 {
+                        return "..." + String(stringVal.suffix(4000))
                     }
-                    return stringValue
+                    return stringVal
                 }
             }
             
