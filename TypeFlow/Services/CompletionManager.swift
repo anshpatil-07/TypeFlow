@@ -44,11 +44,16 @@ class CompletionManager: @unchecked Sendable {
         currentGenerationTask = nil
         
         let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+        guard !activeLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            print("[TypeFlow-Debug] Active line is empty, skipping generation.")
+            return
+        }
         
         let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
         let effectiveConfig = SettingsManager.shared.getEffectiveConfig(for: bundleId)
         
         if !effectiveConfig.isEnabled {
+            print("[TypeFlow-Debug] Completions disabled for \(bundleId), skipping.")
             return
         }
         
@@ -64,21 +69,14 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        var aggregatedContext = ContextAggregator.shared.gatherContext(activeLine: activeLine)
-        let fullText = accessibilityMonitor?.getFullFieldText()
-        
-        aggregatedContext = AggregatedContext(
-            clipboardText: aggregatedContext.clipboardText,
-            screenText: aggregatedContext.screenText,
-            fullFieldText: fullText,
-            activeLineText: aggregatedContext.activeLineText
-        )
-        
-        let prompt = PromptBuilder.shared.buildPrompt(context: aggregatedContext, tone: effectiveConfig.tone, instructions: effectiveConfig.instructions)
-        print("[TypeFlow-Debug] Dispatching LLM generation task. Prompt sent to model:\n\(prompt)")
+        print("[TypeFlow-Debug] Dispatching LLM generation for: '\(activeLine)'")
         
         currentGenerationTask = Task {
-            let completion = await LLMEngine.shared.generateCompletion(context: prompt)
+            let completion = await LLMEngine.shared.generateCompletion(
+                textBeforeCaret: activeLine,
+                tone: effectiveConfig.tone,
+                customInstructions: effectiveConfig.instructions
+            )
             print("[TypeFlow-Debug] Raw model output: '\(completion)'")
             if Task.isCancelled {
                 print("[TypeFlow-Debug] Task was cancelled, ignoring output.")
@@ -87,8 +85,9 @@ class CompletionManager: @unchecked Sendable {
             
             var processedCompletion = completion.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            var overlapLength = 0
+            // Strip any echoed prefix overlap between the end of activeLine and start of completion
             let maxOverlap = min(activeLine.count, processedCompletion.count)
+            var overlapLength = 0
             if maxOverlap > 0 {
                 for i in (1...maxOverlap).reversed() {
                     let suffix = activeLine.suffix(i)
@@ -101,6 +100,7 @@ class CompletionManager: @unchecked Sendable {
             }
             if overlapLength > 0 {
                 processedCompletion = String(processedCompletion.dropFirst(overlapLength))
+                processedCompletion = processedCompletion.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             
             print("[TypeFlow-Debug] Processed completion (after stripping \(overlapLength) chars overlap): '\(processedCompletion)'")
@@ -117,7 +117,7 @@ class CompletionManager: @unchecked Sendable {
                     print("[TypeFlow-Debug] Telling overlay to update text to: '\(processedCompletion)'")
                     self.overlayWindowController?.updateText(processedCompletion)
                 } else {
-                    print("[TypeFlow-Debug] Processed completion was empty, telling overlay to hide (empty string).")
+                    print("[TypeFlow-Debug] Processed completion was empty, hiding overlay.")
                     self.overlayWindowController?.updateText("")
                 }
             }

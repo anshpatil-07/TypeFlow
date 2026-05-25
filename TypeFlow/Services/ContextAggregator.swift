@@ -13,19 +13,14 @@ class ContextAggregator {
     private init() {}
     
     func gatherContext(activeLine: String) -> AggregatedContext {
-        let clipboard = ClipboardContextManager.shared.getClipboardText()
-        let screen = ScreenContextManager.shared.latestScreenText
-        
-        // Need to ask AccessibilityMonitor for full text but wait, we need to inject it.
-        // It's better if CompletionManager passes it or we fetch it here.
-        // Let's assume we call it here but we need a reference to the active monitor.
-        // Since AccessibilityMonitor is mostly global, we can just instantiate a new one or use a shared instance if it was a singleton.
-        // For now, let's just create an inline fetch or pass it in.
-        
+        // Clipboard and screen OCR are disabled: they inject noisy/irrelevant content
+        // (e.g. Xcode logs in clipboard, IDE UI text via OCR) that confuses the model.
+        // Only activeLineText (from the focused AX text field) is used until completions
+        // are stable, at which point these can be re-enabled selectively.
         return AggregatedContext(
-            clipboardText: clipboard,
-            screenText: screen.isEmpty ? nil : screen,
-            fullFieldText: nil, // Will be injected by CompletionManager
+            clipboardText: nil,
+            screenText: nil,
+            fullFieldText: nil, // injected by CompletionManager from focused field
             activeLineText: activeLine
         )
     }
