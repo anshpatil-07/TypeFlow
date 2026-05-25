@@ -5,9 +5,18 @@ class AccessibilityMonitor {
     var runLoopSource: CFRunLoopSource?
     var onCaretMoved: ((CGRect) -> Void)?
     private var retryTimer: Timer?
+    private var keystrokeBuffer: String = ""
     
     init(onCaretMoved: @escaping (CGRect) -> Void) {
         self.onCaretMoved = onCaretMoved
+        
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.clearKeystrokeBuffer()
+        }
     }
     
     /// Called once at launch (after 1-second delay). Retries every 2 seconds
@@ -77,31 +86,38 @@ class AccessibilityMonitor {
                     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                     print("[TypeFlow] keyDown detected: keyCode=\(keyCode)")
                     
+                    var tabConsumed = false
                     if (keyCode == 48 && SettingsManager.shared.acceptShortcut == "Tab") ||
                        (keyCode == 124 && SettingsManager.shared.acceptShortcut == "Right Arrow") {
                         print("[TypeFlow] Trigger key pressed (Tab/Right)")
                         if CompletionManager.shared.handleTabPressed() {
                             print("[TypeFlow] Tab consumed by CompletionManager")
-                            return nil // Consume the event
+                            tabConsumed = true
                         } else {
                             print("[TypeFlow] Tab not consumed")
                         }
-                    } else {
-                        // After typing, try to find the caret
-                        if let monitor = refcon {
-                            let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
-                            let obj = unmanaged.takeUnretainedValue()
-                            DispatchQueue.main.async {
-                                print("[TypeFlow] Checking caret rect...")
-                                if let rect = obj.getCurrentCaretRect() {
-                                    print("[TypeFlow] Caret rect found: \(rect)")
-                                    obj.onCaretMoved?(rect)
-                                    CompletionManager.shared.onTextChanged()
-                                } else {
-                                    print("[TypeFlow] Caret rect not found! Calling onTextChanged anyway for debugging.")
-                                    // For debugging, call it anyway
-                                    CompletionManager.shared.onTextChanged()
-                                }
+                    }
+                    
+                    if let monitor = refcon {
+                        let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
+                        let obj = unmanaged.takeUnretainedValue()
+                        
+                        if tabConsumed {
+                            obj.clearKeystrokeBuffer()
+                            return nil // Consume the event
+                        }
+                        
+                        obj.handleKeystroke(keyCode: keyCode, event: event)
+                        
+                        DispatchQueue.main.async {
+                            print("[TypeFlow] Checking caret rect...")
+                            if let rect = obj.getCurrentCaretRect() {
+                                print("[TypeFlow] Caret rect found: \(rect)")
+                                obj.onCaretMoved?(rect)
+                                CompletionManager.shared.onTextChanged()
+                            } else {
+                                print("[TypeFlow] Caret rect not found! Calling onTextChanged anyway for debugging.")
+                                CompletionManager.shared.onTextChanged()
                             }
                         }
                     }
@@ -195,61 +211,144 @@ class AccessibilityMonitor {
         return nil
     }
 
-    func getTextBeforeCaret() -> String? {
+    private func getFocusedElement() -> AXUIElement? {
         let systemWideElement = AXUIElementCreateSystemWide()
         var focusedElement: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+        guard err == .success, let element = focusedElement else { return nil }
+        return (element as! AXUIElement)
+    }
+
+    func clearKeystrokeBuffer() {
+        keystrokeBuffer = ""
+        print("[TypeFlow-Debug] Keystroke buffer cleared")
+    }
+    
+    func handleKeystroke(keyCode: Int64, event: CGEvent) {
+        // Navigation / Action keys that reset the buffer
+        // 36: Return, 76: Enter (numpad), 53: Escape, 48: Tab
+        // 123: Left, 124: Right, 125: Down, 126: Up
+        // 115: Home, 119: End, 116: PageUp, 121: PageDown
+        if [36, 76, 53, 48, 123, 124, 125, 126, 115, 119, 116, 121].contains(keyCode) {
+            clearKeystrokeBuffer()
+            return
+        }
         
-        guard err == .success, let element = focusedElement else {
+        // Delete / Backspace (51)
+        if keyCode == 51 {
+            if !keystrokeBuffer.isEmpty {
+                keystrokeBuffer.removeLast()
+                print("[TypeFlow-Debug] Backspace: buffer is now '\(keystrokeBuffer)'")
+            }
+            return
+        }
+        
+        // Check for modifier keys (Command/Control) that represent shortcuts
+        let flags = event.flags
+        if flags.contains(.maskCommand) || flags.contains(.maskControl) {
+            clearKeystrokeBuffer()
+            return
+        }
+        
+        // Extract Unicode characters from the event
+        if let nsEvent = NSEvent(cgEvent: event),
+           let characters = nsEvent.characters,
+           !characters.isEmpty {
+            let filtered = characters.filter { !$0.isASCII || ($0.asciiValue ?? 0) >= 32 }
+            if !filtered.isEmpty {
+                keystrokeBuffer += filtered
+                if keystrokeBuffer.count > 200 {
+                    keystrokeBuffer = String(keystrokeBuffer.suffix(200))
+                }
+                print("[TypeFlow-Debug] Typed: '\(filtered)', buffer is now '\(keystrokeBuffer)'")
+            }
+        }
+    }
+
+    func getTextBeforeCaret() -> String? {
+        guard let axElement = getFocusedElement() else {
             print("[TypeFlow-Debug] AX: No focused element found")
+            if !keystrokeBuffer.isEmpty {
+                print("[TypeFlow-Debug] AX: Using CGEvent keystroke buffer (no focused element): '\(keystrokeBuffer.suffix(50))'")
+                return keystrokeBuffer
+            }
             return nil
         }
-        let axElement = element as! AXUIElement
         
-        // 1. Get full text via kAXValueAttribute
+        // --- Fallback 1: kAXValueAttribute + kAXSelectedTextRangeAttribute ---
         var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef) == .success,
-              let val = valueRef else {
-            print("[TypeFlow-Debug] AX: kAXValueAttribute failed")
-            return nil
+        if AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef) == .success,
+           let val = valueRef {
+            var fullText: String?
+            if let stringValue = val as? String {
+                fullText = stringValue
+            } else if CFGetTypeID(val) == CFAttributedStringGetTypeID() {
+                fullText = (CFAttributedStringGetString(val as! CFAttributedString) as String)
+            }
+            
+            if let fullText = fullText {
+                var rangeRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+                   let rangeVal = rangeRef {
+                    var range = CFRange(location: 0, length: 0)
+                    AXValueGetValue(rangeVal as! AXValue, .cfRange, &range)
+                    let cursorIndex = range.location
+                    
+                    let utf16 = fullText.utf16
+                    let safeCursorIndex = max(0, min(cursorIndex, utf16.count))
+                    if let sliceEnd = utf16.index(utf16.startIndex, offsetBy: safeCursorIndex, limitedBy: utf16.endIndex) {
+                        let textBeforeCursor = String(fullText[..<sliceEnd])
+                        let result = String(textBeforeCursor.suffix(200))
+                        if !result.isEmpty {
+                            print("[TypeFlow-Debug] AX: text extracted via kAXValue (\(safeCursorIndex) UTF-16 chars): '\(result.suffix(50))'")
+                            return result
+                        }
+                    }
+                }
+            }
         }
         
-        var fullText: String = ""
-        if let stringValue = val as? String {
-            fullText = stringValue
-        } else if CFGetTypeID(val) == CFAttributedStringGetTypeID() {
-            let attrString = val as! CFAttributedString
-            fullText = CFAttributedStringGetString(attrString) as String
-        } else {
-            print("[TypeFlow-Debug] AX: kAXValueAttribute returned unknown type: \(CFGetTypeID(val))")
-            return nil
+        // --- Fallback 2: kAXSelectedTextAttribute ---
+        var selectedTextRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
+           let selectedText = selectedTextRef as? String,
+           !selectedText.isEmpty {
+            let result = String(selectedText.suffix(200))
+            print("[TypeFlow-Debug] AX: text extracted via kAXSelectedTextAttribute: '\(result.suffix(50))'")
+            return result
         }
         
-        // 2. Get cursor position via kAXSelectedTextRangeAttribute
-        var rangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
-              let rangeVal = rangeRef else {
-            print("[TypeFlow-Debug] AX: kAXSelectedTextRangeAttribute failed — returning full text suffix")
-            return String(fullText.suffix(200))
+        // --- Fallback 3: kAXStringForRangeParameterizedAttribute ---
+        var selectedRangeRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success,
+           let rangeValue = selectedRangeRef {
+            var range = CFRange(location: 0, length: 0)
+            AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
+            
+            let length = min(200, range.location)
+            let startLocation = range.location - length
+            let fetchRange = CFRange(location: startLocation, length: length)
+            var fetchRangeValue = fetchRange
+            
+            if let axFetchRange = AXValueCreate(.cfRange, &fetchRangeValue) {
+                var stringRef: CFTypeRef?
+                if AXUIElementCopyParameterizedAttributeValue(axElement, kAXStringForRangeParameterizedAttribute as CFString, axFetchRange, &stringRef) == .success,
+                   let string = stringRef as? String,
+                   !string.isEmpty {
+                    print("[TypeFlow-Debug] AX: text extracted via kAXStringForRangeParameterizedAttribute: '\(string.suffix(50))'")
+                    return string
+                }
+            }
         }
         
-        var range = CFRange(location: 0, length: 0)
-        AXValueGetValue(rangeVal as! AXValue, .cfRange, &range)
-        let cursorIndex = range.location
-        
-        // 3. Slice text before cursor safely using UTF-16 representation
-        let utf16 = fullText.utf16
-        let safeCursorIndex = max(0, min(cursorIndex, utf16.count))
-        
-        if let sliceEnd = utf16.index(utf16.startIndex, offsetBy: safeCursorIndex, limitedBy: utf16.endIndex) {
-            let textBeforeCursor = String(fullText[..<sliceEnd])
-            print("[TypeFlow-Debug] AX: text before cursor (\(safeCursorIndex) UTF-16 chars): '\(textBeforeCursor.suffix(50))'")
-            return String(textBeforeCursor.suffix(200))
-        } else {
-            let textBeforeCursor = String(fullText.prefix(safeCursorIndex))
-            print("[TypeFlow-Debug] AX: text before cursor fallback: '\(textBeforeCursor.suffix(50))'")
-            return String(textBeforeCursor.suffix(200))
+        // --- Fallback 4: CGEvent keystroke buffer ---
+        if !keystrokeBuffer.isEmpty {
+            print("[TypeFlow-Debug] AX: all AX queries failed. Using CGEvent keystroke buffer: '\(keystrokeBuffer.suffix(50))'")
+            return keystrokeBuffer
         }
+        
+        print("[TypeFlow-Debug] AX: all extraction methods failed, active line is empty")
+        return nil
     }
     
     func getFullFieldText() -> String? {
