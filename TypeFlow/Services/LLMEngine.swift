@@ -81,23 +81,19 @@ class LLMEngine {
             return ""
         }
         
-        // ── Build the chat messages ──────────────────────────────────────────
-        // Minimal fill-in-the-blank prompt: [TEXT]___
-        // Uses only the last 100 characters of user input.
-        let contextText = String(textBeforeCaret.suffix(100))
-        let prompt = "\(contextText)___"
+        // ── Build the prompt ──────────────────────────────────────────────────
+        // Minimal fill-in-the-blank prompt: <text>[TEXT]</text><completion>
+        // Uses the last 150 characters of user input, with a direct system instruction.
+        let contextText = String(textBeforeCaret.suffix(150))
+        let prompt = "Complete the text. Output only the next few words. No explanation.\n\n<text>\(contextText)</text><completion>"
         
-        let messages: [Chat.Message] = [
-            .user(prompt)
-        ]
-        
-        print("[TypeFlow-Debug] LLMEngine: Input text: '\(textBeforeCaret)'")
+        print("[TypeFlow-Debug] LLMEngine: Input prompt:\n\(prompt)")
         
         do {
             let result = try await container.perform { modelContext -> String in
                 do {
-                    print("[TypeFlow-Debug] LLMEngine: Preparing chat input...")
-                    let input = UserInput(chat: messages)
+                    print("[TypeFlow-Debug] LLMEngine: Preparing input...")
+                    let input = UserInput(prompt: prompt)
                     let prepared = try await modelContext.processor.prepare(input: input)
                     print("[TypeFlow-Debug] LLMEngine: Input prepared. Starting generate stream...")
                     // maxTokens: 20 keeps completions short (2-5 words) and fast
@@ -112,6 +108,10 @@ class LLMEngine {
                         if case .chunk(let text) = generation {
                             outputText += text
                             print("[TypeFlow-Debug] LLMEngine Chunk: '\(text)'")
+                            if outputText.contains("</completion>") {
+                                print("[TypeFlow-Debug] LLMEngine: Found </completion> tag, stopping generation.")
+                                break
+                            }
                         }
                     }
                     print("[TypeFlow-Debug] LLMEngine: Stream finished. Total output: '\(outputText)'")
@@ -125,8 +125,15 @@ class LLMEngine {
             // Clear cached tensors after inference to release unified memory buffers
             MLX.Memory.clearCache()
             
-            print("[TypeFlow-Debug] LLMEngine: Generation successful. Result: '\(result)'")
-            return result.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            // Strip the closing tag if it exists
+            var cleanResult = result
+            if let range = cleanResult.range(of: "</completion>") {
+                cleanResult = String(cleanResult[..<range.lowerBound])
+            }
+            
+            let trimmedResult = cleanResult.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            print("[TypeFlow-Debug] LLMEngine: Generation successful. Result: '\(trimmedResult)'")
+            return trimmedResult
             
         } catch {
             print("[TypeFlow-Debug] LLMEngine Error during container.perform: \(error)")
@@ -142,10 +149,13 @@ class LLMEngine {
         isLoading = true
 
         do {
-            // Gemma 3 1B 4-bit ≈ 1.5 GB — fastest model that gives decent quality
-            let config = LLMRegistry.gemma3_1B_qat_4bit
+            // Gemma 3 4B 4-bit (Gemma 4 E2B) ≈ 3.2 GB
+            let config = ModelConfiguration(
+                id: "mlx-community/gemma-3-4b-it-qat-4bit",
+                extraEOSTokens: ["<end_of_turn>"]
+            )
             self.modelContainer = try await #huggingFaceLoadModelContainer(configuration: config)
-            print("[TypeFlow] Model loaded: \(config.name)")
+            print("[TypeFlow] Model loaded: \(config.id)")
         } catch {
             self.loadError = error
             print("[TypeFlow] Model load failed: \(error)")

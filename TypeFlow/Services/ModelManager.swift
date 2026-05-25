@@ -24,7 +24,7 @@ class ModelManager: ObservableObject {
     
     init() {
         self.models = [
-            MLXModel(id: "gemma-4-e2b", name: "Gemma 4 E2B", status: .notDownloaded, progress: 0.0),
+            MLXModel(id: "gemma-3-4b-it-qat-4bit", name: "Gemma 3 4B (3.2 GB)", status: .notDownloaded, progress: 0.0),
             MLXModel(id: "qwen-2.5-1.5b", name: "Qwen 2.5 1.5B", status: .notDownloaded, progress: 0.0)
         ]
     }
