@@ -60,12 +60,15 @@ class LLMEngine {
         return availableBytes >= twoGB
     }
 
-    func generateCompletion(context: String) async -> String {
+    /// Generate a completion for the given text-before-caret.
+    /// Uses the chat message API so the model's instruct chat template is applied,
+    /// preventing the model from echoing the raw prompt tokens.
+    func generateCompletion(textBeforeCaret: String, tone: String, customInstructions: String) async -> String {
         print("[TypeFlow-Debug] LLMEngine: generateCompletion called")
         await loadModelIfNeeded()
         
         guard let container = modelContainer else {
-            print("[TypeFlow-Debug] LLMEngine: modelContainer is nil after loadModelIfNeeded! Returning empty string.")
+            print("[TypeFlow-Debug] LLMEngine: modelContainer is nil! Returning empty string.")
             if let error = loadError {
                 print("[TypeFlow-Debug] LLMEngine: Previous load error: \(error)")
             }
@@ -78,15 +81,33 @@ class LLMEngine {
             return ""
         }
         
-        print("[TypeFlow-Debug] LLMEngine: Calling container.perform to generate...")
+        // ── Build the chat messages ──────────────────────────────────────────
+        // Using Chat.Message so the model's built-in chat template wraps tokens
+        // correctly with <start_of_turn> / <end_of_turn> (Gemma) or equivalent.
+        var systemContent = "You are a macOS text autocomplete engine. Your ONLY job is to predict the next 2-5 words the user will type. Output ONLY those words — nothing else."
+        if !tone.isEmpty && tone != "neutral" {
+            systemContent += " Tone: \(tone)."
+        }
+        if !customInstructions.isEmpty {
+            systemContent += " Additional rules: \(customInstructions)"
+        }
+        
+        let messages: [Chat.Message] = [
+            .system(systemContent),
+            .user("Complete this text (output ONLY the next 2-5 words, no repetition):\n\(textBeforeCaret)"),
+        ]
+        
+        print("[TypeFlow-Debug] LLMEngine: Input text: '\(textBeforeCaret)'")
+        
         do {
             let result = try await container.perform { modelContext -> String in
                 do {
-                    print("[TypeFlow-Debug] LLMEngine: Preparing input...")
-                    let input = UserInput(prompt: context)
+                    print("[TypeFlow-Debug] LLMEngine: Preparing chat input...")
+                    let input = UserInput(chat: messages)
                     let prepared = try await modelContext.processor.prepare(input: input)
                     print("[TypeFlow-Debug] LLMEngine: Input prepared. Starting generate stream...")
-                    let params = GenerateParameters(maxTokens: 30, temperature: 0.3)
+                    // maxTokens: 20 keeps completions short (2-5 words) and fast
+                    let params = GenerateParameters(maxTokens: 20, temperature: 0.2)
                     let stream = try MLXLMCommon.generate(
                         input: prepared,
                         parameters: params,
@@ -111,7 +132,7 @@ class LLMEngine {
             MLX.Memory.clearCache()
             
             print("[TypeFlow-Debug] LLMEngine: Generation successful. Result: '\(result)'")
-            return result.trimmingCharacters(in: .whitespacesAndNewlines)
+            return result.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             
         } catch {
             print("[TypeFlow-Debug] LLMEngine Error during container.perform: \(error)")
