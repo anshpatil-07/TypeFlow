@@ -13,6 +13,16 @@ class MenuBarManager {
         }
         
         setupMenu()
+        
+        NotificationCenter.default.addObserver(
+            forName: Notification.Name("TypeFlowModelLoadingStateChanged"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            if let isLoading = notification.object as? Bool {
+                self?.updateStatusItemIcon(isLoading: isLoading)
+            }
+        }
     }
     
     func setupMenu() {
@@ -58,5 +68,13 @@ class MenuBarManager {
     
     @objc func quit() {
         NSApplication.shared.terminate(nil)
+    }
+    
+    func updateStatusItemIcon(isLoading: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let button = self.statusItem.button else { return }
+            let symbolName = isLoading ? "ellipsis.bubble.fill" : "text.bubble.fill"
+            button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "TypeFlow")
+        }
     }
 }
