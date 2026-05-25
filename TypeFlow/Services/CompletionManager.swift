@@ -103,7 +103,10 @@ class CompletionManager: @unchecked Sendable {
                 processedCompletion = processedCompletion.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             
-            print("[TypeFlow-Debug] Processed completion (after stripping \(overlapLength) chars overlap): '\(processedCompletion)'")
+            // Strip markdown formatting
+            processedCompletion = self.stripMarkdown(processedCompletion)
+            
+            print("[TypeFlow-Debug] Processed completion (after stripping \(overlapLength) chars overlap & markdown): '\(processedCompletion)'")
             
             DispatchQueue.main.async {
                 self.currentCompletion = processedCompletion
@@ -126,8 +129,6 @@ class CompletionManager: @unchecked Sendable {
     
     func handleTabPressed() -> Bool {
         if let completion = currentCompletion, !completion.isEmpty {
-            // Append the accepted completion to the keystroke buffer to maintain context
-            accessibilityMonitor?.appendCompletionToKeystrokeBuffer(completion)
             // Inject the text
             TextInjector.shared.inject(text: completion)
             clearCompletion()
@@ -139,5 +140,27 @@ class CompletionManager: @unchecked Sendable {
     func clearCompletion() {
         currentCompletion = nil
         overlayWindowController?.updateText("")
+    }
+    
+    func stripMarkdown(_ text: String) -> String {
+        var result = text
+        // Remove bold/italic markup: **, *, __, _
+        result = result.replacingOccurrences(of: "**", with: "")
+        result = result.replacingOccurrences(of: "__", with: "")
+        result = result.replacingOccurrences(of: "*", with: "")
+        result = result.replacingOccurrences(of: "_", with: "")
+        result = result.replacingOccurrences(of: "`", with: "")
+        
+        // Remove header markers like #, ##
+        result = result.replacingOccurrences(of: "#", with: "")
+        
+        // Trim leading bullet symbols or markdown list symbols: e.g. "- ", "+ ", "* "
+        let pattern = "^(\\s*[-+*]\\s+)+"
+        if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+            let range = NSRange(location: 0, length: result.utf16.count)
+            result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: "")
+        }
+        
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

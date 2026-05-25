@@ -230,12 +230,6 @@ class AccessibilityMonitor {
         }
     }
     
-    func appendCompletionToKeystrokeBuffer(_ completion: String) {
-        keystrokeBuffer += completion
-        capKeystrokeBuffer()
-        print("[TypeFlow-Debug] Appended completion '\(completion)' to buffer. Buffer is now '\(keystrokeBuffer)'")
-    }
-    
     func handleKeystroke(keyCode: Int64, event: CGEvent) {
         // Navigation / Action keys that reset the buffer
         // 36: Return, 76: Enter (numpad), 53: Escape, 48: Tab

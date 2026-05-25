@@ -82,18 +82,13 @@ class LLMEngine {
         }
         
         // ── Build the chat messages ──────────────────────────────────────────
-        // Using Chat.Message so the model's built-in chat template wraps tokens.
-        // Bare minimum prompt without system message, XML tags, or conversational instructions.
-        var userPrompt = "Complete this text with 2-5 words only:\n\n\(textBeforeCaret)"
-        if !tone.isEmpty && tone != "neutral" {
-            userPrompt += "\nTone: \(tone)"
-        }
-        if !customInstructions.isEmpty {
-            userPrompt += "\nRules: \(customInstructions)"
-        }
+        // Minimal fill-in-the-blank prompt: [TEXT]___
+        // Uses only the last 100 characters of user input.
+        let contextText = String(textBeforeCaret.suffix(100))
+        let prompt = "\(contextText)___"
         
         let messages: [Chat.Message] = [
-            .user(userPrompt)
+            .user(prompt)
         ]
         
         print("[TypeFlow-Debug] LLMEngine: Input text: '\(textBeforeCaret)'")
