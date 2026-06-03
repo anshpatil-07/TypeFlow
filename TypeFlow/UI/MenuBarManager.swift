@@ -34,6 +34,7 @@ class MenuBarManager {
         
         menu.addItem(NSMenuItem.separator())
         
+        menu.addItem(NSMenuItem(title: "Dashboard...", action: #selector(openDashboard), keyEquivalent: "d"))
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         
@@ -47,6 +48,7 @@ class MenuBarManager {
     }
     
     var settingsWindow: NSWindow?
+    var dashboardWindow: NSWindow?
     
     @objc func openSettings() {
         if settingsWindow == nil {
@@ -64,6 +66,22 @@ class MenuBarManager {
         settingsWindow?.contentView = NSHostingView(rootView: SettingsView().frame(width: 600, height: 450))
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func openDashboard() {
+        if dashboardWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 700, height: 520),
+                styleMask: [.titled, .closable, .miniaturizable],
+                backing: .buffered, defer: false)
+            window.title = "TypeFlow Dashboard"
+            window.isReleasedWhenClosed = false
+            window.center()
+            self.dashboardWindow = window
+        }
+        dashboardWindow?.contentView = NSHostingView(rootView: DashboardView())
+        NSApp.activate(ignoringOtherApps: true)
+        dashboardWindow?.makeKeyAndOrderFront(nil)
     }
     
     @objc func quit() {
