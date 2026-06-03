@@ -361,6 +361,7 @@ class CompletionManager: @unchecked Sendable {
             DispatchQueue.main.async {
                 self.currentCompletion = processedCompletion
                 if !processedCompletion.isEmpty {
+                    UsageStatsManager.shared.recordCompletionShown()
                     if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
                         print("[TypeFlow-Debug] Telling overlay to move to caret rect: \(rect)")
                         self.overlayWindowController?.moveOverlay(to: rect)
@@ -383,6 +384,7 @@ class CompletionManager: @unchecked Sendable {
             let deleteCount = calculateDeleteCount(activeLine: activeLine, misspelled: spellCorrection.misspelled)
             print("[TypeFlow-Debug] Accept spell correction: activeLine='\(activeLine)', misspelled='\(spellCorrection.misspelled)', dynamically calculated deleteCount=\(deleteCount)")
             print("[TypeFlow-Debug] Accept spell correction: injecting \(deleteCount) backspaces and typing '\(spellCorrection.corrected)'")
+            UsageStatsManager.shared.recordSpellCorrection()
             TextInjector.shared.injectBackspaces(count: deleteCount)
             TextInjector.shared.inject(text: spellCorrection.corrected)
             clearCompletion()
@@ -403,6 +405,7 @@ class CompletionManager: @unchecked Sendable {
             
             // Delete the shortcode
             let deleteCount = snippetKey.count
+            UsageStatsManager.shared.recordSnippetFired()
             TextInjector.shared.injectBackspaces(count: deleteCount)
             
             // Inject replacement text and handle caret offset
@@ -417,6 +420,7 @@ class CompletionManager: @unchecked Sendable {
             TypingHistoryManager.shared.logSentence(activeLine + completion)
             
             // Inject the text
+            UsageStatsManager.shared.recordCompletionAccepted(charactersSaved: completion.count)
             TextInjector.shared.inject(text: completion)
             clearCompletion()
             return true // We handled it
