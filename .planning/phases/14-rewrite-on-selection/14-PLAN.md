@@ -119,11 +119,66 @@ Add `generateRewrite` method to `LLMEngine` to execute single-turn inference.
   </task>
   ```
 
-#### [MODIFY] [AccessibilityMonitor.swift](file:///Users/anshalankarpatil/Documents/cotyper/TypeFlow/Services/AccessibilityMonitor.swift)
-Implement key interception for Option+R and selected text retrieval.
+#### [MODIFY] [SettingsManager.swift](file:///Users/anshalankarpatil/Documents/cotyper/TypeFlow/Services/SettingsManager.swift)
+Add customizable shortcut storage.
 
-- **Objective**: Capture selection via AX and catch Option+R hotkey.
+- **Objective**: Store shortcut preferences persistently.
 - **Dependencies**: None.
+- **Task**:
+  ```xml
+  <task id="settings-manager-rewrite-shortcut">
+    <read_first>
+      - TypeFlow/Services/SettingsManager.swift
+    </read_first>
+    <action>
+      Add persistent setting property for the rewrite shortcut:
+      ```swift
+      @AppStorage("rewriteShortcut") var rewriteShortcut: String = "Option+R"
+      ```
+    </action>
+    <acceptance_criteria>
+      - SettingsManager.swift contains property `rewriteShortcut`
+    </acceptance_criteria>
+  </task>
+  ```
+
+#### [MODIFY] [SettingsView.swift](file:///Users/anshalankarpatil/Documents/cotyper/TypeFlow/UI/SettingsView.swift)
+Provide selection UI for customizable rewrite shortcuts.
+
+- **Objective**: Let user configure shortcut options.
+- **Dependencies**: `SettingsManager.swift` changes.
+- **Task**:
+  ```xml
+  <task id="settings-view-rewrite-shortcut">
+    <read_first>
+      - TypeFlow/UI/SettingsView.swift
+    </read_first>
+    <action>
+      Add a Picker for shortcut options in the General tab:
+      ```swift
+      Picker("Rewrite Shortcut:", selection: $settings.rewriteShortcut) {
+          Text("Option + R (⌥R)").tag("Option+R")
+          Text("Option + E (⌥E)").tag("Option+E")
+          Text("Option + W (⌥W)").tag("Option+W")
+          Text("Control + R (⌃R)").tag("Control+R")
+          Text("Control + E (⌃E)").tag("Control+E")
+          Text("Control + W (⌃W)").tag("Control+W")
+      }
+      .pickerStyle(DefaultPickerStyle())
+      .padding(.top)
+      ```
+    </action>
+    <acceptance_criteria>
+      - SettingsView.swift contains a Picker for `rewriteShortcut` under the General tab
+    </acceptance_criteria>
+  </task>
+  ```
+
+#### [MODIFY] [AccessibilityMonitor.swift](file:///Users/anshalankarpatil/Documents/cotyper/TypeFlow/Services/AccessibilityMonitor.swift)
+Implement key interception for configured shortcut and selected text retrieval.
+
+- **Objective**: Capture selection via AX and catch selected global hotkey.
+- **Dependencies**: `SettingsManager.swift` changes.
 - **Task**:
   ```xml
   <task id="accessibility-monitor-rewrite">
@@ -143,24 +198,38 @@ Implement key interception for Option+R and selected text retrieval.
           return nil
       }
       ```
-      2. Inside `start()` method, inside the event tap callback handler where key events are captured:
+      2. Add helper method `matchesRewriteShortcut` to resolve dynamic setting:
+      ```swift
+      private func matchesRewriteShortcut(keyCode: Int64, flags: CGEventFlags) -> Bool {
+          let shortcut = SettingsManager.shared.rewriteShortcut
+          switch shortcut {
+          case "Option+R": return keyCode == 15 && flags.contains(.maskAlternate)
+          case "Option+E": return keyCode == 14 && flags.contains(.maskAlternate)
+          case "Option+W": return keyCode == 13 && flags.contains(.maskAlternate)
+          case "Control+R": return keyCode == 15 && flags.contains(.maskControl)
+          case "Control+E": return keyCode == 14 && flags.contains(.maskControl)
+          case "Control+W": return keyCode == 13 && flags.contains(.maskControl)
+          default: return keyCode == 15 && flags.contains(.maskAlternate)
+          }
+      }
+      ```
+      3. Inside `start()` method, inside the event tap callback handler where key events are captured:
       ```swift
       let flags = event.flags
       let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
       
-      // Option + R shortcut (R keycode is 15)
-      if keyCode == 15 && flags.contains(.maskAlternate) {
-          print("[TypeFlow] Option + R pressed — triggering Rewrite selection")
+      if matchesRewriteShortcut(keyCode: keyCode, flags: flags) {
+          print("[TypeFlow] Intercepted Rewrite Shortcut — triggering Rewrite selection")
           DispatchQueue.main.async {
               CompletionManager.shared.triggerRewrite()
           }
-          return nil // Consume event to prevent printing '®'
+          return nil // Consume event to prevent printing characters
       }
       ```
     </action>
     <acceptance_criteria>
-      - AccessibilityMonitor.swift contains function `getSelectedText()`
-      - AccessibilityMonitor.swift event tap intercepts keycode `15` with flag `.maskAlternate`
+      - AccessibilityMonitor.swift contains functions `getSelectedText()` and `matchesRewriteShortcut(keyCode:flags:)`
+      - AccessibilityMonitor.swift event tap calls `matchesRewriteShortcut` and intercepts configured hotkey
     </acceptance_criteria>
   </task>
   ```
