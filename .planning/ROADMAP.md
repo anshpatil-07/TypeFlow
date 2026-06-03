@@ -86,10 +86,10 @@ Plans:
 
 ### Phase 12: Snippet Memory and Shortcodes
 
-**Goal:** [To be planned]
-**Requirements**: TBD
+**Goal:** Implement dynamic shortcode variables and automatic snippet learning: dynamic placeholders, prefix requirements, word boundary checks, encrypted storage, and automatic snippet suggestions from typing history.
+**Requirements**: SNIP-01, SNIP-02, SNIP-03, SNIP-04
 **Depends on:** Phase 11
-**Plans:** 0 plans
+**Plans:** 1 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 12 to break down)
+- [ ] 12-PLAN.md (Wave 1: dynamic variables, boundaries, secure storage, and auto-suggestion)
