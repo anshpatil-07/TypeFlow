@@ -48,11 +48,15 @@ class TypingHistoryManager {
         let keyName = "com.cotyper.TypeFlow.historyKey"
         if let keyData = KeychainHelper.load(key: keyName) {
             symmetricKey = SymmetricKey(data: keyData)
+            print("[TypeFlow-Debug] TypingHistoryManager: Loaded existing symmetric key from Keychain")
         } else {
             let newKey = SymmetricKey(size: .bits256)
             let newKeyData = newKey.withUnsafeBytes { Data($0) }
             if KeychainHelper.save(key: keyName, data: newKeyData) {
                 symmetricKey = newKey
+                print("[TypeFlow-Debug] TypingHistoryManager: Generated and saved new symmetric key to Keychain")
+            } else {
+                print("[TypeFlow-Debug] TypingHistoryManager: ERROR - Failed to save key to Keychain!")
             }
         }
         
@@ -60,15 +64,22 @@ class TypingHistoryManager {
     }
     
     func logSentence(_ sentence: String) {
-        guard SettingsManager.shared.personalizationEnabled else { return }
+        guard SettingsManager.shared.personalizationEnabled else {
+            print("[TypeFlow-Debug] TypingHistoryManager: Personalization disabled, skipping logSentence for: '\(sentence)'")
+            return
+        }
         
         let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         
         // Don't add duplicate adjacent sentences
-        if history.last == trimmed { return }
+        if history.last == trimmed {
+            print("[TypeFlow-Debug] TypingHistoryManager: Skipping duplicate adjacent sentence: '\(trimmed)'")
+            return
+        }
         
         history.append(trimmed)
+        print("[TypeFlow-Debug] TypingHistoryManager: Logged sentence: '\(trimmed)' (total history items: \(history.count))")
         
         // Enforce rolling window of 1,000 sentences
         if history.count > 1000 {
@@ -76,6 +87,9 @@ class TypingHistoryManager {
         }
         
         saveHistory()
+        
+        // Dynamically update custom vocabulary after a sentence is logged
+        VocabularyExtractor.shared.extractVocabulary()
     }
     
     func logSentenceFromText(_ text: String) {
@@ -147,22 +161,37 @@ class TypingHistoryManager {
     }
     
     private func saveHistory() {
-        guard let key = symmetricKey else { return }
-        if let data = try? JSONEncoder().encode(history),
-           let sealedBox = try? AES.GCM.seal(data, using: key) {
-            try? sealedBox.combined?.write(to: fileURL)
+        guard let key = symmetricKey else {
+            print("[TypeFlow-Debug] TypingHistoryManager: saveHistory failed - symmetricKey is nil")
+            return
+        }
+        do {
+            let data = try JSONEncoder().encode(history)
+            let sealedBox = try AES.GCM.seal(data, using: key)
+            try sealedBox.combined?.write(to: fileURL)
+            print("[TypeFlow-Debug] TypingHistoryManager: Saved \(history.count) history items to disk (encrypted)")
+        } catch {
+            print("[TypeFlow-Debug] TypingHistoryManager: ERROR saving history: \(error)")
         }
     }
     
     private func loadHistory() {
-        guard let key = symmetricKey,
-              let encryptedData = try? Data(contentsOf: fileURL),
-              let sealedBox = try? AES.GCM.SealedBox(combined: encryptedData),
-              let decryptedData = try? AES.GCM.open(sealedBox, using: key),
-              let decoded = try? JSONDecoder().decode([String].self, from: decryptedData) else {
+        guard let key = symmetricKey else {
+            print("[TypeFlow-Debug] TypingHistoryManager: loadHistory failed - symmetricKey is nil")
             history = []
             return
         }
-        history = decoded
+        do {
+            let encryptedData = try Data(contentsOf: fileURL)
+            let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+            let decryptedData = try AES.GCM.open(sealedBox, using: key)
+            let decoded = try JSONDecoder().decode([String].self, from: decryptedData)
+            history = decoded
+            print("[TypeFlow-Debug] TypingHistoryManager: Loaded \(history.count) history items from disk (decrypted)")
+        } catch {
+            print("[TypeFlow-Debug] TypingHistoryManager: ERROR loading history: \(error)")
+            history = []
+        }
     }
 }
+

@@ -8,8 +8,12 @@ class PromptBuilder {
     func buildPrompt(textBeforeCaret: String) -> String {
         var prompt = ""
         
-        if SettingsManager.shared.personalizationEnabled {
+        let personalizationActive = SettingsManager.shared.personalizationEnabled
+        print("[TypeFlow-Debug] PromptBuilder: personalizationEnabled=\(personalizationActive)")
+        
+        if personalizationActive {
             let samples = TypingHistoryManager.shared.getRelevantSamples(for: textBeforeCaret, count: 3)
+            print("[TypeFlow-Debug] PromptBuilder: matched \(samples.count) relevant writing samples")
             if !samples.isEmpty {
                 prompt += "[Past user writing samples]:\n"
                 for sample in samples {
@@ -19,6 +23,7 @@ class PromptBuilder {
             }
             
             let vocab = VocabularyExtractor.shared.getVocabulary()
+            print("[TypeFlow-Debug] PromptBuilder: active vocabulary words count: \(vocab.count) (\(vocab))")
             if !vocab.isEmpty {
                 let vocabStr = vocab.joined(separator: ", ")
                 prompt += "[User vocabulary & jargon]:\n\(vocabStr)\n\n"
