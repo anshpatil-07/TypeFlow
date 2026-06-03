@@ -34,11 +34,18 @@ class VocabularyExtractor {
     }
     
     func extractVocabulary() {
-        guard SettingsManager.shared.personalizationEnabled else { return }
+        guard SettingsManager.shared.personalizationEnabled else {
+            print("[TypeFlow-Debug] VocabularyExtractor: Personalization disabled, skipping extraction")
+            return
+        }
         
         let history = TypingHistoryManager.shared.getHistory()
-        guard !history.isEmpty else { return }
+        guard !history.isEmpty else {
+            print("[TypeFlow-Debug] VocabularyExtractor: History is empty, skipping extraction")
+            return
+        }
         
+        print("[TypeFlow-Debug] VocabularyExtractor: Starting vocabulary extraction on \(history.count) history sentences...")
         let stopwords: Set<String> = [
             "the", "and", "a", "of", "to", "in", "is", "you", "that", "it", 
             "he", "was", "for", "on", "are", "as", "with", "his", "they", 
@@ -78,6 +85,7 @@ class VocabularyExtractor {
         DispatchQueue.main.async {
             self.vocabulary = topWords
             self.saveVocabulary()
+            print("[TypeFlow-Debug] VocabularyExtractor: Successfully extracted \(topWords.count) vocabulary words: \(topWords)")
         }
     }
     
