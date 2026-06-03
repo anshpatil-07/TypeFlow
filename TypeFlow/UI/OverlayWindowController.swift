@@ -4,25 +4,49 @@ import SwiftUI
 class CompletionModel: ObservableObject {
     @Published var text: String = ""
     @Published var isSpellCorrection: Bool = false
+    @Published var isRewrite: Bool = false
+    @Published var isLoading: Bool = false
 }
 
 struct CompletionOverlayView: View {
     @ObservedObject var model: CompletionModel
     
     var body: some View {
-        if model.text.isEmpty {
+        if model.text.isEmpty && !model.isLoading {
             Color.clear
         } else {
-            Text(model.text)
-                .foregroundColor(model.isSpellCorrection ? Color.orange : Color.secondary)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 2)
-                .background(
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color(NSColor.windowBackgroundColor).opacity(0.9))
-                )
-                .font(.system(size: 13, weight: .regular))
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            HStack(spacing: 6) {
+                if model.isLoading {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 14, height: 14)
+                } else if model.isRewrite {
+                    Text("REWRITE")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(
+                            LinearGradient(
+                                colors: [Color.teal, Color.blue],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .cornerRadius(3)
+                }
+                
+                Text(model.isLoading ? "Rewriting selection..." : model.text)
+                    .foregroundColor(model.isRewrite ? Color.primary : (model.isSpellCorrection ? Color.orange : Color.secondary))
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color(NSColor.windowBackgroundColor).opacity(0.9))
+            )
+            .font(.system(size: 13, weight: .regular))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
     }
 }
@@ -61,12 +85,17 @@ class OverlayWindowController: NSWindowController {
     }
     
     private func repositionWindow() {
-        guard !completionModel.text.isEmpty else { return }
+        guard !completionModel.text.isEmpty || completionModel.isLoading else { return }
         
         let font = NSFont.systemFont(ofSize: 13, weight: .regular)
         let attributes = [NSAttributedString.Key.font: font]
-        let size = (completionModel.text as NSString).size(withAttributes: attributes)
-        let textWidth = size.width + 12 // text width + horizontal padding
+        let measureText = completionModel.isLoading ? "Rewriting selection..." : completionModel.text
+        let size = (measureText as NSString).size(withAttributes: attributes)
+        var textWidth = size.width + 12 // text width + horizontal padding
+        
+        if completionModel.isRewrite && !completionModel.isLoading {
+            textWidth += 65 // Extra padding for rewrite pill badge
+        }
         
         // macOS screen coordinates: (0,0) is bottom-left, but AX returns coordinates from top-left.
         // We need to flip the y coordinate based on the main display bounds.
@@ -84,13 +113,15 @@ class OverlayWindowController: NSWindowController {
         overlayWindow.setFrame(newFrame, display: true)
     }
     
-    func updateText(_ newText: String, isSpellCorrection: Bool = false) {
-        print("[TypeFlow-Debug] OverlayWindowController updateText received: '\(newText)', isSpellCorrection: \(isSpellCorrection)")
+    func updateText(_ newText: String, isSpellCorrection: Bool = false, isRewrite: Bool = false, isLoading: Bool = false) {
+        print("[TypeFlow-Debug] OverlayWindowController updateText received: '\(newText)', isSpellCorrection: \(isSpellCorrection), isRewrite: \(isRewrite), isLoading: \(isLoading)")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.completionModel.isSpellCorrection = isSpellCorrection
+            self.completionModel.isRewrite = isRewrite
+            self.completionModel.isLoading = isLoading
             self.completionModel.text = newText
-            if newText.isEmpty {
+            if newText.isEmpty && !isLoading {
                 print("[TypeFlow-Debug] Hiding overlay window")
                 self.overlayWindow.orderOut(nil)
             } else {
