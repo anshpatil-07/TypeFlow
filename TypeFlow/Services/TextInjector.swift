@@ -30,4 +30,20 @@ class TextInjector {
             }
         }
     }
+    
+    func injectBackspaces(count: Int) {
+        guard let source = CGEventSource(stateID: .combinedSessionState) else { return }
+        
+        isInjecting = true
+        defer { isInjecting = false }
+        
+        for _ in 0..<count {
+            if let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: true) {
+                keyDownEvent.post(tap: .cgSessionEventTap)
+            }
+            if let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: false) {
+                keyUpEvent.post(tap: .cgSessionEventTap)
+            }
+        }
+    }
 }

@@ -3,6 +3,7 @@ import SwiftUI
 
 class CompletionModel: ObservableObject {
     @Published var text: String = ""
+    @Published var isSpellCorrection: Bool = false
 }
 
 struct CompletionOverlayView: View {
@@ -13,7 +14,7 @@ struct CompletionOverlayView: View {
             Color.clear
         } else {
             Text(model.text)
-                .foregroundColor(Color.secondary)
+                .foregroundColor(model.isSpellCorrection ? Color.orange : Color.secondary)
                 .padding(.horizontal, 4)
                 .padding(.vertical, 2)
                 .background(
@@ -83,10 +84,11 @@ class OverlayWindowController: NSWindowController {
         overlayWindow.setFrame(newFrame, display: true)
     }
     
-    func updateText(_ newText: String) {
-        print("[TypeFlow-Debug] OverlayWindowController updateText received: '\(newText)'")
+    func updateText(_ newText: String, isSpellCorrection: Bool = false) {
+        print("[TypeFlow-Debug] OverlayWindowController updateText received: '\(newText)', isSpellCorrection: \(isSpellCorrection)")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            self.completionModel.isSpellCorrection = isSpellCorrection
             self.completionModel.text = newText
             if newText.isEmpty {
                 print("[TypeFlow-Debug] Hiding overlay window")

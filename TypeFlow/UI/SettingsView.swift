@@ -21,6 +21,12 @@ struct SettingsView: View {
                     Text("Concise").tag("Concise")
                 }
                 .padding(.top)
+                
+                Toggle("Auto-correct misspelled words as you type", isOn: $settings.autoCorrectEnabled)
+                    .padding(.top)
+                
+                Toggle("Enable personalization (Typing History)", isOn: $settings.personalizationEnabled)
+                    .padding(.top)
             }
             .padding()
             .tabItem {
