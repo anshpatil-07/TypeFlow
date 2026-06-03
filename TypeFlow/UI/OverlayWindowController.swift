@@ -129,8 +129,9 @@ struct CompletionOverlayView: View {
 }
 
 // ─── Custom Window Subclass ──────────────────────────────────────────────────
-class OverlayWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
+class OverlayWindow: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let keyCode = event.keyCode
@@ -187,7 +188,7 @@ class OverlayWindowController: NSWindowController {
 
         overlayWindow = OverlayWindow(
             contentRect: CGRect(x: 0, y: 0, width: 360, height: 32),
-            styleMask: .borderless,
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
