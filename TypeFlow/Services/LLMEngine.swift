@@ -65,8 +65,8 @@ class LLMEngine {
     /// Generate a completion for the given text-before-caret.
     /// Uses the chat message API so the model's instruct chat template is applied,
     /// preventing the model from echoing the raw prompt tokens.
-    func generateCompletion(textBeforeCaret: String, tone: String, customInstructions: String) async -> String {
-        print("[TypeFlow-Debug] LLMEngine: generateCompletion called")
+    func generateCompletion(textBeforeCaret: String, toneProfile: ToneProfile) async -> String {
+        print("[TypeFlow-Debug] LLMEngine: generateCompletion called with tone \(toneProfile.name) (temp: \(toneProfile.temperature), maxTokens: \(toneProfile.maxTokens))")
         await loadModelIfNeeded()
         
         guard let container = modelContainer else {
@@ -84,7 +84,7 @@ class LLMEngine {
         }
         
         // ── Build the prompt ──────────────────────────────────────────────────
-        let prompt = PromptBuilder.shared.buildPrompt(textBeforeCaret: textBeforeCaret)
+        let prompt = PromptBuilder.shared.buildPrompt(textBeforeCaret: textBeforeCaret, systemInstructions: toneProfile.systemInstructions)
         
         print("[TypeFlow-Debug] LLMEngine: Input prompt:\n\(prompt)")
         
@@ -95,8 +95,7 @@ class LLMEngine {
                     let input = UserInput(prompt: prompt)
                     let prepared = try await modelContext.processor.prepare(input: input)
                     print("[TypeFlow-Debug] LLMEngine: Input prepared. Starting generate stream...")
-                    // maxTokens: 20 keeps completions short (2-5 words) and fast
-                    let params = GenerateParameters(maxTokens: 20, temperature: 0.2)
+                    let params = GenerateParameters(maxTokens: toneProfile.maxTokens, temperature: Float(toneProfile.temperature))
                     let stream = try MLXLMCommon.generate(
                         input: prepared,
                         parameters: params,

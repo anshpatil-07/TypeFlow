@@ -315,8 +315,7 @@ class CompletionManager: @unchecked Sendable {
         currentGenerationTask = Task {
             let completion = await LLMEngine.shared.generateCompletion(
                 textBeforeCaret: activeLine,
-                tone: effectiveConfig.tone,
-                customInstructions: effectiveConfig.instructions
+                toneProfile: effectiveConfig.toneProfile
             )
             print("[TypeFlow-Debug] Raw model output: '\(completion)'")
             if Task.isCancelled {
