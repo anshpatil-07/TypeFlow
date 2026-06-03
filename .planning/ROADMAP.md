@@ -106,3 +106,13 @@ Plans:
 
 Plans:
 - [x] 13-PLAN.md (Wave 1: UsageStatsManager + instrumentation | Wave 2: DashboardView + menu wiring)
+
+### Phase 14: Rewrite on Selection
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 13
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 14 to break down)
