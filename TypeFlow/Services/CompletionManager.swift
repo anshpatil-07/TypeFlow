@@ -11,6 +11,7 @@ class CompletionManager: @unchecked Sendable {
     private var currentGenerationTask: Task<Void, Never>?
     
     private var pendingCompletionRequest: String?
+    private var activeSpellCorrection: (misspelled: String, corrected: String)?
     
     private init() {
         NotificationCenter.default.addObserver(
@@ -34,6 +35,126 @@ class CompletionManager: @unchecked Sendable {
         self.overlayWindowController = overlayWindowController
     }
     
+    func getLastWord(from text: String) -> (word: String, range: NSRange)? {
+        guard !text.isEmpty else { return nil }
+        
+        let chars = Array(text)
+        var startIndex = chars.count
+        
+        var foundWordChar = false
+        for i in (0..<chars.count).reversed() {
+            let char = chars[i]
+            let isWordChar = char.isLetter || char.isNumber || char == "'"
+            if isWordChar {
+                startIndex = i
+                foundWordChar = true
+            } else {
+                break
+            }
+        }
+        
+        guard foundWordChar else { return nil }
+        
+        let word = String(chars[startIndex...])
+        let utf16Text = text.utf16
+        let startOffset = String(chars[..<startIndex]).utf16.count
+        let length = word.utf16.count
+        let range = NSRange(location: startOffset, length: length)
+        
+        return (word, range)
+    }
+    
+    func getSpellCorrection(in text: String, lastWordRange: NSRange) -> String? {
+        guard lastWordRange.length >= 4 else { return nil }
+        
+        let spellChecker = NSSpellChecker.shared
+        let language = spellChecker.language()
+        
+        let startingAt = max(0, lastWordRange.location - 1)
+        let misspelledRange = spellChecker.checkSpelling(
+            of: text,
+            startingAt: startingAt,
+            language: language,
+            wrap: false,
+            inSpellDocumentWithTag: 0,
+            wordCount: nil
+        )
+        
+        let isMisspelled = (misspelledRange.location == lastWordRange.location && misspelledRange.length == lastWordRange.length)
+        guard isMisspelled else { return nil }
+        
+        if let corr = spellChecker.correction(forWordRange: lastWordRange, in: text, language: language, inSpellDocumentWithTag: 0), !corr.isEmpty {
+            return corr
+        }
+        
+        if let guesses = spellChecker.guesses(forWordRange: lastWordRange, in: text, language: language, inSpellDocumentWithTag: 0), !guesses.isEmpty {
+            let word = (text as NSString).substring(with: lastWordRange)
+            let wordLower = word.lowercased()
+            let prefix2 = String(wordLower.prefix(2))
+            if let bestMatch = guesses.first(where: { $0.lowercased().hasPrefix(prefix2) }) {
+                return bestMatch
+            }
+            let prefix1 = String(wordLower.prefix(1))
+            if let firstMatch = guesses.first(where: { $0.lowercased().hasPrefix(prefix1) }) {
+                return firstMatch
+            }
+        }
+        
+        return nil
+    }
+    
+    func getGhostText(misspelled: String, correction: String) -> String {
+        let misLower = misspelled.lowercased()
+        let corrLower = correction.lowercased()
+        if corrLower.hasPrefix(misLower) {
+            return String(correction.dropFirst(misspelled.count))
+        } else {
+            return correction
+        }
+    }
+    
+    private func calculateDeleteCount(activeLine: String, misspelled: String) -> Int {
+        if let range = activeLine.range(of: misspelled, options: [.backwards, .caseInsensitive]) {
+            return activeLine.utf16.distance(from: range.lowerBound, to: activeLine.endIndex)
+        }
+        return misspelled.count
+    }
+    
+    private func getCompletedWord(from text: String) -> (word: String, delimiter: String, range: NSRange)? {
+        guard !text.isEmpty else { return nil }
+        
+        let chars = Array(text)
+        let lastChar = chars.last!
+        
+        let delimiters: Set<Character> = [" ", ".", ",", "!", "?"]
+        guard delimiters.contains(lastChar) else { return nil }
+        
+        let delimiter = String(lastChar)
+        
+        var startIndex = chars.count - 1
+        var foundWordChar = false
+        
+        for i in (0..<(chars.count - 1)).reversed() {
+            let char = chars[i]
+            let isWordChar = char.isLetter || char.isNumber || char == "'"
+            if isWordChar {
+                startIndex = i
+                foundWordChar = true
+            } else {
+                break
+            }
+        }
+        
+        guard foundWordChar else { return nil }
+        
+        let word = String(chars[startIndex..<(chars.count - 1)])
+        let startOffset = String(chars[..<startIndex]).utf16.count
+        let length = word.utf16.count
+        let range = NSRange(location: startOffset, length: length)
+        
+        return (word, delimiter, range)
+    }
+    
     func onTextChanged() {
         print("[TypeFlow-Debug] onTextChanged called")
         
@@ -47,7 +168,100 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // Debounce generation
+        let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+        
+        TypingHistoryManager.shared.logSentenceFromText(activeLine)
+        
+        // 1. Check if the user just typed a completed word followed by a delimiter
+        if let completedWordInfo = getCompletedWord(from: activeLine) {
+            let word = completedWordInfo.word
+            let wordRange = completedWordInfo.range
+            let delimiter = completedWordInfo.delimiter
+            
+            if word.count >= 4, let correction = getSpellCorrection(in: activeLine, lastWordRange: wordRange) {
+                print("[TypeFlow-Debug] Completed word spell correction found: '\(word)' -> '\(correction)'")
+                
+                // Cancel any pending LLM generation tasks
+                debounceTimer?.invalidate()
+                debounceTimer = nil
+                currentGenerationTask?.cancel()
+                currentGenerationTask = nil
+                
+                if SettingsManager.shared.autoCorrectEnabled {
+                    print("[TypeFlow-Debug] Auto-correct is enabled. Automatically correcting '\(word)' to '\(correction)'")
+                    let deleteCount = calculateDeleteCount(activeLine: activeLine, misspelled: word)
+                    TextInjector.shared.injectBackspaces(count: deleteCount)
+                    TextInjector.shared.inject(text: correction + delimiter)
+                    clearCompletion()
+                    return
+                } else {
+                    // Show it as orange ghost text suggestion
+                    activeSpellCorrection = (misspelled: word, corrected: correction)
+                    let ghostText = getGhostText(misspelled: word, correction: correction)
+                    DispatchQueue.main.async {
+                        self.currentCompletion = ghostText
+                        if !ghostText.isEmpty {
+                            if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
+                                self.overlayWindowController?.moveOverlay(to: rect)
+                            }
+                            self.overlayWindowController?.updateText(ghostText, isSpellCorrection: true)
+                        } else {
+                            self.overlayWindowController?.updateText("", isSpellCorrection: true)
+                        }
+                    }
+                    return
+                }
+            }
+        }
+        
+        // 2. If it's not a completed word with delimiter, check if it's an inline word being typed
+        if let lastWordInfo = getLastWord(from: activeLine) {
+            let word = lastWordInfo.word
+            let wordRange = lastWordInfo.range
+            
+            // Only check inline if the word is at least 4 characters long
+            if word.count >= 4 {
+                // Check completions for partial word to see if it is a prefix of a valid word
+                let completions = NSSpellChecker.shared.completions(
+                    forPartialWordRange: NSRange(location: 0, length: word.utf16.count),
+                    in: word,
+                    language: NSSpellChecker.shared.language(),
+                    inSpellDocumentWithTag: 0
+                ) ?? []
+                
+                // If it is a prefix of a valid word (completions is not empty), we STOP using NSSpellChecker
+                // and let it fall through to the LLM completion pipeline!
+                if completions.isEmpty {
+                    if let correction = getSpellCorrection(in: activeLine, lastWordRange: wordRange) {
+                        print("[TypeFlow-Debug] Inline definite typo spell correction found: '\(word)' -> '\(correction)'")
+                        // Cancel any pending LLM generation tasks
+                        debounceTimer?.invalidate()
+                        debounceTimer = nil
+                        currentGenerationTask?.cancel()
+                        currentGenerationTask = nil
+                        
+                        activeSpellCorrection = (misspelled: word, corrected: correction)
+                        
+                        let ghostText = getGhostText(misspelled: word, correction: correction)
+                        
+                        DispatchQueue.main.async {
+                            self.currentCompletion = ghostText
+                            if !ghostText.isEmpty {
+                                if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
+                                    self.overlayWindowController?.moveOverlay(to: rect)
+                                }
+                                self.overlayWindowController?.updateText(ghostText, isSpellCorrection: true)
+                            } else {
+                                self.overlayWindowController?.updateText("", isSpellCorrection: true)
+                            }
+                        }
+                        return
+                    }
+                }
+            }
+        }
+        
+        // Debounce generation (strict 150ms debounce timer)
         debounceTimer?.invalidate()
         debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
             print("[TypeFlow-Debug] Debounce timer fired!")
@@ -131,6 +345,8 @@ class CompletionManager: @unchecked Sendable {
             
             print("[TypeFlow-Debug] Processed completion (after stripping \(overlapLength) chars overlap & markdown): '\(processedCompletion)'")
             
+            if Task.isCancelled { return }
+            
             DispatchQueue.main.async {
                 self.currentCompletion = processedCompletion
                 if !processedCompletion.isEmpty {
@@ -151,7 +367,21 @@ class CompletionManager: @unchecked Sendable {
     }
     
     func handleTabPressed() -> Bool {
+        if let spellCorrection = activeSpellCorrection {
+            let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+            let deleteCount = calculateDeleteCount(activeLine: activeLine, misspelled: spellCorrection.misspelled)
+            print("[TypeFlow-Debug] Accept spell correction: activeLine='\(activeLine)', misspelled='\(spellCorrection.misspelled)', dynamically calculated deleteCount=\(deleteCount)")
+            print("[TypeFlow-Debug] Accept spell correction: injecting \(deleteCount) backspaces and typing '\(spellCorrection.corrected)'")
+            TextInjector.shared.injectBackspaces(count: deleteCount)
+            TextInjector.shared.inject(text: spellCorrection.corrected)
+            clearCompletion()
+            return true
+        }
+        
         if let completion = currentCompletion, !completion.isEmpty {
+            let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+            TypingHistoryManager.shared.logSentence(activeLine + completion)
+            
             // Inject the text
             TextInjector.shared.inject(text: completion)
             clearCompletion()
@@ -162,6 +392,9 @@ class CompletionManager: @unchecked Sendable {
     
     func clearCompletion() {
         currentCompletion = nil
+        activeSpellCorrection = nil
+        currentGenerationTask?.cancel()
+        currentGenerationTask = nil
         overlayWindowController?.updateText("")
     }
     

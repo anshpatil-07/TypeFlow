@@ -84,10 +84,7 @@ class LLMEngine {
         }
         
         // ── Build the prompt ──────────────────────────────────────────────────
-        // Minimal fill-in-the-blank prompt: <text>[TEXT]</text><completion>
-        // Uses the last 150 characters of user input, with a direct system instruction.
-        let contextText = String(textBeforeCaret.suffix(150))
-        let prompt = "Complete the text. Output only the next few words. No explanation.\n\n<text>\(contextText)</text><completion>"
+        let prompt = PromptBuilder.shared.buildPrompt(textBeforeCaret: textBeforeCaret)
         
         print("[TypeFlow-Debug] LLMEngine: Input prompt:\n\(prompt)")
         

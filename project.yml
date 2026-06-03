@@ -5,6 +5,15 @@ packages:
   mlx-swift:
     url: https://github.com/ml-explore/mlx-swift
     from: 0.12.0
+  mlx-swift-lm:
+    url: https://github.com/ml-explore/mlx-swift-lm
+    from: 3.31.3
+  swift-transformers:
+    url: https://github.com/huggingface/swift-transformers
+    from: 0.1.0
+  swift-huggingface:
+    url: https://github.com/huggingface/swift-huggingface
+    from: 0.0.1
 targets:
   TypeFlow:
     type: application
@@ -17,6 +26,16 @@ targets:
         product: MLX
       - package: mlx-swift
         product: MLXRandom
+      - package: mlx-swift-lm
+        product: MLXLLM
+      - package: mlx-swift-lm
+        product: MLXLMCommon
+      - package: mlx-swift-lm
+        product: MLXHuggingFace
+      - package: swift-transformers
+        product: Transformers
+      - package: swift-huggingface
+        product: HuggingFace
     info:
       path: TypeFlow/Info.plist
       properties:

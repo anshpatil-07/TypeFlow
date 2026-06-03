@@ -6,6 +6,7 @@ class AccessibilityMonitor {
     var onCaretMoved: ((CGRect) -> Void)?
     private var retryTimer: Timer?
     private var keystrokeBuffer: String = ""
+    private var activeAppObserver: AXObserver?
     
     init(onCaretMoved: @escaping (CGRect) -> Void) {
         self.onCaretMoved = onCaretMoved
@@ -14,9 +15,72 @@ class AccessibilityMonitor {
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
-            self?.clearKeystrokeBuffer()
+        ) { [weak self] notification in
+            guard let self = self else { return }
+            print("[TypeFlow-Debug] NSWorkspace.didActivateApplicationNotification triggered")
+            self.clearKeystrokeBuffer()
+            CompletionManager.shared.clearCompletion()
+            
+            if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                self.setupActiveAppObserver(for: app.processIdentifier)
+            } else if let app = NSWorkspace.shared.frontmostApplication {
+                self.setupActiveAppObserver(for: app.processIdentifier)
+            }
         }
+        
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.didDeactivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            print("[TypeFlow-Debug] NSWorkspace.didDeactivateApplicationNotification triggered")
+            self.clearKeystrokeBuffer()
+            CompletionManager.shared.clearCompletion()
+            self.stopActiveAppObserver()
+        }
+    }
+    
+    private func setupActiveAppObserver(for pid: pid_t) {
+        stopActiveAppObserver()
+        
+        var observer: AXObserver?
+        let err = AXObserverCreate(pid, { (observer, element, notification, refcon) in
+            print("[TypeFlow-Debug] AXObserver: kAXFocusedUIElementChangedNotification received!")
+            DispatchQueue.main.async {
+                CompletionManager.shared.clearCompletion()
+                if let ref = refcon {
+                    let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(ref)
+                    let obj = unmanaged.takeUnretainedValue()
+                    obj.clearKeystrokeBuffer()
+                }
+            }
+        }, &observer)
+        
+        if err == .success, let obs = observer {
+            self.activeAppObserver = obs
+            let runLoopSource = AXObserverGetRunLoopSource(obs)
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+            
+            let appRef = AXUIElementCreateApplication(pid)
+            let refcon = Unmanaged.passUnretained(self).toOpaque()
+            let addErr = AXObserverAddNotification(obs, appRef, kAXFocusedUIElementChangedNotification as CFString, refcon)
+            if addErr == .success {
+                print("[TypeFlow-Debug] Successfully registered AXObserver for PID \(pid)")
+            } else {
+                print("[TypeFlow-Debug] Failed to register AXObserver notification: \(addErr.rawValue)")
+            }
+        } else {
+            print("[TypeFlow-Debug] Failed to create AXObserver for PID \(pid): \(err.rawValue)")
+        }
+    }
+    
+    private func stopActiveAppObserver() {
+        guard let obs = activeAppObserver else { return }
+        let runLoopSource = AXObserverGetRunLoopSource(obs)
+        CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        activeAppObserver = nil
+        print("[TypeFlow-Debug] Stopped active app observer")
     }
     
     /// Called once at launch (after 1-second delay). Retries every 2 seconds
@@ -131,6 +195,11 @@ class AccessibilityMonitor {
             runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
             CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
             CGEvent.tapEnable(tap: tap, enable: true)
+            
+            // Also setup active app observer for frontmost application
+            if let app = NSWorkspace.shared.frontmostApplication {
+                self.setupActiveAppObserver(for: app.processIdentifier)
+            }
         }
     }
     
@@ -195,7 +264,49 @@ class AccessibilityMonitor {
             }
         }
         
-        // Fallback: use focused element's position and size
+        // --- Fallback for WebKit/Chromium: AXSelectedTextMarker and AXBoundsForTextMarker ---
+        var markerRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, "AXSelectedTextMarker" as CFString, &markerRef) == .success,
+           let marker = markerRef {
+            var boundsValue: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(
+                axElement,
+                "AXBoundsForTextMarker" as CFString,
+                marker,
+                &boundsValue
+            ) == .success {
+                var rect = CGRect.zero
+                if AXValueGetValue(boundsValue as! AXValue, .cgRect, &rect) {
+                    if rect.width > 0 || rect.height > 0 {
+                        print("[TypeFlow-Debug] Caret rect extracted via AXSelectedTextMarker: \(rect)")
+                        return rect
+                    }
+                }
+            }
+        }
+        
+        // --- Fallback for WebKit/Chromium: AXSelectedTextMarkerRange and AXBoundsForTextMarkerRange ---
+        var markerRangeRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, "AXSelectedTextMarkerRange" as CFString, &markerRangeRef) == .success,
+           let markerRange = markerRangeRef {
+            var boundsValue: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(
+                axElement,
+                "AXBoundsForTextMarkerRange" as CFString,
+                markerRange,
+                &boundsValue
+            ) == .success {
+                var rect = CGRect.zero
+                if AXValueGetValue(boundsValue as! AXValue, .cgRect, &rect) {
+                    if rect.width > 0 || rect.height > 0 {
+                        print("[TypeFlow-Debug] Caret rect extracted via AXSelectedTextMarkerRange: \(rect)")
+                        return rect
+                    }
+                }
+            }
+        }
+        
+        // Fallback: use focused element's bottom-left corner with offset
         var positionVal: CFTypeRef?
         var sizeVal: CFTypeRef?
         if AXUIElementCopyAttributeValue(axElement, kAXPositionAttribute as CFString, &positionVal) == .success,
@@ -204,8 +315,10 @@ class AccessibilityMonitor {
             var size = CGSize.zero
             AXValueGetValue(positionVal as! AXValue, .cgPoint, &pos)
             AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
-            print("[TypeFlow] Caret bounds failed, falling back to element center: pos=\(pos), size=\(size)")
-            return CGRect(x: pos.x + size.width / 2, y: pos.y + size.height / 2, width: 0, height: 15)
+            let fallbackX = pos.x + 5
+            let fallbackY = pos.y + max(0, size.height - 18)
+            print("[TypeFlow] Caret bounds failed, falling back to element bottom-left (offset): x=\(fallbackX), y=\(fallbackY), size=\(size)")
+            return CGRect(x: fallbackX, y: fallbackY, width: 0, height: 15)
         }
         
         return nil
