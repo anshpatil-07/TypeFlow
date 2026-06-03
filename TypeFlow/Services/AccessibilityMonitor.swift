@@ -150,6 +150,18 @@ class AccessibilityMonitor {
                     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                     print("[TypeFlow] keyDown detected: keyCode=\(keyCode)")
                     
+                    if let monitor = refcon {
+                        let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
+                        let obj = unmanaged.takeUnretainedValue()
+                        if obj.matchesRewriteShortcut(keyCode: keyCode, flags: event.flags) {
+                            print("[TypeFlow] Intercepted Rewrite Shortcut — triggering Rewrite selection")
+                            DispatchQueue.main.async {
+                                CompletionManager.shared.triggerRewrite()
+                            }
+                            return nil // Consume event to prevent printing characters
+                        }
+                    }
+                    
                     var tabConsumed = false
                     if (keyCode == 48 && SettingsManager.shared.acceptShortcut == "Tab") ||
                        (keyCode == 124 && SettingsManager.shared.acceptShortcut == "Right Arrow") {
@@ -528,5 +540,28 @@ class AccessibilityMonitor {
             }
         }
         return nil
+    }
+
+    func getSelectedText() -> String? {
+        guard let axElement = getFocusedElement() else { return nil }
+        var selectedTextRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
+           let selectedText = selectedTextRef as? String {
+            return selectedText
+        }
+        return nil
+    }
+
+    func matchesRewriteShortcut(keyCode: Int64, flags: CGEventFlags) -> Bool {
+        let shortcut = SettingsManager.shared.rewriteShortcut
+        switch shortcut {
+        case "Option+R": return keyCode == 15 && flags.contains(.maskAlternate)
+        case "Option+E": return keyCode == 14 && flags.contains(.maskAlternate)
+        case "Option+W": return keyCode == 13 && flags.contains(.maskAlternate)
+        case "Control+R": return keyCode == 15 && flags.contains(.maskControl)
+        case "Control+E": return keyCode == 14 && flags.contains(.maskControl)
+        case "Control+W": return keyCode == 13 && flags.contains(.maskControl)
+        default: return keyCode == 15 && flags.contains(.maskAlternate)
+        }
     }
 }
