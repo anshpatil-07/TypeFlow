@@ -13,7 +13,7 @@ class CompletionManager: @unchecked Sendable {
     private var pendingCompletionRequest: String?
     private var activeSpellCorrection: (misspelled: String, corrected: String)?
     private var activeSnippetKey: String?
-    private var activeRewriteText: String?
+    var activeRewriteText: String?
     var activeRewritePID: pid_t?
     
     private init() {
@@ -534,7 +534,21 @@ class CompletionManager: @unchecked Sendable {
     func handleTabPressed() -> Bool {
         if let _ = activeRewriteText, let completion = currentCompletion, !completion.isEmpty {
             print("[TypeFlow-Debug] Accepting rewrite: replacing selection with '\(completion)'")
-            TextInjector.shared.inject(text: completion)
+            
+            // 1. Hide the overlay first so host app regains focus
+            overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false)
+            
+            // 2. Clear keystroke buffer
+            accessibilityMonitor?.clearKeystrokeBuffer()
+            
+            // 3. Introduce a delay and inject text asynchronously
+            let completionToInject = completion
+            Task {
+                try? await Task.sleep(nanoseconds: 50_000_000) // 50ms delay
+                TextInjector.shared.inject(text: completionToInject)
+            }
+            
+            // 4. Clear completion state
             clearCompletion()
             return true
         }
