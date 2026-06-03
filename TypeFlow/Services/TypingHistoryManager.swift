@@ -193,5 +193,63 @@ class TypingHistoryManager {
             history = []
         }
     }
+    
+    func getSuggestedSnippets() -> [(text: String, suggestedShortcode: String)] {
+        guard SettingsManager.shared.personalizationEnabled else { return [] }
+        
+        // Count frequencies of all history items
+        var counts: [String: Int] = [:]
+        for sentence in history {
+            let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count >= 20 else { continue }
+            counts[trimmed, default: 0] += 1
+        }
+        
+        // Filter those with count >= 3
+        let repetitive = counts.filter { $0.value >= 3 }
+        
+        // Get active snippets to avoid suggesting already-registered ones
+        let activeSnippets = SettingsManager.shared.getSnippets()
+        let activeReplacementValues = Set(activeSnippets.values)
+        
+        var suggestions: [(text: String, suggestedShortcode: String)] = []
+        
+        // Sort by frequency (highest first)
+        let sortedRepetitive = repetitive.sorted { $0.value > $1.value }
+        
+        for (phrase, _) in sortedRepetitive {
+            // Skip if it's already a snippet replacement value
+            if activeReplacementValues.contains(phrase) {
+                continue
+            }
+            
+            // Generate a suggested shortcode:
+            // e.g. "Best regards," -> take initials or first 3-4 chars of first word
+            let cleanPhrase = phrase.components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { !$0.isEmpty }
+            
+            var shortcode = ""
+            if let firstWord = cleanPhrase.first?.lowercased() {
+                shortcode = "/" + String(firstWord.prefix(4))
+            } else {
+                shortcode = "/snip"
+            }
+            
+            // Avoid duplicate suggested shortcodes in the returned list
+            if !suggestions.contains(where: { $0.suggestedShortcode == shortcode }) {
+                suggestions.append((text: phrase, suggestedShortcode: shortcode))
+            } else {
+                var suffixNum = 2
+                var newShortcode = "\(shortcode)\(suffixNum)"
+                while suggestions.contains(where: { $0.suggestedShortcode == newShortcode }) {
+                    suffixNum += 1
+                    newShortcode = "\(shortcode)\(suffixNum)"
+                }
+                suggestions.append((text: phrase, suggestedShortcode: newShortcode))
+            }
+        }
+        
+        return suggestions
+    }
 }
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import CryptoKit
 
 class SettingsManager: ObservableObject {
     static let shared = SettingsManager()
@@ -53,16 +54,64 @@ class SettingsManager: ObservableObject {
         return !getEffectiveConfig(for: bundleId).isEnabled
     }
     
-    func getSnippets() -> [String: String] {
-        if let decoded = try? JSONDecoder().decode([String: String].self, from: snippetsData) {
-            return decoded
+    private func getSymmetricKey() -> SymmetricKey? {
+        let keyName = "com.cotyper.TypeFlow.historyKey"
+        if let keyData = KeychainHelper.load(key: keyName) {
+            return SymmetricKey(data: keyData)
         }
-        return [:]
+        let newKey = SymmetricKey(size: .bits256)
+        let newKeyData = newKey.withUnsafeBytes { Data($0) }
+        _ = KeychainHelper.save(key: keyName, data: newKeyData)
+        return newKey
+    }
+    
+    private var snippetsFileURL: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let typeFlowDir = appSupport.appendingPathComponent("TypeFlow")
+        try? FileManager.default.createDirectory(at: typeFlowDir, withIntermediateDirectories: true)
+        return typeFlowDir.appendingPathComponent("snippets.enc")
+    }
+    
+    func getSnippets() -> [String: String] {
+        // First check for migration
+        if !snippetsData.isEmpty {
+            if let decoded = try? JSONDecoder().decode([String: String].self, from: snippetsData) {
+                print("[TypeFlow-Debug] SettingsManager: Migrating unencrypted snippets from UserDefaults...")
+                saveSnippets(decoded)
+                snippetsData = Data() // Clear plaintext setting
+                return decoded
+            }
+        }
+        
+        guard let key = getSymmetricKey() else {
+            print("[TypeFlow-Debug] SettingsManager: getSnippets failed - symmetricKey is nil")
+            return [:]
+        }
+        
+        do {
+            let encryptedData = try Data(contentsOf: snippetsFileURL)
+            let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+            let decryptedData = try AES.GCM.open(sealedBox, using: key)
+            let decoded = try JSONDecoder().decode([String: String].self, from: decryptedData)
+            return decoded
+        } catch {
+            return [:]
+        }
     }
     
     func saveSnippets(_ snippets: [String: String]) {
-        if let encoded = try? JSONEncoder().encode(snippets) {
-            snippetsData = encoded
+        guard let key = getSymmetricKey() else {
+            print("[TypeFlow-Debug] SettingsManager: saveSnippets failed - symmetricKey is nil")
+            return
+        }
+        
+        do {
+            let data = try JSONEncoder().encode(snippets)
+            let sealedBox = try AES.GCM.seal(data, using: key)
+            try sealedBox.combined?.write(to: snippetsFileURL)
+            print("[TypeFlow-Debug] SettingsManager: Saved \(snippets.count) snippets to disk (encrypted)")
+        } catch {
+            print("[TypeFlow-Debug] SettingsManager: ERROR saving snippets: \(error)")
         }
     }
     

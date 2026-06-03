@@ -12,6 +12,7 @@ class CompletionManager: @unchecked Sendable {
     
     private var pendingCompletionRequest: String?
     private var activeSpellCorrection: (misspelled: String, corrected: String)?
+    private var activeSnippetKey: String?
     
     private init() {
         NotificationCenter.default.addObserver(
@@ -301,14 +302,21 @@ class CompletionManager: @unchecked Sendable {
         // Snippets check
         let snippets = SettingsManager.shared.getSnippets()
         for (key, value) in snippets {
-            if activeLine.hasSuffix(key) {
+            if (key.hasPrefix("/") || key.hasPrefix(";")) && hasWordBoundaryBeforeSuffix(activeLine: activeLine, suffix: key) {
+                print("[TypeFlow-Debug] Snippet matched: '\(key)' -> '\(value)'")
+                activeSnippetKey = key
+                
+                let resolved = resolveSnippetPlaceholders(value)
+                let (displayText, _) = processCursorPlaceholder(resolved)
+                
                 DispatchQueue.main.async {
                     self.currentCompletion = value
-                    self.overlayWindowController?.updateText(value)
+                    self.overlayWindowController?.updateText(displayText)
                 }
                 return
             }
         }
+        activeSnippetKey = nil
         
         print("[TypeFlow-Debug] Dispatching LLM generation for: '\(activeLine)'")
         
@@ -386,6 +394,24 @@ class CompletionManager: @unchecked Sendable {
             return true
         }
         
+        if let snippetKey = activeSnippetKey, let rawCompletion = currentCompletion {
+            let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+            let resolved = resolveSnippetPlaceholders(rawCompletion)
+            let (finalText, cursorOffset) = processCursorPlaceholder(resolved)
+            
+            TypingHistoryManager.shared.logSentence(activeLine + finalText)
+            
+            // Delete the shortcode
+            let deleteCount = snippetKey.count
+            TextInjector.shared.injectBackspaces(count: deleteCount)
+            
+            // Inject replacement text and handle caret offset
+            TextInjector.shared.inject(text: finalText, moveCursorBackCount: cursorOffset)
+            
+            clearCompletion()
+            return true
+        }
+        
         if let completion = currentCompletion, !completion.isEmpty {
             let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
             TypingHistoryManager.shared.logSentence(activeLine + completion)
@@ -401,9 +427,61 @@ class CompletionManager: @unchecked Sendable {
     func clearCompletion() {
         currentCompletion = nil
         activeSpellCorrection = nil
+        activeSnippetKey = nil
         currentGenerationTask?.cancel()
         currentGenerationTask = nil
         overlayWindowController?.updateText("")
+    }
+    
+    private func hasWordBoundaryBeforeSuffix(activeLine: String, suffix: String) -> Bool {
+        guard activeLine.hasSuffix(suffix) else { return false }
+        let prefixLength = activeLine.count - suffix.count
+        guard prefixLength > 0 else { return true } // Start of line is a boundary
+        
+        let index = activeLine.index(activeLine.startIndex, offsetBy: prefixLength - 1)
+        let charBefore = activeLine[index]
+        return charBefore.isWhitespace || charBefore.isPunctuation
+    }
+    
+    private func resolveSnippetPlaceholders(_ template: String) -> String {
+        var result = template
+        
+        // 1. Resolve {{date}}
+        if result.contains("{{date}}") {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            let dateString = formatter.string(from: Date())
+            result = result.replacingOccurrences(of: "{{date}}", with: dateString)
+        }
+        
+        // 2. Resolve {{time}}
+        if result.contains("{{time}}") {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm"
+            let timeString = formatter.string(from: Date())
+            result = result.replacingOccurrences(of: "{{time}}", with: timeString)
+        }
+        
+        // 3. Resolve {{clipboard}}
+        if result.contains("{{clipboard}}") {
+            let clipboardString = NSPasteboard.general.string(forType: .string) ?? ""
+            result = result.replacingOccurrences(of: "{{clipboard}}", with: clipboardString)
+        }
+        
+        return result
+    }
+    
+    private func processCursorPlaceholder(_ text: String) -> (finalText: String, cursorOffset: Int) {
+        guard let range = text.range(of: "{{cursor}}") else {
+            return (text, 0)
+        }
+        
+        let finalText = text.replacingOccurrences(of: "{{cursor}}", with: "")
+        let substringAfterCursor = text[range.upperBound...]
+        let cleanSubstring = substringAfterCursor.replacingOccurrences(of: "{{cursor}}", with: "")
+        let cursorOffset = cleanSubstring.count
+        
+        return (finalText, cursorOffset)
     }
     
     func stripMarkdown(_ text: String) -> String {
