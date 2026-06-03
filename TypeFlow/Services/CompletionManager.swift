@@ -193,6 +193,10 @@ class CompletionManager: @unchecked Sendable {
                     TextInjector.shared.injectBackspaces(count: deleteCount)
                     TextInjector.shared.inject(text: correction + delimiter)
                     clearCompletion()
+                    
+                    let correctedLine = String(activeLine.dropLast(deleteCount)) + correction + delimiter
+                    print("[TypeFlow-Debug] Logging auto-corrected sentence to history: '\(correctedLine)'")
+                    TypingHistoryManager.shared.logSentenceFromText(correctedLine)
                     return
                 } else {
                     // Show it as orange ghost text suggestion
@@ -375,6 +379,11 @@ class CompletionManager: @unchecked Sendable {
             TextInjector.shared.injectBackspaces(count: deleteCount)
             TextInjector.shared.inject(text: spellCorrection.corrected)
             clearCompletion()
+            
+            let correctedLine = String(activeLine.dropLast(deleteCount)) + spellCorrection.corrected
+            print("[TypeFlow-Debug] Logging Tab-accepted spelling correction to history: '\(correctedLine)'")
+            TypingHistoryManager.shared.logSentenceFromText(correctedLine)
+            
             return true
         }
         

@@ -349,6 +349,13 @@ class AccessibilityMonitor {
         // 123: Left, 124: Right, 125: Down, 126: Up
         // 115: Home, 119: End, 116: PageUp, 121: PageDown
         if [36, 76, 53, 48, 123, 124, 125, 126, 115, 119, 116, 121].contains(keyCode) {
+            if keyCode == 36 || keyCode == 76 {
+                let trimmed = keystrokeBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.count >= 5 {
+                    print("[TypeFlow-Debug] Return pressed. Logging keystroke buffer to history: '\(trimmed)'")
+                    TypingHistoryManager.shared.logSentence(trimmed)
+                }
+            }
             clearKeystrokeBuffer()
             return
         }
