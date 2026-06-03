@@ -13,6 +13,7 @@ class CompletionManager: @unchecked Sendable {
     private var pendingCompletionRequest: String?
     private var activeSpellCorrection: (misspelled: String, corrected: String)?
     private var activeSnippetKey: String?
+    private var activeRewriteText: String?
     
     private init() {
         NotificationCenter.default.addObserver(
@@ -375,10 +376,65 @@ class CompletionManager: @unchecked Sendable {
                     self.overlayWindowController?.updateText("")
                 }
             }
+    }
+    
+    func triggerRewrite() {
+        print("[TypeFlow-Debug] CompletionManager: triggerRewrite called")
+        
+        guard let selection = accessibilityMonitor?.getSelectedText(),
+              !selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            print("[TypeFlow-Debug] No selection to rewrite")
+            return
+        }
+        
+        // Cancel normal completions
+        debounceTimer?.invalidate()
+        debounceTimer = nil
+        currentGenerationTask?.cancel()
+        currentGenerationTask = nil
+        
+        activeSpellCorrection = nil
+        activeSnippetKey = nil
+        
+        // Set overlay loading state
+        DispatchQueue.main.async {
+            if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
+                self.overlayWindowController?.moveOverlay(to: rect)
+            }
+            self.overlayWindowController?.updateText("", isRewrite: true, isLoading: true)
+        }
+        
+        let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
+        let effectiveConfig = SettingsManager.shared.getEffectiveConfig(for: bundleId)
+        
+        currentGenerationTask = Task {
+            let rewritten = await LLMEngine.shared.generateRewrite(selectedText: selection, toneProfile: effectiveConfig.toneProfile)
+            
+            if Task.isCancelled {
+                print("[TypeFlow-Debug] Rewrite generation cancelled")
+                return
+            }
+            
+            DispatchQueue.main.async {
+                if !rewritten.isEmpty {
+                    self.currentCompletion = rewritten
+                    self.activeRewriteText = selection
+                    self.overlayWindowController?.updateText(rewritten, isRewrite: true, isLoading: false)
+                } else {
+                    self.clearCompletion()
+                }
+            }
         }
     }
     
     func handleTabPressed() -> Bool {
+        if let rewriteText = activeRewriteText, let completion = currentCompletion, !completion.isEmpty {
+            print("[TypeFlow-Debug] Accepting rewrite: replacing selection with '\(completion)'")
+            TextInjector.shared.inject(text: completion)
+            clearCompletion()
+            return true
+        }
+        
         if let spellCorrection = activeSpellCorrection {
             let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
             let deleteCount = calculateDeleteCount(activeLine: activeLine, misspelled: spellCorrection.misspelled)
@@ -432,9 +488,10 @@ class CompletionManager: @unchecked Sendable {
         currentCompletion = nil
         activeSpellCorrection = nil
         activeSnippetKey = nil
+        activeRewriteText = nil
         currentGenerationTask?.cancel()
         currentGenerationTask = nil
-        overlayWindowController?.updateText("")
+        overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false)
     }
     
     private func hasWordBoundaryBeforeSuffix(activeLine: String, suffix: String) -> Bool {
