@@ -160,6 +160,13 @@ class TypingHistoryManager {
         return selected
     }
     
+    /// Returns the N most recent history sentences without topic-matching.
+    /// Used for KV cache prefix prefill so the static prefix stays stable
+    /// across keystrokes (unlike getRelevantSamples which changes per text).
+    func getRecentSamples(count: Int) -> [String] {
+        return Array(history.suffix(count))
+    }
+    
     private func saveHistory() {
         guard let key = symmetricKey else {
             print("[TypeFlow-Debug] TypingHistoryManager: saveHistory failed - symmetricKey is nil")
