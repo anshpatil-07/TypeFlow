@@ -14,6 +14,16 @@ struct SettingsView: View {
                 }
                 .pickerStyle(SegmentedPickerStyle())
                 
+                Picker("Rewrite Shortcut:", selection: $settings.rewriteShortcut) {
+                    Text("Option + R (⌥R)").tag("Option+R")
+                    Text("Option + E (⌥E)").tag("Option+E")
+                    Text("Option + W (⌥W)").tag("Option+W")
+                    Text("Control + R (⌃R)").tag("Control+R")
+                    Text("Control + E (⌃E)").tag("Control+E")
+                    Text("Control + W (⌃W)").tag("Control+W")
+                }
+                .padding(.top)
+                
                 Picker("Completion Tone:", selection: $settings.tone) {
                     ForEach(settings.getTones()) { tone in
                         Text(tone.name).tag(tone.id)
