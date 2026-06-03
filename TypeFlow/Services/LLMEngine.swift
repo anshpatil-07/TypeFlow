@@ -31,8 +31,21 @@ class LLMEngine {
     private var cachedPrefixPrompt: String?
     private var prefixLength = 0
     private var kvCache: [KVCache]?
+    /// Stable cache key: tone-id + personalization flag, updated only when settings change.
+    /// Changing the typing context (buffer clear) does NOT invalidate this key — only
+    /// tone swaps or personalization toggle do, which actually alter the system prefix.
+    private var cachedPrefixSettingsKey: String = ""
     
     var isModelReady: Bool { modelContainer != nil }
+    
+    /// Explicitly invalidate the KV cache — call only when tone or personalization changes.
+    func invalidateKVCache() {
+        kvCache = nil
+        cachedPrefixPrompt = nil
+        prefixLength = 0
+        cachedPrefixSettingsKey = ""
+        print("[TypeFlow-Debug] LLMEngine: KV cache explicitly invalidated (settings change)")
+    }
 
     private init() {
         // Limit MLX cache size to 128 MB to avoid growing RAM usage unbounded
@@ -104,8 +117,13 @@ class LLMEngine {
                     let fullPrepared = try await modelContext.processor.prepare(input: fullInput)
                     let fullTokens = fullPrepared.text.tokens.asArray(Int.self)
                     
-                    // Invalidate cache if prefix changed
-                    if self.kvCache == nil || self.cachedPrefixPrompt != prefixPrompt {
+                    // Compute a stable settings key (tone + personalization) that is
+                    // independent of the current keystroke buffer content.
+                    let settingsKey = "\(toneProfile.id)|\(SettingsManager.shared.personalizationEnabled)"
+                    
+                    // Invalidate cache ONLY when tone/personalization settings change,
+                    // NOT when the keystroke buffer is cleared due to a focus event.
+                    if self.kvCache == nil || self.cachedPrefixPrompt != prefixPrompt || self.cachedPrefixSettingsKey != settingsKey {
                         print("[TypeFlow-Debug] LLMEngine: Cache miss or invalidation. Re-building KV cache for static prefix...")
                         
                         let prefixInput = UserInput(prompt: prefixPrompt)
@@ -124,6 +142,7 @@ class LLMEngine {
                         
                         self.prefixLength = common.count
                         self.cachedPrefixPrompt = prefixPrompt
+                        self.cachedPrefixSettingsKey = settingsKey
                         
                         // Instantiate a clean cache
                         let newCache = modelContext.model.newCache(parameters: nil)
