@@ -247,7 +247,7 @@ class LLMEngine {
         }
         
         do {
-            let result = try await container.perform { modelContext -> String in
+            let result = try await container.perform { (modelContext: ModelContext) async throws -> String in
                 let prompt = PromptBuilder.shared.buildRewritePrompt(
                     selectedText: selectedText,
                     systemInstructions: toneProfile.systemInstructions,
@@ -260,7 +260,7 @@ class LLMEngine {
                 let params = GenerateParameters(maxTokens: maxTokens, temperature: Float(toneProfile.temperature))
                 
                 let stream = try MLXLMCommon.generate(
-                    input: prepared.input,
+                    input: prepared,
                     cache: modelContext.model.newCache(parameters: nil),
                     parameters: params,
                     context: modelContext
@@ -284,7 +284,7 @@ class LLMEngine {
             if let range = cleanResult.range(of: "</completion>") {
                 cleanResult = String(cleanResult[..<range.lowerBound])
             }
-            return cleanResult.trimmingCharacters(in: .whitespacesAndNewlines)
+            return cleanResult.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
         } catch {
             print("[TypeFlow-Debug] LLMEngine rewrite error: \(error)")
             return ""

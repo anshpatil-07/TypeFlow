@@ -376,6 +376,7 @@ class CompletionManager: @unchecked Sendable {
                     self.overlayWindowController?.updateText("")
                 }
             }
+        }
     }
     
     func triggerRewrite() {
