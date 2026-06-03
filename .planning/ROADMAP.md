@@ -73,3 +73,13 @@ Plans:
 
 Plans:
 - [x] TBD (run /gsd-plan-phase 10 to break down) (completed 2026-06-03)
+
+### Phase 11: Tone Profiles
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 10
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 11 to break down)
