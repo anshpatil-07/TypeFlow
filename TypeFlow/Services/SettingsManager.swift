@@ -7,6 +7,7 @@ class SettingsManager: ObservableObject {
     
     @AppStorage("customInstructions") var customInstructions: String = ""
     @AppStorage("acceptShortcut") var acceptShortcut: String = "Tab"
+    @AppStorage("rewriteShortcut") var rewriteShortcut: String = "Option+R"
     @AppStorage("excludedApps") var excludedApps: String = "com.agilebits.onepassword7,com.apple.keychainaccess"
     @AppStorage("autoCorrectEnabled") var autoCorrectEnabled: Bool = false
     @AppStorage("personalizationEnabled") var personalizationEnabled: Bool = false
