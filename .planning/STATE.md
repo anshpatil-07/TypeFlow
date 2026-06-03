@@ -35,3 +35,4 @@ Last activity: 2026-06-03
 - Phase 9 added: Completions Overhaul
 - Phase 10 added: Continuous Learning and Auto-Correct
 - Phase 11 added: Tone Profiles
+- Phase 12 added: Snippet Memory and Shortcodes
