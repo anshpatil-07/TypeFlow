@@ -11,6 +11,37 @@ class PromptBuilder {
         return prefix + suffix
     }
     
+    /// Builds the static portion of the prompt that does NOT change with the current text.
+    /// This is what we prefill into the KV cache — it only changes when tone or
+    /// personalization settings change, not when the user types a new sentence.
+    func buildStaticPrefix(systemInstructions: String) -> String {
+        var prompt = ""
+        
+        let personalizationActive = SettingsManager.shared.personalizationEnabled
+        
+        if personalizationActive {
+            // Use recent samples without a text-specific filter so the prefix stays stable.
+            let samples = TypingHistoryManager.shared.getRecentSamples(count: 3)
+            if !samples.isEmpty {
+                prompt += "[Past user writing samples]:\n"
+                for sample in samples {
+                    prompt += "- \(sample)\n"
+                }
+                prompt += "\n"
+            }
+            
+            let vocab = VocabularyExtractor.shared.getVocabulary()
+            if !vocab.isEmpty {
+                let vocabStr = vocab.joined(separator: ", ")
+                prompt += "[User vocabulary & jargon]:\n\(vocabStr)\n\n"
+            }
+        }
+        
+        prompt += "\(systemInstructions)\n\n"
+        prompt += "[Current text to complete]:\n"
+        return prompt
+    }
+    
     func buildPromptPrefix(textBeforeCaret: String, systemInstructions: String) -> String {
         var prompt = ""
         

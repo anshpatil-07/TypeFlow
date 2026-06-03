@@ -109,28 +109,30 @@ class LLMEngine {
                 guard let self = self else { return "" }
                 do {
                     // ── Build Prefix and Suffix prompts ──────────────────────────────
-                    let prefixPrompt = PromptBuilder.shared.buildPromptPrefix(textBeforeCaret: textBeforeCaret, systemInstructions: toneProfile.systemInstructions)
                     let suffixPrompt = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret)
+                    let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(textBeforeCaret: textBeforeCaret, systemInstructions: toneProfile.systemInstructions)
                     
-                    let fullPrompt = prefixPrompt + suffixPrompt
+                    let fullPrompt = dynamicPrefixPrompt + suffixPrompt
                     let fullInput = UserInput(prompt: fullPrompt)
                     let fullPrepared = try await modelContext.processor.prepare(input: fullInput)
                     let fullTokens = fullPrepared.text.tokens.asArray(Int.self)
                     
-                    // Compute a stable settings key (tone + personalization) that is
-                    // independent of the current keystroke buffer content.
-                    let settingsKey = "\(toneProfile.id)|\(SettingsManager.shared.personalizationEnabled)"
+                    // The KV-cache prefix uses ONLY static content (system instructions +
+                    // personalization header) — NOT the current typed text. This means the
+                    // cache is valid for the entire typing session unless tone or
+                    // personalization settings actually change.
+                    let staticPrefixPrompt = PromptBuilder.shared.buildStaticPrefix(systemInstructions: toneProfile.systemInstructions)
+                    let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)"
                     
-                    // Invalidate cache ONLY when tone/personalization settings change,
-                    // NOT when the keystroke buffer is cleared due to a focus event.
-                    if self.kvCache == nil || self.cachedPrefixPrompt != prefixPrompt || self.cachedPrefixSettingsKey != settingsKey {
-                        print("[TypeFlow-Debug] LLMEngine: Cache miss or invalidation. Re-building KV cache for static prefix...")
+                    // Invalidate ONLY when tone/personalization settings change.
+                    if self.kvCache == nil || self.cachedPrefixPrompt != staticPrefixPrompt || self.cachedPrefixSettingsKey != settingsKey {
+                        print("[TypeFlow-Debug] LLMEngine: Cache miss — rebuilding static KV prefix (settings changed or first run)...")
                         
-                        let prefixInput = UserInput(prompt: prefixPrompt)
+                        let prefixInput = UserInput(prompt: staticPrefixPrompt)
                         let prefixPrepared = try await modelContext.processor.prepare(input: prefixInput)
                         let prefixTokens = prefixPrepared.text.tokens.asArray(Int.self)
                         
-                        // Find common prefix to get exact tokens of 'Header + prefix' (excluding Footer)
+                        // Find the common prefix tokens between the static prefix and full prompt
                         var common = [Int]()
                         for i in 0..<min(prefixTokens.count, fullTokens.count) {
                             if prefixTokens[i] == fullTokens[i] {
@@ -141,7 +143,7 @@ class LLMEngine {
                         }
                         
                         self.prefixLength = common.count
-                        self.cachedPrefixPrompt = prefixPrompt
+                        self.cachedPrefixPrompt = staticPrefixPrompt
                         self.cachedPrefixSettingsKey = settingsKey
                         
                         // Instantiate a clean cache
@@ -153,9 +155,9 @@ class LLMEngine {
                         eval(newCache)
                         
                         self.kvCache = newCache
-                        print("[TypeFlow-Debug] LLMEngine: KV cache prefilled successfully with \(self.prefixLength) tokens. Cache offset: \(newCache[0].offset)")
+                        print("[TypeFlow-Debug] LLMEngine: KV cache prefilled with \(self.prefixLength) static tokens. Cache offset: \(newCache[0].offset)")
                     } else {
-                        print("[TypeFlow-Debug] LLMEngine: Cache hit! Reusing existing KV cache. Suffix offset: \(self.prefixLength)")
+                        print("[TypeFlow-Debug] LLMEngine: Cache hit — reusing KV prefix (\(self.prefixLength) tokens).")
                     }
                     
                     guard let cache = self.kvCache else {

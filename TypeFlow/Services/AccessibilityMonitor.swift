@@ -203,15 +203,20 @@ class AccessibilityMonitor {
                         
                         obj.handleKeystroke(keyCode: keyCode, event: event)
                         
+                        // Snapshot the buffer NOW (still in the CGEvent tap thread) so
+                        // that a racing focus-change dispatch cannot wipe it before
+                        // onTextChanged runs on the main thread.
+                        let bufferSnapshot = obj.keystrokeBuffer
+                        
                         DispatchQueue.main.async {
                             print("[TypeFlow] Checking caret rect...")
                             if let rect = obj.getCurrentCaretRect() {
                                 print("[TypeFlow] Caret rect found: \(rect)")
                                 obj.onCaretMoved?(rect)
-                                CompletionManager.shared.onTextChanged()
+                                CompletionManager.shared.onTextChanged(bufferFallback: bufferSnapshot)
                             } else {
                                 print("[TypeFlow] Caret rect not found! Calling onTextChanged anyway for debugging.")
-                                CompletionManager.shared.onTextChanged()
+                                CompletionManager.shared.onTextChanged(bufferFallback: bufferSnapshot)
                             }
                         }
                     }
@@ -437,7 +442,8 @@ class AccessibilityMonitor {
             if let stringValue = val as? String {
                 fullText = stringValue
             } else if CFGetTypeID(val) == CFAttributedStringGetTypeID() {
-                fullText = (CFAttributedStringGetString(val as! CFAttributedString) as String)
+                let attrStr: CFAttributedString = val as! CFAttributedString
+                fullText = CFAttributedStringGetString(attrStr) as String
             }
             
             if let fullText = fullText {

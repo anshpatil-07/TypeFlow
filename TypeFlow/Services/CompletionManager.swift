@@ -58,7 +58,6 @@ class CompletionManager: @unchecked Sendable {
         guard foundWordChar else { return nil }
         
         let word = String(chars[startIndex...])
-        let utf16Text = text.utf16
         let startOffset = String(chars[..<startIndex]).utf16.count
         let length = word.utf16.count
         let range = NSRange(location: startOffset, length: length)
@@ -161,7 +160,7 @@ class CompletionManager: @unchecked Sendable {
         return (word, delimiter, range)
     }
     
-    func onTextChanged() {
+    func onTextChanged(bufferFallback: String = "") {
         print("[TypeFlow-Debug] onTextChanged called")
         
         // Clear existing completion immediately when user types
@@ -174,7 +173,18 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+        // Prefer AX-extracted text; fall back to the CGEvent buffer snapshot captured
+        // at the tap site (before any racing focus-change dispatch could clear it).
+        let axText = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+        let activeLine: String
+        if !axText.isEmpty {
+            activeLine = axText
+        } else if !bufferFallback.isEmpty {
+            print("[TypeFlow-Debug] AX returned empty — using CGEvent buffer snapshot for spell-check: '\(bufferFallback.suffix(50))'")
+            activeLine = bufferFallback
+        } else {
+            activeLine = ""
+        }
         
         TypingHistoryManager.shared.logSentenceFromText(activeLine)
         
@@ -438,7 +448,7 @@ class CompletionManager: @unchecked Sendable {
     }
     
     func handleTabPressed() -> Bool {
-        if let rewriteText = activeRewriteText, let completion = currentCompletion, !completion.isEmpty {
+        if let _ = activeRewriteText, let completion = currentCompletion, !completion.isEmpty {
             print("[TypeFlow-Debug] Accepting rewrite: replacing selection with '\(completion)'")
             TextInjector.shared.inject(text: completion)
             clearCompletion()
