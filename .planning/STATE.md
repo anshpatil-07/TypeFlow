@@ -33,3 +33,4 @@ Last activity: 2026-05-23
 ### Roadmap Evolution
 
 - Phase 9 added: Completions Overhaul
+- Phase 10 added: Continuous Learning and Auto-Correct
