@@ -26,8 +26,11 @@
 | 3. Advanced Context Pipeline         | v1.0      | 1/1            | Complete    | 2026-05-23 |
 | 4. Settings & Personalization        | v1.0      | 1/1            | Complete    | 2026-05-23 |
 | 5. Tone, Snippets & App Overrides    | v1.0      | 1/1            | Complete    | 2026-05-23 |
-| 6. Critical Bug Fixes                | v1.1      | 1/1 | Complete    | 2026-05-23 |
-| 7. Model UI & Downloads              | v1.1      | 2/2 | Complete    | 2026-05-23 |
+| 6. Critical Bug Fixes                | v1.1      | 1/1            | Complete    | 2026-05-23 |
+| 7. Model UI & Downloads              | v1.1      | 2/2            | Complete    | 2026-05-23 |
+| 10. Continuous Learning & Auto-Correct| v1.2     | 2/2            | Complete    | 2026-06-03 |
+| 11. Tone Profiles                    | v1.2      | 1/1            | Complete    | 2026-06-03 |
+| 12. Snippet Memory & Shortcodes      | v1.2      | 1/1            | Complete    | 2026-06-03 |
 
 ## Phase 6: Critical Bug Fixes
 **Goal**: Fix accessibility loops and injection monitor bugs.
@@ -84,12 +87,12 @@ Plans:
 Plans:
 - [ ] TBD (run /gsd-plan-phase 11 to break down)
 
-### Phase 12: Snippet Memory and Shortcodes
+### Phase 12: Snippet Memory and Shortcodes ✅ COMPLETE (2026-06-03)
 
 **Goal:** Implement dynamic shortcode variables and automatic snippet learning: dynamic placeholders, prefix requirements, word boundary checks, encrypted storage, and automatic snippet suggestions from typing history.
 **Requirements**: SNIP-01, SNIP-02, SNIP-03, SNIP-04
 **Depends on:** Phase 11
-**Plans:** 1 plans
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 12-PLAN.md (Wave 1: dynamic variables, boundaries, secure storage, and auto-suggestion)
+- [x] 12-PLAN.md (Wave 1: dynamic variables, boundaries, secure storage, and auto-suggestion) (completed 2026-06-03)
