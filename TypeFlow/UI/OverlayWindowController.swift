@@ -34,6 +34,7 @@ struct RewriteModeBarView: View {
                 .fill(Color(NSColor.windowBackgroundColor).opacity(0.95))
                 .shadow(color: .black.opacity(0.18), radius: 6, x: 0, y: 2)
         )
+        .focusable(false)
     }
 }
 
@@ -56,6 +57,7 @@ struct RewriteModeButton: View {
                 )
         }
         .buttonStyle(.plain)
+        .focusable(false)
         .onHover { hovered = $0 }
     }
 }
@@ -65,66 +67,69 @@ struct CompletionOverlayView: View {
     @ObservedObject var model: CompletionModel
 
     var body: some View {
-        if model.isLoading && model.isRewrite {
-            if model.text == "Generating..." {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .scaleEffect(0.6)
-                        .frame(width: 14, height: 14)
-                    Text("Rewriting...")
+        Group {
+            if model.isLoading && model.isRewrite {
+                if model.text == "Generating..." {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 14, height: 14)
+                        Text("Rewriting...")
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(NSColor.windowBackgroundColor).opacity(0.95))
+                            .shadow(color: .black.opacity(0.18), radius: 6, x: 0, y: 2)
+                    )
+                    .font(.system(size: 13, weight: .regular))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                } else {
+                    // Show mode selector while waiting for selection to arrive
+                    RewriteModeBarView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
+            } else if model.text.isEmpty && !model.isLoading {
+                Color.clear
+            } else {
+                HStack(spacing: 6) {
+                    if model.isLoading {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 14, height: 14)
+                    } else if model.isRewrite {
+                        Text("REWRITE")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(
+                                LinearGradient(
+                                    colors: [Color.teal, Color.blue],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .cornerRadius(3)
+                    }
+
+                    Text(model.isLoading ? "Rewriting…" : model.text)
+                        .foregroundColor(model.isRewrite ? Color.primary
+                                         : (model.isSpellCorrection ? Color.orange : Color.secondary))
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(NSColor.windowBackgroundColor).opacity(0.95))
-                        .shadow(color: .black.opacity(0.18), radius: 6, x: 0, y: 2)
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color(NSColor.windowBackgroundColor).opacity(0.92))
+                        .shadow(color: .black.opacity(0.14), radius: 4, x: 0, y: 1)
                 )
                 .font(.system(size: 13, weight: .regular))
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            } else {
-                // Show mode selector while waiting for selection to arrive
-                RewriteModeBarView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             }
-        } else if model.text.isEmpty && !model.isLoading {
-            Color.clear
-        } else {
-            HStack(spacing: 6) {
-                if model.isLoading {
-                    ProgressView()
-                        .scaleEffect(0.6)
-                        .frame(width: 14, height: 14)
-                } else if model.isRewrite {
-                    Text("REWRITE")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(
-                            LinearGradient(
-                                colors: [Color.teal, Color.blue],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .cornerRadius(3)
-                }
-
-                Text(model.isLoading ? "Rewriting…" : model.text)
-                    .foregroundColor(model.isRewrite ? Color.primary
-                                     : (model.isSpellCorrection ? Color.orange : Color.secondary))
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(Color(NSColor.windowBackgroundColor).opacity(0.92))
-                    .shadow(color: .black.opacity(0.14), radius: 4, x: 0, y: 1)
-            )
-            .font(.system(size: 13, weight: .regular))
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
+        .focusable(false)
     }
 }
 

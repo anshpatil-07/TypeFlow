@@ -7,6 +7,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var overlayWindowController: OverlayWindowController?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
         menuBarManager = MenuBarManager()
         overlayWindowController = OverlayWindowController()
         
