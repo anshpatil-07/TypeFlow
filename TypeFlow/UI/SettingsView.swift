@@ -328,33 +328,45 @@ struct SnippetsSettingsView: View {
     var body: some View {
         VStack {
             List {
-                ForEach(Array(settings.getSnippets().keys.sorted()), id: \.self) { key in
-                    HStack {
-                        Text(key)
-                            .font(.system(.body, design: .monospaced))
-                            .bold()
-                            .frame(width: 120, alignment: .leading)
-                        
-                        Image(systemName: "arrow.right")
-                            .foregroundColor(.secondary)
-                        
-                        Text(settings.getSnippets()[key] ?? "")
-                            .foregroundColor(.secondary)
-                        
-                        Spacer()
-                        
-                        Button(action: { deleteSnippet(key) }) {
-                            Image(systemName: "trash")
+                Section(header: Text("My Snippets")) {
+                    ForEach(Array(settings.getSnippets().keys.sorted()), id: \.self) { key in
+                        HStack {
+                            Text(key)
+                                .font(.system(.body, design: .monospaced))
+                                .bold()
+                                .frame(width: 120, alignment: .leading)
+                            
+                            Image(systemName: "arrow.right")
+                                .foregroundColor(.secondary)
+                            
+                            Text(settings.getSnippets()[key] ?? "")
+                                .foregroundColor(.secondary)
+                            
+                            Spacer()
+                            
+                            Button(action: { deleteSnippet(key) }) {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(BorderlessButtonStyle())
                         }
-                        .buttonStyle(BorderlessButtonStyle())
+                    }
+                }
+                
+                let suggestions = TypingHistoryManager.shared.getSuggestedSnippets()
+                if !suggestions.isEmpty {
+                    Section(header: Text("Suggested Snippets (From History)")) {
+                        ForEach(0..<suggestions.count, id: \.self) { index in
+                            let suggestion = suggestions[index]
+                            SuggestedSnippetRow(suggestion: suggestion, settings: settings)
+                        }
                     }
                 }
             }
             
             HStack {
-                TextField("Shortcut", text: $newShortcut)
+                TextField("Shortcut (e.g. /email)", text: $newShortcut)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
-                TextField("Replacement", text: $newReplacement)
+                TextField("Replacement text", text: $newReplacement)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
                 Button("Add") {
                     addSnippet()
@@ -377,6 +389,43 @@ struct SnippetsSettingsView: View {
         var snippets = settings.getSnippets()
         snippets.removeValue(forKey: key)
         settings.saveSnippets(snippets)
+    }
+}
+
+struct SuggestedSnippetRow: View {
+    let suggestion: (text: String, suggestedShortcode: String)
+    @ObservedObject var settings: SettingsManager
+    @State private var customizedShortcode: String
+    
+    init(suggestion: (text: String, suggestedShortcode: String), settings: SettingsManager) {
+        self.suggestion = suggestion
+        self.settings = settings
+        self._customizedShortcode = State(initialValue: suggestion.suggestedShortcode)
+    }
+    
+    var body: some View {
+        HStack {
+            TextField("Shortcode", text: $customizedShortcode)
+                .font(.system(.body, design: .monospaced))
+                .frame(width: 120)
+                .textFieldStyle(RoundedBorderTextFieldStyle())
+            
+            Image(systemName: "arrow.right")
+                .foregroundColor(.secondary)
+            
+            Text(suggestion.text)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            
+            Spacer()
+            
+            Button("Add") {
+                var snippets = settings.getSnippets()
+                snippets[customizedShortcode] = suggestion.text
+                settings.saveSnippets(snippets)
+            }
+            .buttonStyle(BorderlessButtonStyle())
+        }
     }
 }
 
