@@ -96,3 +96,13 @@ Plans:
 
 Plans:
 - [x] 12-PLAN.md (Wave 1: dynamic variables, boundaries, secure storage, and auto-suggestion) (completed 2026-06-03)
+
+### Phase 13: Productivity Dashboard
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 12
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 13 to break down)
