@@ -7,6 +7,9 @@ class AccessibilityMonitor {
     private var retryTimer: Timer?
     private var keystrokeBuffer: String = ""
     private var activeAppObserver: AXObserver?
+    /// PID of the application whose AX observer is currently registered.
+    /// Used to suppress intra-app focus-change noise (e.g. browser URL bar ↔ page).
+    private var activeFocusPID: pid_t = 0
     
     init(onCaretMoved: @escaping (CGRect) -> Void) {
         self.onCaretMoved = onCaretMoved
@@ -43,17 +46,32 @@ class AccessibilityMonitor {
     
     private func setupActiveAppObserver(for pid: pid_t) {
         stopActiveAppObserver()
+        activeFocusPID = pid
         
         var observer: AXObserver?
         let err = AXObserverCreate(pid, { (observer, element, notification, refcon) in
-            print("[TypeFlow-Debug] AXObserver: kAXFocusedUIElementChangedNotification received!")
-            DispatchQueue.main.async {
-                CompletionManager.shared.clearCompletion()
-                if let ref = refcon {
-                    let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(ref)
-                    let obj = unmanaged.takeUnretainedValue()
+            // kAXFocusedUIElementChangedNotification fires repeatedly inside browsers
+            // as the user types (e.g. URL bar losing focus, iframe gaining focus).
+            // Only clear state when the *application PID* actually changes.
+            guard let ref = refcon else { return }
+            let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(ref)
+            let obj = unmanaged.takeUnretainedValue()
+            
+            // Determine which PID owns the newly focused element
+            var newPID: pid_t = 0
+            AXUIElementGetPid(element, &newPID)
+            
+            if newPID != 0 && newPID != obj.activeFocusPID {
+                // Real app switch — clear buffer and completions
+                print("[TypeFlow-Debug] AXObserver: focus moved to different PID (\(obj.activeFocusPID) -> \(newPID)), clearing buffer")
+                obj.activeFocusPID = newPID
+                DispatchQueue.main.async {
+                    CompletionManager.shared.clearCompletion()
                     obj.clearKeystrokeBuffer()
                 }
+            } else {
+                // Intra-app focus jitter (same PID) — suppress
+                print("[TypeFlow-Debug] AXObserver: intra-app focus change (PID \(newPID)), suppressing buffer clear")
             }
         }, &observer)
         

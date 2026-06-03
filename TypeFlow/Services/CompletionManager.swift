@@ -71,6 +71,7 @@ class CompletionManager: @unchecked Sendable {
         
         let spellChecker = NSSpellChecker.shared
         let language = spellChecker.language()
+        let word = (text as NSString).substring(with: lastWordRange)
         
         let startingAt = max(0, lastWordRange.location - 1)
         let misspelledRange = spellChecker.checkSpelling(
@@ -83,14 +84,16 @@ class CompletionManager: @unchecked Sendable {
         )
         
         let isMisspelled = (misspelledRange.location == lastWordRange.location && misspelledRange.length == lastWordRange.length)
+        print("[TypeFlow-Debug] SpellCheck: Checking word '\(word)' (loc:\(lastWordRange.location) len:\(lastWordRange.length)) — misspelledRange: loc:\(misspelledRange.location) len:\(misspelledRange.length) — isMisspelled: \(isMisspelled)")
         guard isMisspelled else { return nil }
         
         if let corr = spellChecker.correction(forWordRange: lastWordRange, in: text, language: language, inSpellDocumentWithTag: 0), !corr.isEmpty {
+            print("[TypeFlow-Debug] SpellCheck: correction() returned '\(corr)'")
             return corr
         }
         
         if let guesses = spellChecker.guesses(forWordRange: lastWordRange, in: text, language: language, inSpellDocumentWithTag: 0), !guesses.isEmpty {
-            let word = (text as NSString).substring(with: lastWordRange)
+            print("[TypeFlow-Debug] SpellCheck: guesses() returned \(guesses.prefix(5))")
             let wordLower = word.lowercased()
             let prefix2 = String(wordLower.prefix(2))
             if let bestMatch = guesses.first(where: { $0.lowercased().hasPrefix(prefix2) }) {
@@ -102,6 +105,7 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
+        print("[TypeFlow-Debug] SpellCheck: No correction or guesses found for '\(word)'")
         return nil
     }
     
@@ -238,7 +242,9 @@ class CompletionManager: @unchecked Sendable {
                 // If it is a prefix of a valid word (completions is not empty), we STOP using NSSpellChecker
                 // and let it fall through to the LLM completion pipeline!
                 if completions.isEmpty {
-                    if let correction = getSpellCorrection(in: activeLine, lastWordRange: wordRange) {
+                    let correction = getSpellCorrection(in: activeLine, lastWordRange: wordRange)
+                    print("[TypeFlow-Debug] SpellCheck: Checking word '\(word)' - result: \(correction ?? "nil")")
+                    if let correction = correction {
                         print("[TypeFlow-Debug] Inline definite typo spell correction found: '\(word)' -> '\(correction)'")
                         // Cancel any pending LLM generation tasks
                         debounceTimer?.invalidate()
@@ -250,6 +256,9 @@ class CompletionManager: @unchecked Sendable {
                         
                         let ghostText = getGhostText(misspelled: word, correction: correction)
                         
+                        // Always show orange ghost text for inline mid-word typos so the user
+                        // has visual feedback — even when Auto-correct is enabled.
+                        // (Silent auto-fix only fires on the delimiter-triggered path above.)
                         DispatchQueue.main.async {
                             self.currentCompletion = ghostText
                             if !ghostText.isEmpty {
