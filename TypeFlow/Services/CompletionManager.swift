@@ -265,9 +265,9 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // Debounce generation (strict 150ms debounce timer)
+        // Debounce generation (strict 250ms debounce timer)
         debounceTimer?.invalidate()
-        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
             print("[TypeFlow-Debug] Debounce timer fired!")
             self?.triggerGeneration()
         }

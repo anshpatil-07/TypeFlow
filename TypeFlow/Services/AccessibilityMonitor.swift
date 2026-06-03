@@ -142,7 +142,7 @@ class AccessibilityMonitor {
             options: .defaultTap,
             eventsOfInterest: CGEventMask(eventMask),
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                if TextInjector.shared.isInjecting {
+                if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
                     return Unmanaged.passRetained(event)
                 }
                 

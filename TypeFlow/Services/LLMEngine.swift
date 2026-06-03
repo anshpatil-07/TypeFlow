@@ -16,6 +16,10 @@ import Darwin
 // Subsequent launches load from cache — no network needed.
 // ─────────────────────────────────────────────────────────────────────────────
 
+struct KVCacheError: Error {
+    let message: String
+}
+
 class LLMEngine {
     static let shared = LLMEngine()
 
@@ -23,6 +27,10 @@ class LLMEngine {
     private var modelContainer: ModelContainer?
     private var isLoading = false
     private var loadError: Error?
+    
+    private var cachedPrefixPrompt: String?
+    private var prefixLength = 0
+    private var kvCache: [KVCache]?
     
     var isModelReady: Bool { modelContainer != nil }
 
@@ -83,24 +91,79 @@ class LLMEngine {
             return ""
         }
         
-        // ── Build the prompt ──────────────────────────────────────────────────
-        let prompt = PromptBuilder.shared.buildPrompt(textBeforeCaret: textBeforeCaret, systemInstructions: toneProfile.systemInstructions)
-        
-        print("[TypeFlow-Debug] LLMEngine: Input prompt:\n\(prompt)")
-        
         do {
-            let result = try await container.perform { modelContext -> String in
+            let result = try await container.perform { [weak self] modelContext -> String in
+                guard let self = self else { return "" }
                 do {
-                    print("[TypeFlow-Debug] LLMEngine: Preparing input...")
-                    let input = UserInput(prompt: prompt)
-                    let prepared = try await modelContext.processor.prepare(input: input)
-                    print("[TypeFlow-Debug] LLMEngine: Input prepared. Starting generate stream...")
+                    // ── Build Prefix and Suffix prompts ──────────────────────────────
+                    let prefixPrompt = PromptBuilder.shared.buildPromptPrefix(textBeforeCaret: textBeforeCaret, systemInstructions: toneProfile.systemInstructions)
+                    let suffixPrompt = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret)
+                    
+                    let fullPrompt = prefixPrompt + suffixPrompt
+                    let fullInput = UserInput(prompt: fullPrompt)
+                    let fullPrepared = try await modelContext.processor.prepare(input: fullInput)
+                    let fullTokens = fullPrepared.text.tokens.asArray(Int.self)
+                    
+                    // Invalidate cache if prefix changed
+                    if self.kvCache == nil || self.cachedPrefixPrompt != prefixPrompt {
+                        print("[TypeFlow-Debug] LLMEngine: Cache miss or invalidation. Re-building KV cache for static prefix...")
+                        
+                        let prefixInput = UserInput(prompt: prefixPrompt)
+                        let prefixPrepared = try await modelContext.processor.prepare(input: prefixInput)
+                        let prefixTokens = prefixPrepared.text.tokens.asArray(Int.self)
+                        
+                        // Find common prefix to get exact tokens of 'Header + prefix' (excluding Footer)
+                        var common = [Int]()
+                        for i in 0..<min(prefixTokens.count, fullTokens.count) {
+                            if prefixTokens[i] == fullTokens[i] {
+                                common.append(prefixTokens[i])
+                            } else {
+                                break
+                            }
+                        }
+                        
+                        self.prefixLength = common.count
+                        self.cachedPrefixPrompt = prefixPrompt
+                        
+                        // Instantiate a clean cache
+                        let newCache = modelContext.model.newCache(parameters: nil)
+                        
+                        // Prefill the prefix tokens in the model
+                        let prefixMLXTokens = MLXArray(common)
+                        _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
+                        eval(newCache)
+                        
+                        self.kvCache = newCache
+                        print("[TypeFlow-Debug] LLMEngine: KV cache prefilled successfully with \(self.prefixLength) tokens. Cache offset: \(newCache[0].offset)")
+                    } else {
+                        print("[TypeFlow-Debug] LLMEngine: Cache hit! Reusing existing KV cache. Suffix offset: \(self.prefixLength)")
+                    }
+                    
+                    guard let cache = self.kvCache else {
+                        throw KVCacheError(message: "Failed to resolve KV cache")
+                    }
+                    
+                    // Trim cache back to prefixLength
+                    let tokensToTrim = cache[0].offset - self.prefixLength
+                    if tokensToTrim > 0 {
+                        print("[TypeFlow-Debug] LLMEngine: Trimming \(tokensToTrim) generated/suffix tokens from cache...")
+                        trimPromptCache(cache, numTokens: tokensToTrim)
+                        print("[TypeFlow-Debug] LLMEngine: Trim complete. Cache offset: \(cache[0].offset)")
+                    }
+                    
+                    // Suffix tokens to evaluate are everything from prefixLength onwards
+                    let suffixTokens = Array(fullTokens[self.prefixLength...])
+                    let suffixInput = LMInput(tokens: MLXArray(suffixTokens))
+                    
+                    print("[TypeFlow-Debug] LLMEngine: Starting generate stream with suffix tokens count: \(suffixTokens.count)...")
                     let params = GenerateParameters(maxTokens: toneProfile.maxTokens, temperature: Float(toneProfile.temperature))
                     let stream = try MLXLMCommon.generate(
-                        input: prepared,
+                        input: suffixInput,
+                        cache: cache,
                         parameters: params,
                         context: modelContext
                     )
+                    
                     var outputText = ""
                     for await generation in stream {
                         if case .chunk(let text) = generation {
@@ -129,7 +192,15 @@ class LLMEngine {
                 cleanResult = String(cleanResult[..<range.lowerBound])
             }
             
-            let trimmedResult = cleanResult.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            var trimmedResult = cleanResult.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            
+            // If the original text ended in a space, prepend space if the output doesn't start with one
+            if textBeforeCaret.hasSuffix(" ") && !trimmedResult.isEmpty {
+                if !trimmedResult.hasPrefix(" ") {
+                    trimmedResult = " " + trimmedResult
+                }
+            }
+            
             print("[TypeFlow-Debug] LLMEngine: Generation successful. Result: '\(trimmedResult)'")
             return trimmedResult
             

@@ -6,6 +6,12 @@ class PromptBuilder {
     private init() {}
     
     func buildPrompt(textBeforeCaret: String, systemInstructions: String) -> String {
+        let prefix = buildPromptPrefix(textBeforeCaret: textBeforeCaret, systemInstructions: systemInstructions)
+        let suffix = buildPromptSuffix(textBeforeCaret: textBeforeCaret)
+        return prefix + suffix
+    }
+    
+    func buildPromptPrefix(textBeforeCaret: String, systemInstructions: String) -> String {
         var prompt = ""
         
         let personalizationActive = SettingsManager.shared.personalizationEnabled
@@ -31,10 +37,13 @@ class PromptBuilder {
         }
         
         prompt += "\(systemInstructions)\n\n"
-        
-        let contextText = String(textBeforeCaret.suffix(120))
-        prompt += "[Current text to complete]:\n\(contextText)\n\n<completion>"
-        
+        prompt += "[Current text to complete]:\n"
         return prompt
+    }
+    
+    func buildPromptSuffix(textBeforeCaret: String) -> String {
+        let contextText = String(textBeforeCaret.suffix(120))
+        let trimmedContext = contextText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(trimmedContext)\n\n<completion>"
     }
 }
