@@ -229,9 +229,10 @@ class AccessibilityMonitor {
                     }
                     
                     var tabConsumed = false
-                    if (keyCode == 48 && SettingsManager.shared.acceptShortcut == "Tab") ||
+                    let isRewriteActive = CompletionManager.shared.activeRewriteText != nil && CompletionManager.shared.currentCompletion != nil
+                    if (keyCode == 48 && (SettingsManager.shared.acceptShortcut == "Tab" || isRewriteActive)) ||
                        (keyCode == 124 && SettingsManager.shared.acceptShortcut == "Right Arrow") {
-                        print("[TypeFlow] Trigger key pressed (Tab/Right)")
+                        print("[TypeFlow] Trigger key pressed (Tab/Right) [isRewriteActive=\(isRewriteActive)]")
                         if CompletionManager.shared.handleTabPressed() {
                             print("[TypeFlow] Tab consumed by CompletionManager")
                             tabConsumed = true

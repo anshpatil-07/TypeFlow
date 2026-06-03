@@ -128,16 +128,64 @@ struct CompletionOverlayView: View {
     }
 }
 
+// ─── Custom Window Subclass ──────────────────────────────────────────────────
+class OverlayWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let keyCode = event.keyCode
+        if keyCode == 48 { // Tab
+            if CompletionManager.shared.activeRewriteText != nil && CompletionManager.shared.currentCompletion != nil {
+                print("[TypeFlow-Debug] OverlayWindow performKeyEquivalent: Intercepted Tab during rewrite")
+                DispatchQueue.main.async {
+                    _ = CompletionManager.shared.handleTabPressed()
+                }
+                return true // swallow
+            }
+        }
+        if keyCode == 53 { // Escape
+            if CompletionManager.shared.activeRewriteText != nil {
+                print("[TypeFlow-Debug] OverlayWindow performKeyEquivalent: Intercepted Escape during rewrite")
+                DispatchQueue.main.async {
+                    CompletionManager.shared.clearCompletion()
+                }
+                return true // swallow
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        let keyCode = event.keyCode
+        if keyCode == 48 {
+            if CompletionManager.shared.activeRewriteText != nil && CompletionManager.shared.currentCompletion != nil {
+                print("[TypeFlow-Debug] OverlayWindow keyDown: Intercepted Tab during rewrite")
+                _ = CompletionManager.shared.handleTabPressed()
+                return
+            }
+        }
+        if keyCode == 53 {
+            if CompletionManager.shared.activeRewriteText != nil {
+                print("[TypeFlow-Debug] OverlayWindow keyDown: Intercepted Escape during rewrite")
+                CompletionManager.shared.clearCompletion()
+                return
+            }
+        }
+        super.keyDown(with: event)
+    }
+}
+
 // ─── Window Controller ────────────────────────────────────────────────────────
 class OverlayWindowController: NSWindowController {
-    var overlayWindow: NSWindow!
+    var overlayWindow: OverlayWindow!
     private let completionModel = CompletionModel()
     private var lastCaretRect = CGRect.zero
+    private var localEventMonitor: Any?
 
     init() {
         let hostingView = NSHostingView(rootView: CompletionOverlayView(model: completionModel))
 
-        overlayWindow = NSWindow(
+        overlayWindow = OverlayWindow(
             contentRect: CGRect(x: 0, y: 0, width: 360, height: 32),
             styleMask: .borderless,
             backing: .buffered,
@@ -152,6 +200,36 @@ class OverlayWindowController: NSWindowController {
         overlayWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         super.init(window: overlayWindow)
+
+        // Setup local event monitor to intercept Tab/Escape when TypeFlow is key
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let keyCode = event.keyCode
+            if keyCode == 48 { // Tab
+                if CompletionManager.shared.activeRewriteText != nil && CompletionManager.shared.currentCompletion != nil {
+                    print("[TypeFlow-Debug] Local event monitor: Intercepted Tab during rewrite")
+                    DispatchQueue.main.async {
+                        _ = CompletionManager.shared.handleTabPressed()
+                    }
+                    return nil // swallow
+                }
+            }
+            if keyCode == 53 { // Escape
+                if CompletionManager.shared.activeRewriteText != nil {
+                    print("[TypeFlow-Debug] Local event monitor: Intercepted Escape during rewrite")
+                    DispatchQueue.main.async {
+                        CompletionManager.shared.clearCompletion()
+                    }
+                    return nil // swallow
+                }
+            }
+            return event
+        }
+    }
+
+    deinit {
+        if let monitor = localEventMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
     }
 
     required init?(coder: NSCoder) {
