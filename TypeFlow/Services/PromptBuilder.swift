@@ -46,4 +46,14 @@ class PromptBuilder {
         let trimmedContext = contextText.trimmingCharacters(in: .whitespacesAndNewlines)
         return "\(trimmedContext)\n\n<completion>"
     }
+    
+    func buildRewritePrompt(selectedText: String, systemInstructions: String, toneName: String) -> String {
+        var prompt = ""
+        prompt += "You are a writing assistant. Rewrite the following text to improve clarity, flow, and vocabulary while matching a \(toneName) tone.\n"
+        prompt += "Instructions: \(systemInstructions)\n"
+        prompt += "Do not write any intro, notes, explanations, or quotes. Output ONLY the rewritten text.\n\n"
+        prompt += "[Text to Rewrite]:\n\(selectedText)\n\n"
+        prompt += "<completion>"
+        return prompt
+    }
 }
