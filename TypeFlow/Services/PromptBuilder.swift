@@ -5,7 +5,7 @@ class PromptBuilder {
     
     private init() {}
     
-    func buildPrompt(textBeforeCaret: String) -> String {
+    func buildPrompt(textBeforeCaret: String, systemInstructions: String) -> String {
         var prompt = ""
         
         let personalizationActive = SettingsManager.shared.personalizationEnabled
@@ -30,7 +30,7 @@ class PromptBuilder {
             }
         }
         
-        prompt += "Complete the text. Output only the next few words. No explanation.\n\n"
+        prompt += "\(systemInstructions)\n\n"
         
         let contextText = String(textBeforeCaret.suffix(120))
         prompt += "[Current text to complete]:\n\(contextText)\n\n<completion>"
