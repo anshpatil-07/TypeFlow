@@ -1,39 +1,126 @@
 import SwiftUI
 
+// ─── Hotkey Recorder ─────────────────────────────────────────────────────────
+
+/// A lightweight SwiftUI wrapper that records a key + modifier combination
+/// and stores it as a display string like "⌥R" or "⌃⇧E".
+struct HotkeyRecorderView: NSViewRepresentable {
+    @Binding var shortcut: String
+
+    func makeNSView(context: Context) -> HotkeyRecorderNSView {
+        let v = HotkeyRecorderNSView()
+        v.onShortcutRecorded = { [weak v] s in
+            shortcut = s
+            v?.isRecording = false
+            v?.needsDisplay = true
+        }
+        return v
+    }
+
+    func updateNSView(_ nsView: HotkeyRecorderNSView, context: Context) {
+        nsView.displayedShortcut = shortcut
+        nsView.needsDisplay = true
+    }
+}
+
+class HotkeyRecorderNSView: NSView {
+    var displayedShortcut: String = ""
+    var isRecording = false
+    var onShortcutRecorded: ((String) -> Void)?
+
+    override var acceptsFirstResponder: Bool { true }
+    override var focusRingType: NSFocusRingType {
+        get { .exterior }
+        set { }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let cornerRadius: CGFloat = 6
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1),
+                                xRadius: cornerRadius, yRadius: cornerRadius)
+
+        if isRecording {
+            NSColor(red: 0.2, green: 0.5, blue: 1.0, alpha: 0.15).setFill()
+        } else {
+            NSColor.controlBackgroundColor.setFill()
+        }
+        path.fill()
+
+        let borderColor = isRecording
+            ? NSColor(red: 0.2, green: 0.5, blue: 1.0, alpha: 0.9)
+            : NSColor.separatorColor
+        borderColor.setStroke()
+        path.lineWidth = isRecording ? 1.5 : 1.0
+        path.stroke()
+
+        let label = isRecording ? "Press shortcut…" : (displayedShortcut.isEmpty ? "Click to record" : displayedShortcut)
+        let color: NSColor = isRecording ? NSColor(red: 0.2, green: 0.5, blue: 1.0, alpha: 1) : .labelColor
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: color
+        ]
+        let str = NSAttributedString(string: label, attributes: attrs)
+        let sz = str.size()
+        str.draw(at: NSPoint(x: (bounds.width - sz.width) / 2, y: (bounds.height - sz.height) / 2))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        isRecording = true
+        needsDisplay = true
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard isRecording else { super.keyDown(with: event); return }
+
+        // Escape cancels recording
+        if event.keyCode == 53 {
+            isRecording = false
+            needsDisplay = true
+            return
+        }
+
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard !flags.isEmpty, let chars = event.charactersIgnoringModifiers?.uppercased(), !chars.isEmpty else {
+            return // require at least one modifier
+        }
+
+        var parts: [String] = []
+        if flags.contains(.control) { parts.append("⌃") }
+        if flags.contains(.option)  { parts.append("⌥") }
+        if flags.contains(.shift)   { parts.append("⇧") }
+        if flags.contains(.command) { parts.append("⌘") }
+        parts.append(chars)
+        let shortcutString = parts.joined()
+        onShortcutRecorded?(shortcutString)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        isRecording = false
+        needsDisplay = true
+        return super.resignFirstResponder()
+    }
+}
+
+// ─── Settings View ────────────────────────────────────────────────────────────
+
 struct SettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
     @StateObject var modelManager = ModelManager()
-    
+
     var body: some View {
         TabView {
             // General Tab
             Form {
-                Picker("Accept Shortcut:", selection: $settings.acceptShortcut) {
-                    Text("Tab").tag("Tab")
-                    Text("Right Arrow").tag("Right Arrow")
-                }
-                .pickerStyle(SegmentedPickerStyle())
-                
-                Picker("Rewrite Shortcut:", selection: $settings.rewriteShortcut) {
-                    Text("Option + R (⌥R)").tag("Option+R")
-                    Text("Option + E (⌥E)").tag("Option+E")
-                    Text("Option + W (⌥W)").tag("Option+W")
-                    Text("Control + R (⌃R)").tag("Control+R")
-                    Text("Control + E (⌃E)").tag("Control+E")
-                    Text("Control + W (⌃W)").tag("Control+W")
-                }
-                .padding(.top)
-                
                 Picker("Completion Tone:", selection: $settings.tone) {
                     ForEach(settings.getTones()) { tone in
                         Text(tone.name).tag(tone.id)
                     }
                 }
-                .padding(.top)
-                
+
                 Toggle("Auto-correct misspelled words as you type", isOn: $settings.autoCorrectEnabled)
                     .padding(.top)
-                
+
                 Toggle("Enable personalization (Typing History)", isOn: $settings.personalizationEnabled)
                     .padding(.top)
             }
@@ -41,8 +128,49 @@ struct SettingsView: View {
             .tabItem {
                 Label("General", systemImage: "gear")
             }
-            
+
+            // Shortcuts Tab
+            Form {
+                Section(header: Text("Accept Suggestion").font(.headline).foregroundColor(.primary)) {
+                    Picker("", selection: $settings.acceptShortcut) {
+                        Text("Tab ⇥").tag("Tab")
+                        Text("Right Arrow →").tag("Right Arrow")
+                    }
+                    .pickerStyle(SegmentedPickerStyle())
+                    .labelsHidden()
+                    Text("Press this key to accept a ghost-text suggestion inline.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Divider().padding(.vertical, 8)
+
+                Section(header: Text("Rewrite Selection").font(.headline).foregroundColor(.primary)) {
+                    HStack {
+                        Text("Hotkey:")
+                            .frame(width: 70, alignment: .leading)
+                        HotkeyRecorderView(shortcut: $settings.rewriteShortcut)
+                            .frame(width: 160, height: 34)
+                            .help("Click then press your desired modifier + key combination. Press Esc to cancel.")
+                        Button("Reset") {
+                            settings.rewriteShortcut = "⌥R"
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                    }
+                    Text("Select text in any app, then press this hotkey to trigger the AI Rewrite panel.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding()
+            .tabItem {
+                Label("Shortcuts", systemImage: "keyboard")
+            }
+
             // Models Tab
+
             Form {
                 ForEach(modelManager.models) { model in
                     HStack {

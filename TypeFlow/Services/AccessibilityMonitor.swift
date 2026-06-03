@@ -9,7 +9,7 @@ class AccessibilityMonitor {
     private var activeAppObserver: AXObserver?
     /// PID of the application whose AX observer is currently registered.
     /// Used to suppress intra-app focus-change noise (e.g. browser URL bar ↔ page).
-    private var activeFocusPID: pid_t = 0
+    var activeFocusPID: pid_t = 0
     
     init(onCaretMoved: @escaping (CGRect) -> Void) {
         self.onCaretMoved = onCaretMoved
@@ -21,12 +21,32 @@ class AccessibilityMonitor {
         ) { [weak self] notification in
             guard let self = self else { return }
             print("[TypeFlow-Debug] NSWorkspace.didActivateApplicationNotification triggered")
-            self.clearKeystrokeBuffer()
-            CompletionManager.shared.clearCompletion()
             
             if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                if app.processIdentifier == NSRunningApplication.current.processIdentifier {
+                    print("[TypeFlow-Debug] didActivateApplication: TypeFlow activated itself, ignoring focus clear")
+                    return
+                }
+                if let rewritePID = CompletionManager.shared.activeRewritePID,
+                   app.processIdentifier == rewritePID {
+                    print("[TypeFlow-Debug] didActivateApplication: Original rewrite app activated, ignoring focus clear")
+                    return
+                }
+                self.clearKeystrokeBuffer()
+                CompletionManager.shared.clearCompletion()
                 self.setupActiveAppObserver(for: app.processIdentifier)
             } else if let app = NSWorkspace.shared.frontmostApplication {
+                if app.processIdentifier == NSRunningApplication.current.processIdentifier {
+                    print("[TypeFlow-Debug] didActivateApplication: TypeFlow is frontmost, ignoring focus clear")
+                    return
+                }
+                if let rewritePID = CompletionManager.shared.activeRewritePID,
+                   app.processIdentifier == rewritePID {
+                    print("[TypeFlow-Debug] didActivateApplication: Original rewrite app is frontmost, ignoring focus clear")
+                    return
+                }
+                self.clearKeystrokeBuffer()
+                CompletionManager.shared.clearCompletion()
                 self.setupActiveAppObserver(for: app.processIdentifier)
             }
         }
@@ -35,9 +55,33 @@ class AccessibilityMonitor {
             forName: NSWorkspace.didDeactivateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
             guard let self = self else { return }
             print("[TypeFlow-Debug] NSWorkspace.didDeactivateApplicationNotification triggered")
+            
+            if let frontmost = NSWorkspace.shared.frontmostApplication {
+                if frontmost.processIdentifier == NSRunningApplication.current.processIdentifier {
+                    print("[TypeFlow-Debug] didDeactivateApplication: TypeFlow is becoming frontmost, ignoring clear")
+                    return
+                }
+                if let rewritePID = CompletionManager.shared.activeRewritePID,
+                   frontmost.processIdentifier == rewritePID {
+                    print("[TypeFlow-Debug] didDeactivateApplication: Original rewrite app is frontmost, ignoring clear")
+                    return
+                }
+            }
+            if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                if app.processIdentifier == NSRunningApplication.current.processIdentifier {
+                    print("[TypeFlow-Debug] didDeactivateApplication: TypeFlow itself deactivated, ignoring clear")
+                    return
+                }
+                if let rewritePID = CompletionManager.shared.activeRewritePID,
+                   app.processIdentifier == rewritePID {
+                    print("[TypeFlow-Debug] didDeactivateApplication: Original rewrite app deactivated, ignoring clear")
+                    return
+                }
+            }
+            
             self.clearKeystrokeBuffer()
             CompletionManager.shared.clearCompletion()
             self.stopActiveAppObserver()
@@ -62,6 +106,10 @@ class AccessibilityMonitor {
             AXUIElementGetPid(element, &newPID)
             
             if newPID != 0 && newPID != obj.activeFocusPID {
+                if newPID == NSRunningApplication.current.processIdentifier {
+                    print("[TypeFlow-Debug] AXObserver: focus moved to TypeFlow, ignoring buffer clear")
+                    return
+                }
                 // Real app switch — clear buffer and completions
                 print("[TypeFlow-Debug] AXObserver: focus moved to different PID (\(obj.activeFocusPID) -> \(newPID)), clearing buffer")
                 obj.activeFocusPID = newPID
@@ -171,7 +219,7 @@ class AccessibilityMonitor {
                     if let monitor = refcon {
                         let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
                         let obj = unmanaged.takeUnretainedValue()
-                        if obj.matchesRewriteShortcut(keyCode: keyCode, flags: event.flags) {
+                        if obj.matchesRewriteShortcut(event: event) {
                             print("[TypeFlow] Intercepted Rewrite Shortcut — triggering Rewrite selection")
                             DispatchQueue.main.async {
                                 CompletionManager.shared.triggerRewrite()
@@ -442,7 +490,7 @@ class AccessibilityMonitor {
             if let stringValue = val as? String {
                 fullText = stringValue
             } else if CFGetTypeID(val) == CFAttributedStringGetTypeID() {
-                let attrStr: CFAttributedString = val as! CFAttributedString
+                let attrStr = val as! CFAttributedString
                 fullText = CFAttributedStringGetString(attrStr) as String
             }
             
@@ -576,16 +624,123 @@ class AccessibilityMonitor {
         return nil
     }
 
-    func matchesRewriteShortcut(keyCode: Int64, flags: CGEventFlags) -> Bool {
-        let shortcut = SettingsManager.shared.rewriteShortcut
-        switch shortcut {
-        case "Option+R": return keyCode == 15 && flags.contains(.maskAlternate)
-        case "Option+E": return keyCode == 14 && flags.contains(.maskAlternate)
-        case "Option+W": return keyCode == 13 && flags.contains(.maskAlternate)
-        case "Control+R": return keyCode == 15 && flags.contains(.maskControl)
-        case "Control+E": return keyCode == 14 && flags.contains(.maskControl)
-        case "Control+W": return keyCode == 13 && flags.contains(.maskControl)
-        default: return keyCode == 15 && flags.contains(.maskAlternate)
+    /// Returns the selected text, using a Cmd+C clipboard fallback when the AX
+    /// kAXSelectedTextAttribute returns empty (common in Chrome / Firefox).
+    func getSelectedTextWithClipboardFallback() async -> String? {
+        // 1. Try AX first (fast path)
+        if let axText = getSelectedText(), !axText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            print("[TypeFlow-Debug] getSelectedText: AX succeeded — '\(axText.prefix(60))'")
+            return axText
         }
+        print("[TypeFlow-Debug] getSelectedText: AX returned empty — trying Cmd+C clipboard fallback")
+
+        // 2. Save current clipboard content
+        let pasteboard = NSPasteboard.general
+        let savedString = pasteboard.string(forType: .string)
+
+        // 3. Clear clipboard so we can detect a change
+        pasteboard.clearContents()
+
+        // 4. Synthesize Cmd+C
+        let src = CGEventSource(stateID: .hidSystemState)
+        let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true) // C
+        let keyUp   = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false)
+        keyDown?.setIntegerValueField(.eventSourceUserData, value: 9999)
+        keyUp?.setIntegerValueField(.eventSourceUserData, value: 9999)
+        keyDown?.flags = .maskCommand
+        keyUp?.flags   = .maskCommand
+        keyDown?.post(tap: .cghidEventTap)
+        keyUp?.post(tap: .cghidEventTap)
+
+        // 5. Wait briefly for the app to populate the clipboard
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        let copiedText = pasteboard.string(forType: .string)
+
+        // 6. Restore original clipboard content
+        pasteboard.clearContents()
+        if let saved = savedString {
+            pasteboard.setString(saved, forType: .string)
+        }
+
+        if let text = copiedText, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            print("[TypeFlow-Debug] getSelectedText: Clipboard fallback returned '\(text.prefix(60))'")
+            return text
+        }
+        print("[TypeFlow-Debug] getSelectedText: Both AX and clipboard fallback failed")
+        return nil
+    }
+
+    /// Returns the AX bounding rect of the selected text for overlay anchoring.
+    /// Falls back to the caret rect if the selection rect is unavailable.
+    func getSelectionRect() -> CGRect? {
+        guard let axElement = getFocusedElement() else { return getCurrentCaretRect() }
+
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let rangeVal = rangeRef else { return getCurrentCaretRect() }
+
+        var boundsRef: CFTypeRef?
+        if AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, rangeVal, &boundsRef) == .success,
+           let boundsAX = boundsRef,
+           CFGetTypeID(boundsAX) == AXValueGetTypeID() {
+            let boundsVal = boundsAX as! AXValue
+            var rect = CGRect.zero
+            if AXValueGetValue(boundsVal, .cgRect, &rect), rect.width > 0 || rect.height > 0 {
+                print("[TypeFlow-Debug] getSelectionRect: selection rect = \(rect)")
+                return rect
+            }
+        }
+        return getCurrentCaretRect()
+    }
+
+
+    func matchesRewriteShortcut(event: CGEvent) -> Bool {
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let flags = event.flags
+        let shortcut = SettingsManager.shared.rewriteShortcut
+        
+        var reqOption = false
+        var reqControl = false
+        var reqShift = false
+        var reqCommand = false
+        var reqChar = ""
+        
+        if shortcut.contains("Option") || shortcut.contains("⌥") { reqOption = true }
+        if shortcut.contains("Control") || shortcut.contains("⌃") { reqControl = true }
+        if shortcut.contains("Shift") || shortcut.contains("⇧") { reqShift = true }
+        if shortcut.contains("Command") || shortcut.contains("⌘") { reqCommand = true }
+        
+        if let last = shortcut.last {
+            reqChar = String(last).uppercased()
+        }
+        
+        let hasOption = flags.contains(.maskAlternate)
+        let hasControl = flags.contains(.maskControl)
+        let hasShift = flags.contains(.maskShift)
+        let hasCommand = flags.contains(.maskCommand)
+        
+        if reqOption != hasOption || reqControl != hasControl || reqShift != hasShift || reqCommand != hasCommand {
+            return false
+        }
+        
+        if let nsEvent = NSEvent(cgEvent: event),
+           let chars = nsEvent.charactersIgnoringModifiers?.uppercased(),
+           !chars.isEmpty {
+            return chars == reqChar
+        }
+        
+        // Fallback to keycodes for safety:
+        let lowerChar = reqChar.lowercased()
+        let charMap: [String: Int64] = [
+            "a": 0, "b": 11, "c": 8, "d": 2, "e": 14, "f": 3, "g": 5, "h": 4, "i": 34, "j": 38,
+            "k": 40, "l": 37, "m": 46, "n": 45, "o": 31, "p": 35, "q": 12, "r": 15, "s": 1, "t": 17,
+            "u": 32, "v": 9, "w": 13, "x": 7, "y": 16, "z": 6
+        ]
+        if let mappedCode = charMap[lowerChar] {
+            return keyCode == mappedCode
+        }
+        
+        return false
     }
 }

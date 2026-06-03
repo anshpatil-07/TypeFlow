@@ -14,6 +14,7 @@ class CompletionManager: @unchecked Sendable {
     private var activeSpellCorrection: (misspelled: String, corrected: String)?
     private var activeSnippetKey: String?
     private var activeRewriteText: String?
+    var activeRewritePID: pid_t?
     
     private init() {
         NotificationCenter.default.addObserver(
@@ -398,47 +399,129 @@ class CompletionManager: @unchecked Sendable {
         }
     }
     
-    func triggerRewrite() {
-        print("[TypeFlow-Debug] CompletionManager: triggerRewrite called")
-        
-        guard let selection = accessibilityMonitor?.getSelectedText(),
-              !selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            print("[TypeFlow-Debug] No selection to rewrite")
-            return
-        }
-        
-        // Cancel normal completions
+    /// Rewrite modes for the three popover buttons.
+    enum RewriteMode {
+        case selectMode        // wait for user to choose tone
+        case currentTone       // uses the app's active tone profile
+        case professional      // formal, polished
+        case shorter           // cut to the point
+        case fixGrammar        // grammar + spelling only, preserve meaning
+    }
+
+    func triggerRewrite(mode: RewriteMode = .selectMode) {
+        print("[TypeFlow-Debug] CompletionManager: triggerRewrite called (mode: \(mode))")
+
+        // Cancel previous tasks/timers immediately
         debounceTimer?.invalidate()
         debounceTimer = nil
         currentGenerationTask?.cancel()
         currentGenerationTask = nil
-        
         activeSpellCorrection = nil
         activeSnippetKey = nil
-        
-        // Set overlay loading state
-        DispatchQueue.main.async {
-            if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
-                self.overlayWindowController?.moveOverlay(to: rect)
+
+        if mode == .selectMode {
+            // Start of rewrite session: track original PID and clear previous text
+            self.activeRewritePID = self.accessibilityMonitor?.activeFocusPID
+            self.activeRewriteText = nil
+            self.currentCompletion = nil
+            
+            // Show the loading/mode selection overlay anchored to the selection
+            DispatchQueue.main.async {
+                if let rect = self.accessibilityMonitor?.getSelectionRect() {
+                    self.overlayWindowController?.moveOverlay(to: rect)
+                }
+                self.overlayWindowController?.updateText("", isRewrite: true, isLoading: true)
             }
-            self.overlayWindowController?.updateText("", isRewrite: true, isLoading: true)
+
+            // Asynchronously extract selection immediately while the target app is still frontmost
+            currentGenerationTask = Task {
+                try? await Task.sleep(nanoseconds: 100_000_000) // Settle delay
+                
+                guard let monitor = self.accessibilityMonitor,
+                      let selection = await monitor.getSelectedTextWithClipboardFallback(),
+                      !selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    print("[TypeFlow-Debug] triggerRewrite: No selection extracted, closing popover")
+                    DispatchQueue.main.async { self.clearCompletion() }
+                    return
+                }
+                
+                print("[TypeFlow-Debug] triggerRewrite: Extracted selection '\(selection.prefix(30))...'")
+                self.activeRewriteText = selection
+            }
+            return
         }
-        
+
+        // If a specific rewrite mode is selected:
+        // 1. Immediately reactivate the target application to restore focus and selection
+        if let pid = activeRewritePID, let app = NSRunningApplication(processIdentifier: pid) {
+            if #available(macOS 14.0, *) {
+                NSApplication.shared.yieldActivation(to: app)
+                app.activate(options: [])
+            } else {
+                app.activate(options: [.activateIgnoringOtherApps])
+            }
+        }
+
+        // 2. Update overlay to show "Generating..." spinner
+        DispatchQueue.main.async {
+            self.overlayWindowController?.updateText("Generating...", isRewrite: true, isLoading: true)
+        }
+
         let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
         let effectiveConfig = SettingsManager.shared.getEffectiveConfig(for: bundleId)
-        
+        let toneProfile: ToneProfile
+        switch mode {
+        case .selectMode:
+            return // unreachable
+        case .currentTone:
+            toneProfile = effectiveConfig.toneProfile
+        case .professional:
+            toneProfile = ToneProfile(
+                id: "rewrite-professional", name: "Professional",
+                systemInstructions: "Rewrite the text in a clear, professional, and formal tone. Preserve the original meaning exactly. Output ONLY the rewritten text with no commentary.",
+                temperature: 0.1, maxTokens: 300, isBuiltIn: true)
+        case .shorter:
+            toneProfile = ToneProfile(
+                id: "rewrite-shorter", name: "Shorter",
+                systemInstructions: "Rewrite the text to be significantly shorter and more concise without losing the core meaning. Cut unnecessary words and phrases. Output ONLY the rewritten text.",
+                temperature: 0.1, maxTokens: 200, isBuiltIn: true)
+        case .fixGrammar:
+            toneProfile = ToneProfile(
+                id: "rewrite-grammar", name: "Fix Grammar",
+                systemInstructions: "Fix all spelling mistakes, grammar errors, and punctuation in the text. Do NOT change the meaning, style, or vocabulary beyond necessary corrections. Output ONLY the corrected text.",
+                temperature: 0.0, maxTokens: 300, isBuiltIn: true)
+        }
+
         currentGenerationTask = Task {
-            let rewritten = await LLMEngine.shared.generateRewrite(selectedText: selection, toneProfile: effectiveConfig.toneProfile)
-            
+            // Ensure selection is ready (wait up to 1 second if extraction is still running)
+            var attempts = 0
+            while self.activeRewriteText == nil && attempts < 10 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                attempts += 1
+            }
+
+            guard let selection = self.activeRewriteText,
+                  !selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                print("[TypeFlow-Debug] triggerRewrite: Selection not available for rewrite")
+                DispatchQueue.main.async { self.clearCompletion() }
+                return
+            }
+
+            print("[TypeFlow-Debug] Rewriting selection with mode '\(toneProfile.name)'")
+            let rewritten = await LLMEngine.shared.generateRewrite(selectedText: selection, toneProfile: toneProfile)
+
             if Task.isCancelled {
                 print("[TypeFlow-Debug] Rewrite generation cancelled")
                 return
             }
-            
+
             DispatchQueue.main.async {
                 if !rewritten.isEmpty {
                     self.currentCompletion = rewritten
-                    self.activeRewriteText = selection
+                    // Re-anchor overlay in case selection rect changed
+                    if let rect = self.accessibilityMonitor?.getSelectionRect() {
+                        self.overlayWindowController?.moveOverlay(to: rect)
+                    }
                     self.overlayWindowController?.updateText(rewritten, isRewrite: true, isLoading: false)
                 } else {
                     self.clearCompletion()
@@ -446,6 +529,7 @@ class CompletionManager: @unchecked Sendable {
             }
         }
     }
+
     
     func handleTabPressed() -> Bool {
         if let _ = activeRewriteText, let completion = currentCompletion, !completion.isEmpty {
@@ -509,6 +593,7 @@ class CompletionManager: @unchecked Sendable {
         activeSpellCorrection = nil
         activeSnippetKey = nil
         activeRewriteText = nil
+        activeRewritePID = nil
         currentGenerationTask?.cancel()
         currentGenerationTask = nil
         overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false)
