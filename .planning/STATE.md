@@ -37,3 +37,4 @@ Last activity: 2026-06-03
 - Phase 11 added: Tone Profiles
 - Phase 12 added: Snippet Memory and Shortcodes
 - Phase 13 added: Productivity Dashboard
+- Phase 14 added: Rewrite on Selection
