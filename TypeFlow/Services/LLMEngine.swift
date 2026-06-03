@@ -234,4 +234,60 @@ class LLMEngine {
         isLoading = false
         NotificationCenter.default.post(name: Notification.Name("TypeFlowModelLoadingStateChanged"), object: false)
     }
+    
+    func generateRewrite(selectedText: String, toneProfile: ToneProfile) async -> String {
+        await loadModelIfNeeded()
+        guard let container = modelContainer else {
+            print("[TypeFlow-Debug] LLMEngine: modelContainer is nil for rewrite")
+            return ""
+        }
+        guard checkMemoryStatus() else {
+            print("[TypeFlow-Debug] LLMEngine: Low memory guard triggered for rewrite")
+            return ""
+        }
+        
+        do {
+            let result = try await container.perform { modelContext -> String in
+                let prompt = PromptBuilder.shared.buildRewritePrompt(
+                    selectedText: selectedText,
+                    systemInstructions: toneProfile.systemInstructions,
+                    toneName: toneProfile.name
+                )
+                let input = UserInput(prompt: prompt)
+                let prepared = try await modelContext.processor.prepare(input: input)
+                
+                let maxTokens = max(100, selectedText.count / 2)
+                let params = GenerateParameters(maxTokens: maxTokens, temperature: Float(toneProfile.temperature))
+                
+                let stream = try MLXLMCommon.generate(
+                    input: prepared.input,
+                    cache: modelContext.model.newCache(parameters: nil),
+                    parameters: params,
+                    context: modelContext
+                )
+                
+                var outputText = ""
+                for await generation in stream {
+                    if case .chunk(let text) = generation {
+                        outputText += text
+                        if outputText.contains("</completion>") {
+                            break
+                        }
+                    }
+                }
+                return outputText
+            }
+            
+            MLX.Memory.clearCache()
+            
+            var cleanResult = result
+            if let range = cleanResult.range(of: "</completion>") {
+                cleanResult = String(cleanResult[..<range.lowerBound])
+            }
+            return cleanResult.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            print("[TypeFlow-Debug] LLMEngine rewrite error: \(error)")
+            return ""
+        }
+    }
 }
