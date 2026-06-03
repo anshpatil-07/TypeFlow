@@ -99,10 +99,10 @@ Plans:
 
 ### Phase 13: Productivity Dashboard
 
-**Goal:** [To be planned]
+**Goal:** Add a native macOS productivity dashboard window accessible from the menu bar, showing all-time stats (completions accepted, words saved, acceptance rate), a 30-day bar chart, and snippet/history counters. Backed by a new `UsageStatsManager` that instruments 4 call sites in `CompletionManager` to record usage events locally.
 **Requirements**: TBD
 **Depends on:** Phase 12
-**Plans:** 0 plans
+**Plans:** 1/0 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 13 to break down)
+- [x] 13-PLAN.md (Wave 1: UsageStatsManager + instrumentation | Wave 2: DashboardView + menu wiring)
