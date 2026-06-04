@@ -10,6 +10,7 @@ class AccessibilityMonitor {
     /// PID of the application whose AX observer is currently registered.
     /// Used to suppress intra-app focus-change noise (e.g. browser URL bar ↔ page).
     var activeFocusPID: pid_t = 0
+    private let processingQueue = DispatchQueue(label: "com.cotyper.eventProcessing", qos: .userInteractive)
     
     init(onCaretMoved: @escaping (CGRect) -> Void) {
         self.onCaretMoved = onCaretMoved
@@ -20,6 +21,7 @@ class AccessibilityMonitor {
             queue: .main
         ) { [weak self] notification in
             guard let self = self else { return }
+            if CompletionManager.shared.isRewrite { return }
             print("[TypeFlow-Debug] NSWorkspace.didActivateApplicationNotification triggered")
             
             if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
@@ -57,6 +59,7 @@ class AccessibilityMonitor {
             queue: .main
         ) { [weak self] notification in
             guard let self = self else { return }
+            if CompletionManager.shared.isRewrite { return }
             print("[TypeFlow-Debug] NSWorkspace.didDeactivateApplicationNotification triggered")
             
             if let frontmost = NSWorkspace.shared.frontmostApplication {
@@ -110,6 +113,7 @@ class AccessibilityMonitor {
                     print("[TypeFlow-Debug] AXObserver: focus moved to TypeFlow, ignoring buffer clear")
                     return
                 }
+                if CompletionManager.shared.isRewrite { return }
                 // Real app switch — clear buffer and completions
                 print("[TypeFlow-Debug] AXObserver: focus moved to different PID (\(obj.activeFocusPID) -> \(newPID)), clearing buffer")
                 obj.activeFocusPID = newPID
@@ -219,6 +223,17 @@ class AccessibilityMonitor {
                     if let monitor = refcon {
                         let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
                         let obj = unmanaged.takeUnretainedValue()
+                        
+                        if CompletionManager.shared.isRewrite {
+                            if keyCode == 53 { // Escape
+                                print("[TypeFlow] Escape pressed during rewrite, clearing completion")
+                                DispatchQueue.main.async {
+                                    CompletionManager.shared.clearCompletion()
+                                }
+                                return nil
+                            }
+                        }
+                        
                         if obj.matchesRewriteShortcut(event: event) {
                             print("[TypeFlow] Intercepted Rewrite Shortcut — triggering Rewrite selection")
                             DispatchQueue.main.async {
@@ -226,10 +241,43 @@ class AccessibilityMonitor {
                             }
                             return nil // Consume event to prevent printing characters
                         }
+                        
+                        // Direct hardcoded check for Cmd+Shift+R (keyCode 15)
+                        // This bypasses string-parsing to guarantee reliable interception
+                        let flags = event.flags
+                        let hasCmd = flags.contains(.maskCommand)
+                        let hasShift = flags.contains(.maskShift)
+                        let hasOption = flags.contains(.maskAlternate)
+                        let hasCtrl = flags.contains(.maskControl)
+                        if keyCode == 15 && hasCmd && hasShift && !hasOption && !hasCtrl {
+                            print("[TypeFlow] Intercepted Cmd+Shift+R — triggering Smart Reply")
+                            DispatchQueue.main.async {
+                                CompletionManager.shared.triggerSmartReply()
+                            }
+                            return nil
+                        }
+                        
+                        if obj.matchesSmartReplyShortcut(event: event) {
+                            print("[TypeFlow] Intercepted Smart Reply Shortcut (string match) — triggering Smart Reply")
+                            DispatchQueue.main.async {
+                                CompletionManager.shared.triggerSmartReply()
+                            }
+                            return nil // Consume event
+                        }
+                    }
+                    
+                    if keyCode == 53 { // Escape
+                        if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
+                            print("[TypeFlow] Intercepted Escape in global monitor")
+                            DispatchQueue.main.async {
+                                CompletionManager.shared.clearCompletion()
+                            }
+                            return nil // Consume event
+                        }
                     }
                     
                     var tabConsumed = false
-                    let isRewriteActive = CompletionManager.shared.activeRewriteText != nil && CompletionManager.shared.currentCompletion != nil
+                    let isRewriteActive = CompletionManager.shared.isRewrite
                     if (keyCode == 48 && (SettingsManager.shared.acceptShortcut == "Tab" || isRewriteActive)) ||
                        (keyCode == 124 && SettingsManager.shared.acceptShortcut == "Right Arrow") {
                         print("[TypeFlow] Trigger key pressed (Tab/Right) [isRewriteActive=\(isRewriteActive)]")
@@ -250,6 +298,10 @@ class AccessibilityMonitor {
                             return nil // Consume the event
                         }
                         
+                        if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
+                            return nil // Ignore all other keystrokes during rewrite/smart-reply
+                        }
+                        
                         obj.handleKeystroke(keyCode: keyCode, event: event)
                         
                         // Snapshot the buffer NOW (still in the CGEvent tap thread) so
@@ -257,14 +309,17 @@ class AccessibilityMonitor {
                         // onTextChanged runs on the main thread.
                         let bufferSnapshot = obj.keystrokeBuffer
                         
-                        DispatchQueue.main.async {
+                        obj.processingQueue.async {
                             print("[TypeFlow] Checking caret rect...")
-                            if let rect = obj.getCurrentCaretRect() {
-                                print("[TypeFlow] Caret rect found: \(rect)")
-                                obj.onCaretMoved?(rect)
-                                CompletionManager.shared.onTextChanged(bufferFallback: bufferSnapshot)
-                            } else {
-                                print("[TypeFlow] Caret rect not found! Calling onTextChanged anyway for debugging.")
+                            let rect = obj.getCurrentCaretRect()
+                            
+                            DispatchQueue.main.async {
+                                if let r = rect {
+                                    print("[TypeFlow] Caret rect found: \(r)")
+                                    obj.onCaretMoved?(r)
+                                } else {
+                                    print("[TypeFlow] Caret rect not found! Calling onTextChanged anyway for debugging.")
+                                }
                                 CompletionManager.shared.onTextChanged(bufferFallback: bufferSnapshot)
                             }
                         }
@@ -728,7 +783,56 @@ class AccessibilityMonitor {
         if let nsEvent = NSEvent(cgEvent: event),
            let chars = nsEvent.charactersIgnoringModifiers?.uppercased(),
            !chars.isEmpty {
-            return chars == reqChar
+            return chars.uppercased() == reqChar.uppercased()
+        }
+        
+        // Fallback to keycodes for safety:
+        let lowerChar = reqChar.lowercased()
+        let charMap: [String: Int64] = [
+            "a": 0, "b": 11, "c": 8, "d": 2, "e": 14, "f": 3, "g": 5, "h": 4, "i": 34, "j": 38,
+            "k": 40, "l": 37, "m": 46, "n": 45, "o": 31, "p": 35, "q": 12, "r": 15, "s": 1, "t": 17,
+            "u": 32, "v": 9, "w": 13, "x": 7, "y": 16, "z": 6
+        ]
+        if let mappedCode = charMap[lowerChar] {
+            return keyCode == mappedCode
+        }
+        
+        return false
+    }
+    
+    func matchesSmartReplyShortcut(event: CGEvent) -> Bool {
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let flags = event.flags
+        let shortcut = SettingsManager.shared.smartReplyShortcut
+        
+        var reqOption = false
+        var reqControl = false
+        var reqShift = false
+        var reqCommand = false
+        var reqChar = ""
+        
+        if shortcut.contains("Option") || shortcut.contains("⌥") { reqOption = true }
+        if shortcut.contains("Control") || shortcut.contains("⌃") { reqControl = true }
+        if shortcut.contains("Shift") || shortcut.contains("⇧") { reqShift = true }
+        if shortcut.contains("Command") || shortcut.contains("⌘") { reqCommand = true }
+        
+        if let last = shortcut.last {
+            reqChar = String(last).uppercased()
+        }
+        
+        let hasOption = flags.contains(.maskAlternate)
+        let hasControl = flags.contains(.maskControl)
+        let hasShift = flags.contains(.maskShift)
+        let hasCommand = flags.contains(.maskCommand)
+        
+        if reqOption != hasOption || reqControl != hasControl || reqShift != hasShift || reqCommand != hasCommand {
+            return false
+        }
+        
+        if let nsEvent = NSEvent(cgEvent: event),
+           let chars = nsEvent.charactersIgnoringModifiers?.uppercased(),
+           !chars.isEmpty {
+            return chars.uppercased() == reqChar.uppercased()
         }
         
         // Fallback to keycodes for safety:

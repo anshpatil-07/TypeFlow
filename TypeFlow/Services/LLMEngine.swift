@@ -35,8 +35,22 @@ class LLMEngine {
     /// Changing the typing context (buffer clear) does NOT invalidate this key — only
     /// tone swaps or personalization toggle do, which actually alter the system prefix.
     private var cachedPrefixSettingsKey: String = ""
+    private var inactivityTimer: Timer?
     
     var isModelReady: Bool { modelContainer != nil }
+    
+    private func resetInactivityTimer() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.inactivityTimer?.invalidate()
+            self.inactivityTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
+                guard let self = self else { return }
+                self.modelContainer = nil
+                self.invalidateKVCache()
+                print("[TypeFlow-Debug] LLMEngine: Model unloaded due to 5 minutes of inactivity")
+            }
+        }
+    }
     
     /// Explicitly invalidate the KV cache — call only when tone or personalization changes.
     func invalidateKVCache() {
@@ -89,6 +103,7 @@ class LLMEngine {
     func generateCompletion(textBeforeCaret: String, toneProfile: ToneProfile) async -> String {
         print("[TypeFlow-Debug] LLMEngine: generateCompletion called with tone \(toneProfile.name) (temp: \(toneProfile.temperature), maxTokens: \(toneProfile.maxTokens))")
         await loadModelIfNeeded()
+        resetInactivityTimer()
         
         guard let container = modelContainer else {
             print("[TypeFlow-Debug] LLMEngine: modelContainer is nil! Returning empty string.")
@@ -258,6 +273,7 @@ class LLMEngine {
     
     func generateRewrite(selectedText: String, toneProfile: ToneProfile) async -> String {
         await loadModelIfNeeded()
+        resetInactivityTimer()
         guard let container = modelContainer else {
             print("[TypeFlow-Debug] LLMEngine: modelContainer is nil for rewrite")
             return ""
@@ -309,6 +325,71 @@ class LLMEngine {
         } catch {
             print("[TypeFlow-Debug] LLMEngine rewrite error: \(error)")
             return ""
+        }
+    }
+    
+    func generateSmartReplies(contextText: String) async -> [String] {
+        await loadModelIfNeeded()
+        resetInactivityTimer()
+        guard let container = modelContainer else {
+            print("[TypeFlow-Debug] LLMEngine: modelContainer is nil for smart replies")
+            return []
+        }
+        guard checkMemoryStatus() else {
+            print("[TypeFlow-Debug] LLMEngine: Low memory guard triggered for smart replies")
+            return []
+        }
+        
+        do {
+            let result = try await container.perform { (modelContext: ModelContext) async throws -> String in
+                let prompt = """
+                You are a context-aware smart reply assistant. Based on the conversation context provided below, generate exactly 3 short, distinct reply options (e.g. Professional, Casual, Concise) that the user could send in response.
+                Output the 3 options separated EXACTLY by the delimiter '|||' and nothing else. No formatting, no prefixes.
+                
+                Context:
+                \(contextText)
+                
+                Replies:
+                """
+                let input = UserInput(prompt: prompt)
+                let prepared = try await modelContext.processor.prepare(input: input)
+                
+                let params = GenerateParameters(maxTokens: 150, temperature: 0.6)
+                
+                let stream = try MLXLMCommon.generate(
+                    input: prepared,
+                    cache: modelContext.model.newCache(parameters: nil),
+                    parameters: params,
+                    context: modelContext
+                )
+                
+                var outputText = ""
+                for await generation in stream {
+                    if case .chunk(let text) = generation {
+                        outputText += text
+                        if outputText.contains("</completion>") {
+                            break
+                        }
+                    }
+                }
+                return outputText
+            }
+            
+            MLX.Memory.clearCache()
+            
+            var cleanResult = result
+            if let range = cleanResult.range(of: "</completion>") {
+                cleanResult = String(cleanResult[..<range.lowerBound])
+            }
+            
+            let options = cleanResult.components(separatedBy: "|||")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            
+            return Array(options.prefix(3))
+        } catch {
+            print("[TypeFlow-Debug] LLMEngine smart replies error: \(error)")
+            return []
         }
     }
 }

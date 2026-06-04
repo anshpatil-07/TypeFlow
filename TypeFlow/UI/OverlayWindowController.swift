@@ -6,6 +6,44 @@ class CompletionModel: ObservableObject {
     @Published var isSpellCorrection: Bool = false
     @Published var isRewrite: Bool = false
     @Published var isLoading: Bool = false
+    @Published var isSmartReply: Bool = false
+    @Published var smartReplyOptions: [String] = []
+}
+
+struct SmartReplyOptionsView: View {
+    let options: [String]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Smart Replies:")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 4)
+            ForEach(options, id: \.self) { option in
+                Button {
+                    CompletionManager.shared.acceptSmartReply(text: option)
+                } label: {
+                    Text(option)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(Color.blue.opacity(0.1))
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(NSColor.windowBackgroundColor).opacity(0.95))
+                .shadow(color: .black.opacity(0.18), radius: 6, x: 0, y: 2)
+        )
+        .focusable(false)
+    }
 }
 
 // ─── Rewrite Mode Selector Bar ────────────────────────────────────────────────
@@ -45,7 +83,9 @@ struct RewriteModeButton: View {
     @State private var hovered = false
 
     var body: some View {
-        Button(action: action) {
+        Button {
+            action()
+        } label: {
             Text(label)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.white)
@@ -57,7 +97,6 @@ struct RewriteModeButton: View {
                 )
         }
         .buttonStyle(.plain)
-        .focusable(false)
         .onHover { hovered = $0 }
     }
 }
@@ -68,13 +107,16 @@ struct CompletionOverlayView: View {
 
     var body: some View {
         Group {
-            if model.isLoading && model.isRewrite {
+            if model.isSmartReply && !model.smartReplyOptions.isEmpty {
+                SmartReplyOptionsView(options: model.smartReplyOptions)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            } else if model.isLoading && (model.isRewrite || model.isSmartReply) {
                 if model.text == "Generating..." {
                     HStack(spacing: 6) {
                         ProgressView()
                             .scaleEffect(0.6)
                             .frame(width: 14, height: 14)
-                        Text("Rewriting...")
+                        Text(model.isSmartReply ? "Generating options..." : "Rewriting...")
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
@@ -85,7 +127,7 @@ struct CompletionOverlayView: View {
                     )
                     .font(.system(size: 13, weight: .regular))
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                } else {
+                } else if model.isRewrite {
                     // Show mode selector while waiting for selection to arrive
                     RewriteModeBarView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -150,8 +192,8 @@ class OverlayWindow: NSPanel {
             }
         }
         if keyCode == 53 { // Escape
-            if CompletionManager.shared.activeRewriteText != nil {
-                print("[TypeFlow-Debug] OverlayWindow performKeyEquivalent: Intercepted Escape during rewrite")
+            if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
+                print("[TypeFlow-Debug] OverlayWindow performKeyEquivalent: Intercepted Escape")
                 DispatchQueue.main.async {
                     CompletionManager.shared.clearCompletion()
                 }
@@ -164,15 +206,15 @@ class OverlayWindow: NSPanel {
     override func keyDown(with event: NSEvent) {
         let keyCode = event.keyCode
         if keyCode == 48 {
-            if CompletionManager.shared.activeRewriteText != nil && CompletionManager.shared.currentCompletion != nil {
+            if CompletionManager.shared.isRewrite {
                 print("[TypeFlow-Debug] OverlayWindow keyDown: Intercepted Tab during rewrite")
                 _ = CompletionManager.shared.handleTabPressed()
                 return
             }
         }
         if keyCode == 53 {
-            if CompletionManager.shared.activeRewriteText != nil {
-                print("[TypeFlow-Debug] OverlayWindow keyDown: Intercepted Escape during rewrite")
+            if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
+                print("[TypeFlow-Debug] OverlayWindow keyDown: Intercepted Escape")
                 CompletionManager.shared.clearCompletion()
                 return
             }
@@ -181,15 +223,90 @@ class OverlayWindow: NSPanel {
     }
 }
 
+// ─── Custom Content View for High-Performance Ghost Text ─────────────────────
+class OverlayContentView: NSView {
+    let textLayer = CATextLayer()
+    var hostingView: NSHostingView<CompletionOverlayView>?
+    
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        self.wantsLayer = true
+        self.layer?.cornerRadius = 5
+        self.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.92).cgColor
+        self.layer?.shadowColor = NSColor.black.cgColor
+        self.layer?.shadowOpacity = 0.14
+        self.layer?.shadowRadius = 4
+        self.layer?.shadowOffset = CGSize(width: 0, height: -1)
+        
+        textLayer.font = NSFont.systemFont(ofSize: 13, weight: .regular)
+        textLayer.fontSize = 13
+        textLayer.foregroundColor = NSColor.secondaryLabelColor.cgColor
+        textLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
+        textLayer.alignmentMode = .left
+        
+        // Disable implicit animations
+        textLayer.actions = [
+            "contents": NSNull(),
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "string": NSNull(),
+            "hidden": NSNull()
+        ]
+        
+        self.layer?.addSublayer(textLayer)
+    }
+    
+    required init?(coder: NSCoder) { fatalError() }
+    
+    override func layout() {
+        super.layout()
+        // Center text vertically.
+        // For a 13pt font, 16pt height is appropriate.
+        textLayer.frame = CGRect(x: 6, y: (bounds.height - 16) / 2 - 1, width: bounds.width - 12, height: 16)
+        hostingView?.frame = bounds
+    }
+    
+    func configure(text: String, isSpellCorrection: Bool, isRewrite: Bool, isLoading: Bool, isSmartReply: Bool, model: CompletionModel) {
+        let useSwiftUI = isRewrite || isLoading || isSmartReply
+        
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if useSwiftUI {
+            textLayer.isHidden = true
+            self.layer?.backgroundColor = NSColor.clear.cgColor
+            self.layer?.shadowOpacity = 0
+            
+            if hostingView == nil {
+                let hv = NSHostingView(rootView: CompletionOverlayView(model: model))
+                hv.frame = self.bounds
+                self.addSubview(hv)
+                self.hostingView = hv
+            }
+        } else {
+            textLayer.isHidden = false
+            self.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.92).cgColor
+            self.layer?.shadowOpacity = 0.14
+            
+            hostingView?.removeFromSuperview()
+            hostingView = nil
+            
+            textLayer.string = text
+            textLayer.foregroundColor = isSpellCorrection ? NSColor.systemOrange.cgColor : NSColor.secondaryLabelColor.cgColor
+        }
+        CATransaction.commit()
+    }
+}
+
 // ─── Window Controller ────────────────────────────────────────────────────────
 class OverlayWindowController: NSWindowController {
     var overlayWindow: OverlayWindow!
     private let completionModel = CompletionModel()
+    private var overlayContentView: OverlayContentView!
     private var lastCaretRect = CGRect.zero
     private var localEventMonitor: Any?
 
     init() {
-        let hostingView = NSHostingView(rootView: CompletionOverlayView(model: completionModel))
+        overlayContentView = OverlayContentView(frame: CGRect(x: 0, y: 0, width: 360, height: 28))
 
         overlayWindow = OverlayWindow(
             contentRect: CGRect(x: 0, y: 0, width: 360, height: 32),
@@ -202,7 +319,7 @@ class OverlayWindowController: NSWindowController {
         // Rewrite mode bar needs mouse events; ghost-text overlay ignores them
         overlayWindow.ignoresMouseEvents = false
         overlayWindow.isOpaque = false
-        overlayWindow.contentView = hostingView
+        overlayWindow.contentView = overlayContentView
         overlayWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         super.init(window: overlayWindow)
@@ -211,7 +328,7 @@ class OverlayWindowController: NSWindowController {
         localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let keyCode = event.keyCode
             if keyCode == 48 { // Tab
-                if CompletionManager.shared.activeRewriteText != nil && CompletionManager.shared.currentCompletion != nil {
+                if CompletionManager.shared.isRewrite {
                     print("[TypeFlow-Debug] Local event monitor: Intercepted Tab during rewrite")
                     DispatchQueue.main.async {
                         _ = CompletionManager.shared.handleTabPressed()
@@ -220,8 +337,8 @@ class OverlayWindowController: NSWindowController {
                 }
             }
             if keyCode == 53 { // Escape
-                if CompletionManager.shared.activeRewriteText != nil {
-                    print("[TypeFlow-Debug] Local event monitor: Intercepted Escape during rewrite")
+                if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
+                    print("[TypeFlow-Debug] Local event monitor: Intercepted Escape")
                     DispatchQueue.main.async {
                         CompletionManager.shared.clearCompletion()
                     }
@@ -248,27 +365,41 @@ class OverlayWindowController: NSWindowController {
     }
 
     private func repositionWindow() {
-        guard !completionModel.text.isEmpty || completionModel.isLoading else { return }
+        guard !completionModel.text.isEmpty || completionModel.isLoading || (!completionModel.smartReplyOptions.isEmpty && completionModel.isSmartReply) else { return }
 
         // Rewrite mode bar is wider and taller (but not when actually generating/showing spinner)
         let isRewriteBar = completionModel.isLoading && completionModel.isRewrite && completionModel.text != "Generating..."
+        let isSmartReplyList = completionModel.isSmartReply && !completionModel.smartReplyOptions.isEmpty
         let windowWidth: CGFloat
-        let windowHeight: CGFloat = isRewriteBar ? 36 : 28
+        let windowHeight: CGFloat
 
-        if isRewriteBar {
+        if isSmartReplyList {
+            windowHeight = CGFloat(30 + (completionModel.smartReplyOptions.count * 32))
+            windowWidth = 360
+        } else if isRewriteBar {
+            windowHeight = 36
             windowWidth = 360
         } else {
+            windowHeight = 28
             let font = NSFont.systemFont(ofSize: 13, weight: .regular)
             let attributes = [NSAttributedString.Key.font: font]
-            let measureText = (completionModel.isLoading && completionModel.isRewrite) ? "Rewriting..." : (completionModel.isLoading ? "Rewriting…" : completionModel.text)
+            let measureText = (completionModel.isLoading && (completionModel.isRewrite || completionModel.isSmartReply)) ? "Rewriting..." : (completionModel.isLoading ? "Rewriting…" : completionModel.text)
             var w = (measureText as NSString).size(withAttributes: attributes).width + 20
             if completionModel.isRewrite && !completionModel.isLoading { w += 68 }
             windowWidth = w
         }
 
-        // Flip Y: AX uses top-left origin; macOS screen uses bottom-left
-        let displayHeight = CGDisplayBounds(CGMainDisplayID()).height
-        let flippedY = displayHeight - lastCaretRect.origin.y - lastCaretRect.height - windowHeight - 4
+        let displayBounds = CGDisplayBounds(CGMainDisplayID())
+        let displayHeight = displayBounds.height
+        
+        // Default: draw below the caret
+        var flippedY = displayHeight - lastCaretRect.origin.y - lastCaretRect.height - windowHeight - 4
+        
+        // If it goes below the screen (flippedY < 0), draw it ABOVE the caret instead
+        if flippedY < 0 {
+            flippedY = displayHeight - lastCaretRect.origin.y + 4
+            print("[TypeFlow-Debug] OverlayWindowController: Window flipped above caret due to bounds")
+        }
 
         let newFrame = CGRect(
             x: lastCaretRect.origin.x,
@@ -283,17 +414,24 @@ class OverlayWindowController: NSWindowController {
     func updateText(_ newText: String,
                     isSpellCorrection: Bool = false,
                     isRewrite: Bool = false,
-                    isLoading: Bool = false) {
-        print("[TypeFlow-Debug] OverlayWindowController updateText '\(newText)' spell:\(isSpellCorrection) rewrite:\(isRewrite) loading:\(isLoading)")
+                    isLoading: Bool = false,
+                    isSmartReply: Bool = false,
+                    smartReplyOptions: [String] = []) {
+        print("[TypeFlow-Debug] OverlayWindowController updateText '\(newText)' spell:\(isSpellCorrection) rewrite:\(isRewrite) loading:\(isLoading) smartReply:\(isSmartReply)")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.completionModel.isSpellCorrection = isSpellCorrection
             self.completionModel.isRewrite = isRewrite
             self.completionModel.isLoading = isLoading
+            self.completionModel.isSmartReply = isSmartReply
+            self.completionModel.smartReplyOptions = smartReplyOptions
             self.completionModel.text = newText
-            // Allow mouse events only for the rewrite mode bar
-            self.overlayWindow.ignoresMouseEvents = !(isLoading && isRewrite)
-            if newText.isEmpty && !isLoading {
+            
+            self.overlayContentView.configure(text: newText, isSpellCorrection: isSpellCorrection, isRewrite: isRewrite, isLoading: isLoading, isSmartReply: isSmartReply, model: self.completionModel)
+            
+            // Allow mouse events only for the rewrite mode bar and smart reply list
+            self.overlayWindow.ignoresMouseEvents = !((isLoading && isRewrite) || (isSmartReply && !smartReplyOptions.isEmpty))
+            if newText.isEmpty && !isLoading && smartReplyOptions.isEmpty {
                 self.overlayWindow.orderOut(nil)
             } else {
                 self.repositionWindow()
