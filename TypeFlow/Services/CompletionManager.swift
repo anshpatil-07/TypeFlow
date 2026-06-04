@@ -15,6 +15,15 @@ class CompletionManager: @unchecked Sendable {
     private var activeSnippetKey: String?
     var activeRewriteText: String?
     var activeRewritePID: pid_t?
+    var activeSmartReplyPID: pid_t?
+    
+    var isRewrite: Bool {
+        return activeRewritePID != nil || activeRewriteText != nil
+    }
+    
+    var isSmartReply: Bool {
+        return activeSmartReplyPID != nil
+    }
     
     private init() {
         NotificationCenter.default.addObserver(
@@ -162,6 +171,7 @@ class CompletionManager: @unchecked Sendable {
     }
     
     func onTextChanged(bufferFallback: String = "") {
+        if isRewrite || isSmartReply { return }
         print("[TypeFlow-Debug] onTextChanged called")
         
         // Clear existing completion immediately when user types
@@ -287,9 +297,9 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // Debounce generation (strict 250ms debounce timer)
+        // Debounce generation (300ms debounce timer for Hybrid Inference Engine)
         debounceTimer?.invalidate()
-        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.30, repeats: false) { [weak self] _ in
             print("[TypeFlow-Debug] Debounce timer fired!")
             self?.triggerGeneration()
         }
@@ -305,6 +315,34 @@ class CompletionManager: @unchecked Sendable {
             print("[TypeFlow-Debug] Active line is empty, skipping generation.")
             return
         }
+        
+        // --- Hybrid Inference Engine Gate ---
+        let stopWords: Set<String> = ["the", "and", "is", "a", "to", "in", "of", "it", "that", "on", "for"]
+        let words = activeLine.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        if let lastWord = words.last?.lowercased(), stopWords.contains(lastWord) {
+            print("[TypeFlow-Debug] Hybrid Engine: Active line ends with stop-word '\(lastWord)'. Skipping MLX.")
+            return
+        }
+        
+        if activeLine.count < 10 {
+            if let lastWordInfo = getLastWord(from: activeLine) {
+                let completions = NSSpellChecker.shared.completions(
+                    forPartialWordRange: NSRange(location: 0, length: lastWordInfo.word.utf16.count),
+                    in: lastWordInfo.word,
+                    language: NSSpellChecker.shared.language(),
+                    inSpellDocumentWithTag: 0
+                ) ?? []
+                
+                if completions.isEmpty {
+                    print("[TypeFlow-Debug] Hybrid Engine: Short context (<10 chars) and no spell check suggestions. Skipping MLX.")
+                    return
+                }
+            } else {
+                print("[TypeFlow-Debug] Hybrid Engine: Short context (<10 chars) and no word found. Skipping MLX.")
+                return
+            }
+        }
+        // ------------------------------------
         
         if !LLMEngine.shared.isModelReady {
             print("[TypeFlow-Debug] Model is not ready yet. Queuing request: '\(activeLine)'")
@@ -530,26 +568,105 @@ class CompletionManager: @unchecked Sendable {
         }
     }
 
-    
-    func handleTabPressed() -> Bool {
-        if let _ = activeRewriteText, let completion = currentCompletion, !completion.isEmpty {
-            print("[TypeFlow-Debug] Accepting rewrite: replacing selection with '\(completion)'")
+    func triggerSmartReply() {
+        print("[TypeFlow-Debug] CompletionManager: triggerSmartReply called")
+        
+        debounceTimer?.invalidate()
+        debounceTimer = nil
+        currentGenerationTask?.cancel()
+        currentGenerationTask = nil
+        activeSpellCorrection = nil
+        activeSnippetKey = nil
+        
+        self.activeSmartReplyPID = self.accessibilityMonitor?.activeFocusPID
+        self.currentCompletion = nil
+        
+        DispatchQueue.main.async {
+            if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
+                self.overlayWindowController?.moveOverlay(to: rect)
+            }
+            self.overlayWindowController?.updateText("", isLoading: true, isSmartReply: true)
+        }
+        
+        currentGenerationTask = Task {
+            try? await Task.sleep(nanoseconds: 100_000_000) // Settle delay
             
-            // 1. Hide the overlay first so host app regains focus
-            overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false)
+            let screenContext = ScreenContextManager.shared.latestScreenText
+            let activeText = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
             
-            // 2. Clear keystroke buffer
-            accessibilityMonitor?.clearKeystrokeBuffer()
+            let combinedContext = """
+            On-Screen Text Context:
+            \(screenContext)
             
-            // 3. Introduce a delay and inject text asynchronously
-            let completionToInject = completion
-            Task {
-                try? await Task.sleep(nanoseconds: 50_000_000) // 50ms delay
-                TextInjector.shared.inject(text: completionToInject)
+            Currently Typed Text:
+            \(activeText)
+            """
+            
+            print("[TypeFlow-Debug] triggerSmartReply: context length = \(combinedContext.count)")
+            
+            let replies = await LLMEngine.shared.generateSmartReplies(contextText: combinedContext)
+            
+            if Task.isCancelled {
+                print("[TypeFlow-Debug] triggerSmartReply cancelled")
+                return
             }
             
-            // 4. Clear completion state
-            clearCompletion()
+            DispatchQueue.main.async {
+                if !replies.isEmpty {
+                    self.overlayWindowController?.updateText("", isSmartReply: true, smartReplyOptions: replies)
+                } else {
+                    self.clearCompletion()
+                }
+            }
+        }
+    }
+    
+    func acceptSmartReply(text: String) {
+        print("[TypeFlow-Debug] Accepting smart reply: '\(text)'")
+        
+        let targetApp = activeSmartReplyPID.flatMap { NSRunningApplication(processIdentifier: $0) }
+        let textToInject = text
+        
+        // 1. Hide UI + clear state on main thread immediately
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false, isSmartReply: false, smartReplyOptions: [])
+            self.accessibilityMonitor?.clearKeystrokeBuffer()
+            self.clearCompletion()
+        }
+        
+        // 2. Run pasteboard injection on a background thread so Thread.sleep
+        //    doesn't block the main thread or prevent the UI from disappearing first.
+        Task.detached(priority: .userInitiated) {
+            TextInjector.shared.inject(text: textToInject, targetApp: targetApp)
+        }
+    }
+    
+    func handleTabPressed() -> Bool {
+        if isRewrite {
+            if let completion = currentCompletion, !completion.isEmpty {
+                print("[TypeFlow-Debug] Accepting rewrite: replacing selection with '\(completion)'")
+                
+                let targetApp = activeRewritePID.flatMap { NSRunningApplication(processIdentifier: $0) }
+                
+                // 1. Hide the overlay first so host app regains focus
+                overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false, isSmartReply: false, smartReplyOptions: [])
+                
+                // 2. Clear keystroke buffer
+                accessibilityMonitor?.clearKeystrokeBuffer()
+                
+                // 3. Introduce a delay and inject text asynchronously
+                let completionToInject = completion
+                Task {
+                    try? await Task.sleep(nanoseconds: 50_000_000) // 50ms delay
+                    TextInjector.shared.inject(text: completionToInject, targetApp: targetApp)
+                }
+                
+                // 4. Clear completion state
+                clearCompletion()
+            } else {
+                print("[TypeFlow-Debug] Tab pressed during rewrite but completion not ready, ignoring.")
+            }
             return true
         }
         
@@ -608,9 +725,10 @@ class CompletionManager: @unchecked Sendable {
         activeSnippetKey = nil
         activeRewriteText = nil
         activeRewritePID = nil
+        activeSmartReplyPID = nil
         currentGenerationTask?.cancel()
         currentGenerationTask = nil
-        overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false)
+        overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false, isSmartReply: false, smartReplyOptions: [])
     }
     
     private func hasWordBoundaryBeforeSuffix(activeLine: String, suffix: String) -> Bool {
