@@ -116,3 +116,23 @@ Plans:
 
 Plans:
 - [x] TBD (run /gsd-plan-phase 14 to break down) (completed 2026-06-03)
+
+### Phase 15: Context-Aware Smart Reply
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 14
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 15 to break down)
+
+### Phase 16: Performance & Battery Emergency
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 15
+**Plans:** 1/1 plans complete
+
+Plans:
+- [x] TBD (run /gsd-plan-phase 16 to break down) (completed 2026-06-04)
