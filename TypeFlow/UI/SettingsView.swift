@@ -123,6 +123,9 @@ struct SettingsView: View {
 
                 Toggle("Enable personalization (Typing History)", isOn: $settings.personalizationEnabled)
                     .padding(.top)
+
+                Toggle("Use British English spelling", isOn: $settings.useBritishEnglish)
+                    .padding(.top)
             }
             .padding()
             .tabItem {
