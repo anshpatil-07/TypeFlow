@@ -136,3 +136,13 @@ Plans:
 
 Plans:
 - [x] TBD (run /gsd-plan-phase 16 to break down) (completed 2026-06-04)
+
+### Phase 17: Context & Zero-Latency Engine
+
+**Goal:** Implement context extraction, app voice map, and MLX KV pre-warming
+**Requirements**: TBD
+**Depends on:** Phase 16
+**Plans:** 1 plans
+
+Plans:
+- [ ] 01-PLAN.md (Context extraction, Pre-warming, Tone Map, Spelling toggle)
