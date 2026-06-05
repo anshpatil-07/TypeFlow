@@ -10,7 +10,8 @@ class AccessibilityMonitor {
     /// PID of the application whose AX observer is currently registered.
     /// Used to suppress intra-app focus-change noise (e.g. browser URL bar ↔ page).
     var activeFocusPID: pid_t = 0
-    private let processingQueue = DispatchQueue(label: "com.cotyper.eventProcessing", qos: .userInteractive)
+    private let processingQueue = DispatchQueue(label: "com.cotyper.eventProcessing", qos: .utility)
+    private var contextFetchWorkItem: DispatchWorkItem?
     
     init(onCaretMoved: @escaping (CGRect) -> Void) {
         self.onCaretMoved = onCaretMoved
@@ -302,6 +303,14 @@ class AccessibilityMonitor {
                             return nil // Ignore all other keystrokes during rewrite/smart-reply
                         }
                         
+                        // Spacebar / Return Fast-Path
+                        if keyCode == 49 || keyCode == 36 {
+                            obj.handleKeystroke(keyCode: keyCode, event: event)
+                            let bufferSnapshot = obj.keystrokeBuffer
+                            obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: 0.0)
+                            return Unmanaged.passRetained(event)
+                        }
+                        
                         obj.handleKeystroke(keyCode: keyCode, event: event)
                         
                         // Snapshot the buffer NOW (still in the CGEvent tap thread) so
@@ -309,20 +318,11 @@ class AccessibilityMonitor {
                         // onTextChanged runs on the main thread.
                         let bufferSnapshot = obj.keystrokeBuffer
                         
-                        obj.processingQueue.async {
-                            print("[TypeFlow] Checking caret rect...")
-                            let rect = obj.getCurrentCaretRect()
-                            
-                            DispatchQueue.main.async {
-                                if let r = rect {
-                                    print("[TypeFlow] Caret rect found: \(r)")
-                                    obj.onCaretMoved?(r)
-                                } else {
-                                    print("[TypeFlow] Caret rect not found! Calling onTextChanged anyway for debugging.")
-                                }
-                                CompletionManager.shared.onTextChanged(bufferFallback: bufferSnapshot)
-                            }
-                        }
+                        // Treat punctuation as a word boundary to trigger fetch immediately
+                        let isPunctuation = (keyCode == 43 || keyCode == 47)
+                        let delay = isPunctuation ? 0.0 : 0.15
+                        
+                        obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: delay)
                     }
                 }
                 return Unmanaged.passRetained(event)
@@ -340,6 +340,44 @@ class AccessibilityMonitor {
                 self.setupActiveAppObserver(for: app.processIdentifier)
             }
         }
+    }
+    
+    private func triggerContextFetch(bufferSnapshot: String, delay: TimeInterval) {
+        contextFetchWorkItem?.cancel()
+        
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            print("[TypeFlow] Checking caret rect...")
+            let rect = self.getCurrentCaretRect()
+            
+            DispatchQueue.main.async {
+                if let r = rect {
+                    print("[TypeFlow] Caret rect found: \(r)")
+                    self.onCaretMoved?(r)
+                } else {
+                    print("[TypeFlow] Caret rect not found! Calling onTextChanged anyway for debugging.")
+                }
+                CompletionManager.shared.onTextChanged(bufferFallback: bufferSnapshot)
+            }
+        }
+        
+        contextFetchWorkItem = workItem
+        
+        if delay > 0 {
+            processingQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
+        } else {
+            processingQueue.async(execute: workItem)
+        }
+    }
+    
+    func stop() {
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+            eventTap = nil
+        }
+        stopActiveAppObserver()
+        print("[TypeFlow] Accessibility monitor stopped.")
     }
     
     func requestPermission() {
