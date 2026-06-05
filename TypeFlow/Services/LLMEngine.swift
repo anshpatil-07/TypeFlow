@@ -92,9 +92,59 @@ class LLMEngine {
         let availableBytes = availablePages * UInt64(pageSize)
         
         let twoGB: UInt64 = 2 * 1024 * 1024 * 1024
-        print("[TypeFlow] Available memory check: \(availableBytes / 1024 / 1024) MB (Page size: \(pageSize) bytes)")
+        // Commenting out repetitive log to avoid console spam on every keystroke
+        // print("[TypeFlow] Available memory check: \(availableBytes / 1024 / 1024) MB (Page size: \(pageSize) bytes)")
         
         return availableBytes >= twoGB
+    }
+    
+    /// Pre-warm the cache when the active app changes so zero-latency can be achieved
+    func prewarmCache(toneProfile: ToneProfile) {
+        print("[TypeFlow-Debug] LLMEngine: Pre-warming cache for tone \(toneProfile.name)")
+        Task {
+            await loadModelIfNeeded()
+            resetInactivityTimer()
+            
+            guard let container = modelContainer else { return }
+            guard checkMemoryStatus() else { return }
+            
+            do {
+                _ = try await container.perform { [weak self] modelContext -> String in
+                    guard let self = self else { return "" }
+                    do {
+                        let staticPrefixPrompt = PromptBuilder.shared.buildStaticPrefix(systemInstructions: toneProfile.systemInstructions)
+                        let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)"
+                        
+                        if self.kvCache == nil || self.cachedPrefixPrompt != staticPrefixPrompt || self.cachedPrefixSettingsKey != settingsKey {
+                            print("[TypeFlow-Debug] LLMEngine: Pre-warm cache miss — rebuilding static KV prefix...")
+                            
+                            let prefixInput = UserInput(prompt: staticPrefixPrompt)
+                            let prefixPrepared = try await modelContext.processor.prepare(input: prefixInput)
+                            let prefixTokens = prefixPrepared.text.tokens.asArray(Int.self)
+                            
+                            self.prefixLength = prefixTokens.count
+                            self.cachedPrefixPrompt = staticPrefixPrompt
+                            self.cachedPrefixSettingsKey = settingsKey
+                            
+                            let newCache = modelContext.model.newCache(parameters: nil)
+                            let prefixMLXTokens = MLXArray(prefixTokens)
+                            _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
+                            eval(newCache)
+                            
+                            self.kvCache = newCache
+                            print("[TypeFlow-Debug] LLMEngine: Pre-warm complete with \(self.prefixLength) tokens.")
+                        } else {
+                            print("[TypeFlow-Debug] LLMEngine: Pre-warm cache hit — reusing KV prefix.")
+                        }
+                    } catch {
+                        print("[TypeFlow-Debug] LLMEngine: Pre-warm Error in inner do block: \(error)")
+                    }
+                    return ""
+                }
+            } catch {
+                print("[TypeFlow-Debug] LLMEngine: Pre-warm Error during container.perform: \(error)")
+            }
+        }
     }
 
     /// Generate a completion for the given text-before-caret.
