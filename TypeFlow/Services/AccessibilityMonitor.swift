@@ -600,7 +600,7 @@ class AccessibilityMonitor {
                     let safeCursorIndex = max(0, min(cursorIndex, utf16.count))
                     if let sliceEnd = utf16.index(utf16.startIndex, offsetBy: safeCursorIndex, limitedBy: utf16.endIndex) {
                         let textBeforeCursor = String(fullText[..<sliceEnd])
-                        let result = String(textBeforeCursor.suffix(200))
+                        let result = String(textBeforeCursor.suffix(1000))
                         if !result.isEmpty {
                             print("[TypeFlow-Debug] AX: text extracted via kAXValue (\(safeCursorIndex) UTF-16 chars): '\(result.suffix(50))'")
                             return result
@@ -615,7 +615,7 @@ class AccessibilityMonitor {
         if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
            let selectedText = selectedTextRef as? String,
            !selectedText.isEmpty {
-            let result = String(selectedText.suffix(200))
+            let result = String(selectedText.suffix(1000))
             print("[TypeFlow-Debug] AX: text extracted via kAXSelectedTextAttribute: '\(result.suffix(50))'")
             return result
         }
@@ -627,7 +627,7 @@ class AccessibilityMonitor {
             var range = CFRange(location: 0, length: 0)
             AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
             
-            let length = min(200, range.location)
+            let length = min(1000, range.location)
             let startLocation = range.location - length
             let fetchRange = CFRange(location: startLocation, length: length)
             var fetchRangeValue = fetchRange
