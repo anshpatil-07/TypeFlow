@@ -37,7 +37,11 @@ class PromptBuilder {
             }
         }
         
-        prompt += "\(systemInstructions)\n\n"
+        var finalInstructions = systemInstructions
+        if SettingsManager.shared.useBritishEnglish {
+            finalInstructions += " Always use British English spelling (e.g., colour, prioritise)."
+        }
+        prompt += "\(finalInstructions)\n\n"
         prompt += "[Current text to complete]:\n"
         return prompt
     }
@@ -67,7 +71,11 @@ class PromptBuilder {
             }
         }
         
-        prompt += "\(systemInstructions)\n\n"
+        var finalInstructions = systemInstructions
+        if SettingsManager.shared.useBritishEnglish {
+            finalInstructions += " Always use British English spelling (e.g., colour, prioritise)."
+        }
+        prompt += "\(finalInstructions)\n\n"
         prompt += "[Current text to complete]:\n"
         return prompt
     }
@@ -81,7 +89,11 @@ class PromptBuilder {
     func buildRewritePrompt(selectedText: String, systemInstructions: String, toneName: String) -> String {
         var prompt = ""
         prompt += "You are a writing assistant. Rewrite the following text to improve clarity, flow, and vocabulary while matching a \(toneName) tone.\n"
-        prompt += "Instructions: \(systemInstructions)\n"
+        var finalInstructions = systemInstructions
+        if SettingsManager.shared.useBritishEnglish {
+            finalInstructions += " Always use British English spelling (e.g., colour, prioritise)."
+        }
+        prompt += "Instructions: \(finalInstructions)\n"
         prompt += "Do not write any intro, notes, explanations, or quotes. Output ONLY the rewritten text.\n\n"
         prompt += "[Text to Rewrite]:\n\(selectedText)\n\n"
         prompt += "<completion>"
