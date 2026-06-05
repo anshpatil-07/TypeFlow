@@ -25,5 +25,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.accessibilityMonitor?.startWithRetry()
         }
+        
+        AppMonitor.shared.start()
     }
 }
