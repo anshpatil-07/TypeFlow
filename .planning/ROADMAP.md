@@ -142,7 +142,7 @@ Plans:
 **Goal:** Implement context extraction, app voice map, and MLX KV pre-warming
 **Requirements**: TBD
 **Depends on:** Phase 16
-**Plans:** 1 plans
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 01-PLAN.md (Context extraction, Pre-warming, Tone Map, Spelling toggle)
+- [x] 01-PLAN.md (Context extraction, Pre-warming, Tone Map, Spelling toggle)
