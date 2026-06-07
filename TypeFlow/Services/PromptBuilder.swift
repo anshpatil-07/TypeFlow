@@ -39,7 +39,7 @@ class PromptBuilder {
             let vocab = VocabularyExtractor.shared.getVocabulary()
             if !vocab.isEmpty {
                 let vocabStr = vocab.joined(separator: ", ")
-                prompt += "[User vocabulary & jargon]:\n\(vocabStr)\n\n"
+                prompt += "[Passive Stylistic Vocabulary Influence]:\n\(vocabStr)\n\n"
             }
         }
         
@@ -49,14 +49,11 @@ class PromptBuilder {
         }
         
         let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
-        if !lexicon.isEmpty {
-            let protectedWords = lexicon.joined(separator: ", ")
-            finalInstructions += " CRITICAL: Prioritize the document context above. Vocabulary words are for stylistic tone, not strict content. Silently fix minor spelling errors based on surrounding context, but NEVER alter these exact user-specific words: [\(protectedWords)]."
-        } else {
-            finalInstructions += " CRITICAL: Prioritize the document context above. Vocabulary words are for stylistic tone, not strict content. Silently fix minor spelling errors based on surrounding context."
-        }
+        let protectedWords = lexicon.isEmpty ? "" : " NEVER alter these exact user-specific words: [\(lexicon.joined(separator: ", "))]."
         
-        prompt += "\(finalInstructions)\n\n"
+        finalInstructions += " CRITICAL: You are an invisible autocomplete engine. DO NOT recite, list, or explicitly mention the provided vocabulary words. Only use them naturally if they flawlessly fit the immediate grammatical context of the suffix. Prioritize the user's document context above all else.\(protectedWords)"
+        
+        prompt += "[System Instructions]:\n\(finalInstructions)\n\n"
         prompt += "[Current text to complete]:\n"
         return prompt
     }
@@ -82,7 +79,7 @@ class PromptBuilder {
             print("[TypeFlow-Debug] PromptBuilder: active vocabulary words count: \(vocab.count) (\(vocab))")
             if !vocab.isEmpty {
                 let vocabStr = vocab.joined(separator: ", ")
-                prompt += "[User vocabulary & jargon]:\n\(vocabStr)\n\n"
+                prompt += "[Passive Stylistic Vocabulary Influence]:\n\(vocabStr)\n\n"
             }
         }
         
@@ -92,14 +89,11 @@ class PromptBuilder {
         }
         
         let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
-        if !lexicon.isEmpty {
-            let protectedWords = lexicon.joined(separator: ", ")
-            finalInstructions += " CRITICAL: Prioritize the document context above. Vocabulary words are for stylistic tone, not strict content. Silently fix minor spelling errors based on surrounding context, but NEVER alter these exact user-specific words: [\(protectedWords)]."
-        } else {
-            finalInstructions += " CRITICAL: Prioritize the document context above. Vocabulary words are for stylistic tone, not strict content. Silently fix minor spelling errors based on surrounding context."
-        }
+        let protectedWords = lexicon.isEmpty ? "" : " NEVER alter these exact user-specific words: [\(lexicon.joined(separator: ", "))]."
         
-        prompt += "\(finalInstructions)\n\n"
+        finalInstructions += " CRITICAL: You are an invisible autocomplete engine. DO NOT recite, list, or explicitly mention the provided vocabulary words. Only use them naturally if they flawlessly fit the immediate grammatical context of the suffix. Prioritize the user's document context above all else.\(protectedWords)"
+        
+        prompt += "[System Instructions]:\n\(finalInstructions)\n\n"
         prompt += "[Current text to complete]:\n"
         return prompt
     }
