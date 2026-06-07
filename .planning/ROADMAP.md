@@ -152,7 +152,17 @@ Plans:
 **Goal:** [To be planned]
 **Requirements**: TBD
 **Depends on:** Phase 17
-**Plans:** 1/1 plans complete
+**Plans:** 3/3 plans complete
 
 Plans:
 - [x] TBD (run /gsd-plan-phase 18 to break down) (completed 2026-06-07)
+
+### Phase 19: Workflow Integration
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 18
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 19 to break down)
