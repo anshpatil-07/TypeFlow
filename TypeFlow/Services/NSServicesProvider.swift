@@ -18,8 +18,8 @@ import Foundation
     /// Reads selected text from the pasteboard, rewrites it via the LLM, and writes it back.
     @objc func rewriteText(
         _ pboard: NSPasteboard,
-        userData: String,
-        error: AutoreleasingUnsafeMutablePointer<NSString>
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString?>
     ) {
         guard let text = pboard.string(forType: .string), !text.isEmpty else {
             error.pointee = "No text to rewrite." as NSString
@@ -55,8 +55,8 @@ import Foundation
     /// Reads selected text, generates a completion/expansion, and writes it back.
     @objc func expandText(
         _ pboard: NSPasteboard,
-        userData: String,
-        error: AutoreleasingUnsafeMutablePointer<NSString>
+        userData: String?,
+        error: AutoreleasingUnsafeMutablePointer<NSString?>
     ) {
         guard let text = pboard.string(forType: .string), !text.isEmpty else {
             error.pointee = "No text to expand." as NSString

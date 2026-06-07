@@ -43,6 +43,23 @@ targets:
         NSAccessibilityUsageDescription: "TypeFlow needs Accessibility access to detect typing and inject completions."
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
+        NSServices:
+          - NSMenuItem:
+              default: "Rewrite with TypeFlow"
+            NSMessage: rewriteText
+            NSPortName: TypeFlow
+            NSSendTypes:
+              - NSStringPboardType
+            NSReturnTypes:
+              - NSStringPboardType
+          - NSMenuItem:
+              default: "Expand with TypeFlow"
+            NSMessage: expandText
+            NSPortName: TypeFlow
+            NSSendTypes:
+              - NSStringPboardType
+            NSReturnTypes:
+              - NSStringPboardType
     entitlements:
       path: TypeFlow/TypeFlow.entitlements
       properties:
