@@ -113,7 +113,7 @@ class LLMEngine {
                     guard let self = self else { return "" }
                     do {
                         let staticPrefixPrompt = PromptBuilder.shared.buildStaticPrefix(systemInstructions: toneProfile.systemInstructions)
-                        let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)"
+                        let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)|\(SettingsManager.shared.useBritishEnglish)"
                         
                         if self.kvCache == nil || self.cachedPrefixPrompt != staticPrefixPrompt || self.cachedPrefixSettingsKey != settingsKey {
                             print("[TypeFlow-Debug] LLMEngine: Pre-warm cache miss — rebuilding static KV prefix...")
@@ -187,7 +187,7 @@ class LLMEngine {
                     // cache is valid for the entire typing session unless tone or
                     // personalization settings actually change.
                     let staticPrefixPrompt = PromptBuilder.shared.buildStaticPrefix(systemInstructions: toneProfile.systemInstructions)
-                    let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)"
+                    let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)|\(SettingsManager.shared.useBritishEnglish)"
                     
                     // Invalidate ONLY when tone/personalization settings change.
                     if self.kvCache == nil || self.cachedPrefixPrompt != staticPrefixPrompt || self.cachedPrefixSettingsKey != settingsKey {
@@ -238,7 +238,12 @@ class LLMEngine {
                     }
                     
                     // Suffix tokens to evaluate are everything from prefixLength onwards
-                    let suffixTokens = Array(fullTokens[self.prefixLength...])
+                    let safePrefix = min(self.prefixLength, fullTokens.count)
+                    let suffixTokens = Array(fullTokens[safePrefix...])
+                    guard !suffixTokens.isEmpty else {
+                        print("[TypeFlow-Debug] LLMEngine: No suffix tokens to generate, returning empty string.")
+                        return ""
+                    }
                     let suffixInput = LMInput(tokens: MLXArray(suffixTokens))
                     
                     print("[TypeFlow-Debug] LLMEngine: Starting generate stream with suffix tokens count: \(suffixTokens.count)...")
