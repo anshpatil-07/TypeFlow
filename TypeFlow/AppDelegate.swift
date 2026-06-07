@@ -33,12 +33,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Register App Intents / Shortcuts
         Task {
-            do {
-                TypeFlowShortcuts.updateAppShortcutParameters()
-                print("[TypeFlow-Debug] Successfully registered App Shortcuts.")
-            } catch {
-                print("[TypeFlow-Debug] AppShortcuts update failed: \(error)")
-            }
+            TypeFlowShortcuts.updateAppShortcutParameters()
+            print("[TypeFlow-Debug] Successfully registered App Shortcuts.")
         }
     }
 
