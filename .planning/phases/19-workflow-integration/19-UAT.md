@@ -55,30 +55,52 @@ skipped: 0
   reason: "User reported: fail. The app still throws the exact same NSCocoaErrorDomain Code=4097..."
   severity: blocker
   test: 1
-  artifacts: []
-  missing: []
+  root_cause: "Calling AppShortcuts update synchronously during applicationDidFinishLaunching causes a race condition with the macOS linkd daemon, crashing the XPC connection."
+  artifacts:
+    - path: "TypeFlow/AppDelegate.swift"
+      issue: "Synchronous call blocking main thread during app launch"
+  missing:
+    - "Wrap TypeFlowShortcuts.updateAppShortcutParameters() in an asynchronous Task"
 
 - truth: "Copy some text to your clipboard (e.g., a URL or a name). Type a trigger phrase like 'here is the link: ' in a text field. The suggested inline AI completion should incorporate the text you just copied."
   status: failed
   reason: "User reported: fail. The clipboard context injection failed because ClipboardMonitor is not running..."
   severity: blocker
   test: 2
-  artifacts: []
-  missing: []
+  root_cause: "ClipboardMonitor.shared.start() missing or not executing properly. PromptBuilder fails to trigger due to trailing spaces."
+  artifacts:
+    - path: "TypeFlow/AppDelegate.swift"
+      issue: "ClipboardMonitor start might be missing"
+    - path: "TypeFlow/Services/PromptBuilder.swift"
+      issue: "Trailing space causes hasSuffix to fail"
+  missing:
+    - "Verify/Add ClipboardMonitor.shared.start() to AppDelegate"
+    - "Trim whitespaces from textBeforeCaret.lowercased() in PromptBuilder"
 
 - truth: "Select text in any standard macOS app (e.g., TextEdit). Right-click, go to Services, and choose 'Rewrite with TypeFlow'. The selected text should be replaced with an AI-rewritten version."
   status: failed
   reason: "User reported: fail. The 'Rewrite with TypeFlow' and 'Expand with TypeFlow' options do not appear in the macOS right-click Services menu..."
   severity: major
   test: 3
-  artifacts: []
-  missing: []
+  root_cause: "NSServices dictionary missing from Info.plist (xcodegen overrides it). TypeFlowServicesProvider method signatures lack Optionals."
+  artifacts:
+    - path: "project.yml"
+      issue: "Missing NSServices array in info properties"
+    - path: "TypeFlow/Services/NSServicesProvider.swift"
+      issue: "Incorrect Objective-C signatures"
+  missing:
+    - "Add NSServices array to project.yml info properties"
+    - "Update rewriteText and expandText signatures to exactly match Obj-C requirements"
 
 - truth: "Select text in any standard macOS app. Right-click, go to Services, and choose 'Expand with TypeFlow'. The selected text should be expanded with AI-generated continuation text."
   status: failed
   reason: "User reported: fail. The 'Expand with TypeFlow' (and 'Rewrite') options are completely missing from the macOS Services menu..."
   severity: major
   test: 4
-  artifacts: []
-  missing: []
+  root_cause: "macOS needs NSUpdateDynamicServices() called to register services without reboot."
+  artifacts:
+    - path: "TypeFlow/AppDelegate.swift"
+      issue: "Missing NSUpdateDynamicServices() call"
+  missing:
+    - "Call NSUpdateDynamicServices() immediately after setting NSApp.servicesProvider"
 
