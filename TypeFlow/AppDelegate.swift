@@ -29,6 +29,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         AppMonitor.shared.start()
         ClipboardMonitor.shared.start()
         NSApp.servicesProvider = TypeFlowServicesProvider()
-        TypeFlowShortcuts.updateAppShortcutParameters()
+        NSUpdateDynamicServices()
+        
+        // Register App Intents / Shortcuts
+        Task {
+            do {
+                TypeFlowShortcuts.updateAppShortcutParameters()
+                print("[TypeFlow-Debug] Successfully registered App Shortcuts.")
+            } catch {
+                print("[TypeFlow-Debug] AppShortcuts update failed: \(error)")
+            }
+        }
     }
+
+    func applicationWillTerminate(_ aNotification: Notification) {}
 }

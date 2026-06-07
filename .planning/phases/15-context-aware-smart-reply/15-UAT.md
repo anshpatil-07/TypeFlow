@@ -44,7 +44,9 @@ skipped: 0
   severity: major
   test: 1
   artifacts: []
-  missing: []
+  missing:
+    - Root Cause: OverlayWindowController does not account for screen bounds when repositioning. If the caret is near the bottom of the screen, flippedY pushes the window below the visible screen bounds, cutting off the options.
+    - Fix: Add screen bounds checking in `repositionWindow()` to flip the popover above the caret if it would go off-screen.
 
 - truth: "While the Smart Reply options are visible, TypeFlow should not steal the host application's focus (the text cursor should remain blinking). Pressing Escape should dismiss the popover immediately."
   status: failed
@@ -52,5 +54,7 @@ skipped: 0
   severity: major
   test: 2
   artifacts: []
-  missing: []
+  missing:
+    - Root Cause: Escape key interception relies on `localEventMonitor` and `NSWindow.keyDown`, which only fire if TypeFlow is the active application. Since it's a non-activating panel, the global `CGEventTap` in `AccessibilityMonitor` must handle Escape.
+    - Fix: Add `keyCode == 53` (Escape) interception in `AccessibilityMonitor.swift`'s `CGEventTap` handler to call `clearCompletion()` when `isSmartReply` or `isRewrite` is true.
 

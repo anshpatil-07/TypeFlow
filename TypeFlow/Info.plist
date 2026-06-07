@@ -34,11 +34,11 @@
 			<string>rewriteText</string>
 			<key>NSPortName</key>
 			<string>TypeFlow</string>
-			<key>NSSendTypes</key>
+			<key>NSReturnTypes</key>
 			<array>
 				<string>NSStringPboardType</string>
 			</array>
-			<key>NSReturnTypes</key>
+			<key>NSSendTypes</key>
 			<array>
 				<string>NSStringPboardType</string>
 			</array>
@@ -53,11 +53,11 @@
 			<string>expandText</string>
 			<key>NSPortName</key>
 			<string>TypeFlow</string>
-			<key>NSSendTypes</key>
+			<key>NSReturnTypes</key>
 			<array>
 				<string>NSStringPboardType</string>
 			</array>
-			<key>NSReturnTypes</key>
+			<key>NSSendTypes</key>
 			<array>
 				<string>NSStringPboardType</string>
 			</array>

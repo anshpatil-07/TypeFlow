@@ -117,7 +117,7 @@ class PromptBuilder {
             "the url is",
             "contact me at",
         ]
-        let lowercasedText = textBeforeCaret.lowercased()
+        let lowercasedText = textBeforeCaret.lowercased().trimmingCharacters(in: .whitespaces)
         let hasClipboardTrigger = clipboardTriggers.contains { lowercasedText.hasSuffix($0) }
 
         if hasClipboardTrigger {
