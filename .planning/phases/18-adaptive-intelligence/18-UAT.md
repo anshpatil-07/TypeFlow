@@ -2,8 +2,8 @@
 status: partial
 phase: 18-adaptive-intelligence
 source: [18-SUMMARY.md]
-started: 2026-06-07T09:03:00Z
-updated: 2026-06-07T09:03:00Z
+started: 2026-06-07T09:17:00Z
+updated: 2026-06-07T09:17:00Z
 ---
 
 ## Current Test
@@ -14,27 +14,23 @@ updated: 2026-06-07T09:03:00Z
 
 ### 1. Flow State Backoff
 expected: Type text to trigger an inline completion. Ignore it by typing another character instead of pressing Tab. Do this twice in a row. Stop typing. NO completion should trigger for at least 10 seconds.
-result: issue
-reported: "fail The app crashed during generation with a Fatal error: Index out of range. Crash Location: MLXArray+Indexing.swift at let size = ends[0] because ndim == 0 and the array is empty. The Issue: The logs show LLMEngine: Starting generate stream with suffix tokens count: 0.... LLMEngine is passing an empty suffixTokens array into the MLX generate function. MLX cannot process an empty tensor and crashes. The Fix: In LLMEngine.swift, inside generateCompletion, immediately after calculating suffixTokens, add a guard check: if suffixTokens.isEmpty { return \"\" }. Do not attempt to run MLXLMCommon.generate if there are 0 suffix tokens."
-severity: blocker
+result: pass
 
 ### 2. Dynamic Lexicon
 expected: Type a word. Press backspace to delete the entire word. Manually retype a different custom word and press space. Type the same custom word again; it should not be autocorrected or red-lined.
-result: issue
-reported: "fail The app crashed with the exact same Fatal error: Index out of range in MLXArray+Indexing.swift due to suffixTokens count: 0."
-severity: blocker
+result: pass
 
 ### 3. Lexicon Protection
 expected: Type sentences using the custom word you just saved. The AI completions should use context but preserve your custom word exactly as written.
 result: issue
-reported: "fail The app crashed with the exact same Fatal error: Index out of range in MLXArray+Indexing.swift due to suffixTokens count: 0."
+reported: "fail The Dynamic Lexicon successfully protected the custom word, but the AI generation completely hallucinated due to prompt leakage. The Issue: The LLM ignored the document context and generated a literal comma-separated list of the injected vocabulary words. (Output: using, should, brown, working, typing...). The PromptBuilder system instructions are causing the 4B model to treat the vocabulary array as a list to be recited, rather than a passive stylistic influence. The Fix: Open PromptBuilder.swift. Radically soften how the vocabulary is presented to the model. Instead of listing them aggressively, wrap them in a much stricter context instruction. Add this exact negative constraint to the system prompt: \"CRITICAL: You are an invisible autocomplete engine. DO NOT recite, list, or explicitly mention the provided vocabulary words. Only use them naturally if they flawlessly fit the immediate grammatical context of the suffix. Prioritize the user's document context above all else.\" Ensure the system prompt clearly separates the System Instructions from the User Text so the model doesn't blend them together."
 severity: blocker
 
 ## Summary
 
 total: 3
-passed: 0
-issues: 3
+passed: 2
+issues: 1
 pending: 0
 skipped: 0
 
@@ -42,24 +38,8 @@ skipped: 0
 
 - truth: "Type sentences using the custom word you just saved. The AI completions should use context but preserve your custom word exactly as written."
   status: failed
-  reason: "User reported: fail The app crashed with the exact same Fatal error: Index out of range in MLXArray+Indexing.swift due to suffixTokens count: 0."
+  reason: "User reported: fail The Dynamic Lexicon successfully protected the custom word, but the AI generation completely hallucinated due to prompt leakage. The Issue: The LLM ignored the document context and generated a literal comma-separated list of the injected vocabulary words. (Output: using, should, brown, working, typing...). The PromptBuilder system instructions are causing the 4B model to treat the vocabulary array as a list to be recited, rather than a passive stylistic influence. The Fix: Open PromptBuilder.swift. Radically soften how the vocabulary is presented to the model. Instead of listing them aggressively, wrap them in a much stricter context instruction. Add this exact negative constraint to the system prompt: \"CRITICAL: You are an invisible autocomplete engine. DO NOT recite, list, or explicitly mention the provided vocabulary words. Only use them naturally if they flawlessly fit the immediate grammatical context of the suffix. Prioritize the user's document context above all else.\" Ensure the system prompt clearly separates the System Instructions from the User Text so the model doesn't blend them together."
   severity: blocker
   test: 3
-  artifacts: []
-  missing: []
-
-- truth: "Type a word. Press backspace to delete the entire word. Manually retype a different custom word and press space. Type the same custom word again; it should not be autocorrected or red-lined."
-  status: failed
-  reason: "User reported: fail The app crashed with the exact same Fatal error: Index out of range in MLXArray+Indexing.swift due to suffixTokens count: 0."
-  severity: blocker
-  test: 2
-  artifacts: []
-  missing: []
-
-- truth: "Type text to trigger an inline completion. Ignore it by typing another character instead of pressing Tab. Do this twice in a row. Stop typing. NO completion should trigger for at least 10 seconds."
-  status: failed
-  reason: "User reported: fail The app crashed during generation with a Fatal error: Index out of range. Crash Location: MLXArray+Indexing.swift at let size = ends[0] because ndim == 0 and the array is empty. The Issue: The logs show LLMEngine: Starting generate stream with suffix tokens count: 0.... LLMEngine is passing an empty suffixTokens array into the MLX generate function. MLX cannot process an empty tensor and crashes. The Fix: In LLMEngine.swift, inside generateCompletion, immediately after calculating suffixTokens, add a guard check: if suffixTokens.isEmpty { return \"\" }. Do not attempt to run MLXLMCommon.generate if there are 0 suffix tokens."
-  severity: blocker
-  test: 1
   artifacts: []
   missing: []
