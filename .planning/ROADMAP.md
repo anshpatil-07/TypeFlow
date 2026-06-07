@@ -146,3 +146,13 @@ Plans:
 
 Plans:
 - [x] 01-PLAN.md (Context extraction, Pre-warming, Tone Map, Spelling toggle)
+
+### Phase 18: Adaptive Intelligence
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 17
+**Plans:** 1/1 plans complete
+
+Plans:
+- [x] TBD (run /gsd-plan-phase 18 to break down) (completed 2026-06-07)
