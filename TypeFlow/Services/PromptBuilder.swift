@@ -101,7 +101,36 @@ class PromptBuilder {
     func buildPromptSuffix(textBeforeCaret: String) -> String {
         let contextText = String(textBeforeCaret.suffix(120))
         let trimmedContext = contextText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return "\(trimmedContext)\n\n<completion>"
+
+        var suffix = "\(trimmedContext)\n\n<completion>"
+
+        // Inject recent clipboard items if the caret text ends with a clipboard-seeking phrase
+        let clipboardTriggers = [
+            "here is the link:",
+            "here is the url:",
+            "my email is",
+            "my email address is",
+            "the code is",
+            "the snippet is",
+            "paste it:",
+            "the link is",
+            "the url is",
+            "contact me at",
+        ]
+        let lowercasedText = textBeforeCaret.lowercased()
+        let hasClipboardTrigger = clipboardTriggers.contains { lowercasedText.hasSuffix($0) }
+
+        if hasClipboardTrigger {
+            let items = ClipboardMonitor.shared.recentItems
+            if !items.isEmpty {
+                let clipboardContext = items.enumerated()
+                    .map { "- \($0.element)" }
+                    .joined(separator: "\n")
+                suffix = "\(trimmedContext)\n\n[Recent Clipboard Items]:\n\(clipboardContext)\n\n<completion>"
+            }
+        }
+
+        return suffix
     }
     
     func buildRewritePrompt(selectedText: String, systemInstructions: String, toneName: String) -> String {
