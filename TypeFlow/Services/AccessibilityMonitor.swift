@@ -13,6 +13,9 @@ class AccessibilityMonitor {
     private let processingQueue = DispatchQueue(label: "com.cotyper.eventProcessing", qos: .utility)
     private var contextFetchWorkItem: DispatchWorkItem?
     
+    private var lastDeletedWord: String?
+    private var isBackspacing = false
+    
     init(onCaretMoved: @escaping (CGRect) -> Void) {
         self.onCaretMoved = onCaretMoved
         
@@ -534,16 +537,45 @@ class AccessibilityMonitor {
                 }
             }
             clearKeystrokeBuffer()
+            lastDeletedWord = nil
             return
+        }
+        
+        // Space (49), Tab (48), or Punctuation (comma 43, period 47) finishes a word
+        if keyCode == 49 || keyCode == 48 || keyCode == 43 || keyCode == 47 {
+            if let deleted = lastDeletedWord, !deleted.isEmpty {
+                let newWord = keystrokeBuffer.components(separatedBy: .whitespacesAndNewlines).last?.trimmingCharacters(in: .punctuationCharacters) ?? ""
+                let deletedClean = deleted.trimmingCharacters(in: .punctuationCharacters)
+                
+                if !newWord.isEmpty && newWord != deletedClean && newWord.count > 1 {
+                    var lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
+                    if !lexicon.contains(newWord) {
+                        lexicon.append(newWord)
+                        UserDefaults.standard.set(lexicon, forKey: "UserCustomLexicon")
+                        print("[TypeFlow-Debug] Dynamic Lexicon: Added '\(newWord)' to UserCustomLexicon (replaced '\(deletedClean)')")
+                        DispatchQueue.main.async {
+                            NSSpellChecker.shared.learnWord(newWord)
+                        }
+                    }
+                }
+                lastDeletedWord = nil
+            }
         }
         
         // Delete / Backspace (51)
         if keyCode == 51 {
+            if !isBackspacing {
+                let text = getTextBeforeCaret() ?? ""
+                lastDeletedWord = text.components(separatedBy: .whitespacesAndNewlines).last
+                isBackspacing = true
+            }
             if !keystrokeBuffer.isEmpty {
                 keystrokeBuffer.removeLast()
                 print("[TypeFlow-Debug] Backspace: buffer is now '\(keystrokeBuffer)'")
             }
             return
+        } else {
+            isBackspacing = false
         }
         
         // Check for modifier keys (Command/Control) that represent shortcuts

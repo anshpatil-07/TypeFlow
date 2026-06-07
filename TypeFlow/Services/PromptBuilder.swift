@@ -1,9 +1,15 @@
 import Foundation
+import Cocoa
 
 class PromptBuilder {
     static let shared = PromptBuilder()
     
-    private init() {}
+    private init() {
+        let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
+        for word in lexicon {
+            NSSpellChecker.shared.learnWord(word)
+        }
+    }
     
     func buildPrompt(textBeforeCaret: String, systemInstructions: String) -> String {
         let prefix = buildPromptPrefix(textBeforeCaret: textBeforeCaret, systemInstructions: systemInstructions)
@@ -41,6 +47,15 @@ class PromptBuilder {
         if SettingsManager.shared.useBritishEnglish {
             finalInstructions += " Always use British English spelling (e.g., colour, prioritise)."
         }
+        
+        let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
+        if !lexicon.isEmpty {
+            let protectedWords = lexicon.joined(separator: ", ")
+            finalInstructions += " CRITICAL: Prioritize the document context above. Vocabulary words are for stylistic tone, not strict content. Silently fix minor spelling errors based on surrounding context, but NEVER alter these exact user-specific words: [\(protectedWords)]."
+        } else {
+            finalInstructions += " CRITICAL: Prioritize the document context above. Vocabulary words are for stylistic tone, not strict content. Silently fix minor spelling errors based on surrounding context."
+        }
+        
         prompt += "\(finalInstructions)\n\n"
         prompt += "[Current text to complete]:\n"
         return prompt
@@ -75,6 +90,15 @@ class PromptBuilder {
         if SettingsManager.shared.useBritishEnglish {
             finalInstructions += " Always use British English spelling (e.g., colour, prioritise)."
         }
+        
+        let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
+        if !lexicon.isEmpty {
+            let protectedWords = lexicon.joined(separator: ", ")
+            finalInstructions += " CRITICAL: Prioritize the document context above. Vocabulary words are for stylistic tone, not strict content. Silently fix minor spelling errors based on surrounding context, but NEVER alter these exact user-specific words: [\(protectedWords)]."
+        } else {
+            finalInstructions += " CRITICAL: Prioritize the document context above. Vocabulary words are for stylistic tone, not strict content. Silently fix minor spelling errors based on surrounding context."
+        }
+        
         prompt += "\(finalInstructions)\n\n"
         prompt += "[Current text to complete]:\n"
         return prompt

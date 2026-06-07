@@ -17,6 +17,9 @@ class CompletionManager: @unchecked Sendable {
     var activeRewritePID: pid_t?
     var activeSmartReplyPID: pid_t?
     
+    var consecutiveMisses = 0
+    var backoffUntil: Date?
+    
     var isRewrite: Bool {
         return activeRewritePID != nil || activeRewriteText != nil
     }
@@ -174,8 +177,23 @@ class CompletionManager: @unchecked Sendable {
         if isRewrite || isSmartReply { return }
         print("[TypeFlow-Debug] onTextChanged called")
         
+        // Check for rejection before clearing
+        if let current = currentCompletion, !current.isEmpty {
+            consecutiveMisses += 1
+            if consecutiveMisses >= 2 {
+                print("[TypeFlow-Debug] Flow State Backoff: 2 consecutive misses. Suspending for 10s.")
+                backoffUntil = Date().addingTimeInterval(10)
+                consecutiveMisses = 0
+            }
+        }
+        
         // Clear existing completion immediately when user types
         clearCompletion()
+        
+        if let backoff = backoffUntil, backoff > Date() {
+            print("[TypeFlow-Debug] Completions suspended until \(backoff)")
+            return
+        }
         
         if let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier {
             if SettingsManager.shared.isAppExcluded(bundleId: bundleId) {
@@ -707,6 +725,7 @@ class CompletionManager: @unchecked Sendable {
         }
         
         if let completion = currentCompletion, !completion.isEmpty {
+            consecutiveMisses = 0 // Reset on accept
             let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
             TypingHistoryManager.shared.logSentence(activeLine + completion)
             
