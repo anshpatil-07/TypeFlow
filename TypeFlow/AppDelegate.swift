@@ -29,5 +29,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         AppMonitor.shared.start()
         ClipboardMonitor.shared.start()
         NSApp.servicesProvider = TypeFlowServicesProvider()
+        TypeFlowShortcuts.updateAppShortcutParameters()
     }
 }
