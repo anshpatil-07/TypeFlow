@@ -108,41 +108,37 @@ class LLMEngine {
             guard let container = modelContainer else { return }
             guard checkMemoryStatus() else { return }
             
-            do {
-                _ = try await container.perform { [weak self] modelContext -> String in
-                    guard let self = self else { return "" }
-                    do {
-                        let staticPrefixPrompt = PromptBuilder.shared.buildStaticPrefix(systemInstructions: toneProfile.systemInstructions)
-                        let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)|\(SettingsManager.shared.useBritishEnglish)"
+            _ = await container.perform { [weak self] modelContext -> String in
+                guard let self = self else { return "" }
+                do {
+                    let staticPrefixPrompt = PromptBuilder.shared.buildStaticPrefix(systemInstructions: toneProfile.systemInstructions)
+                    let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)|\(SettingsManager.shared.useBritishEnglish)"
+                    
+                    if self.kvCache == nil || self.cachedPrefixPrompt != staticPrefixPrompt || self.cachedPrefixSettingsKey != settingsKey {
+                        print("[TypeFlow-Debug] LLMEngine: Pre-warm cache miss — rebuilding static KV prefix...")
                         
-                        if self.kvCache == nil || self.cachedPrefixPrompt != staticPrefixPrompt || self.cachedPrefixSettingsKey != settingsKey {
-                            print("[TypeFlow-Debug] LLMEngine: Pre-warm cache miss — rebuilding static KV prefix...")
-                            
-                            let prefixInput = UserInput(prompt: staticPrefixPrompt)
-                            let prefixPrepared = try await modelContext.processor.prepare(input: prefixInput)
-                            let prefixTokens = prefixPrepared.text.tokens.asArray(Int.self)
-                            
-                            self.prefixLength = prefixTokens.count
-                            self.cachedPrefixPrompt = staticPrefixPrompt
-                            self.cachedPrefixSettingsKey = settingsKey
-                            
-                            let newCache = modelContext.model.newCache(parameters: nil)
-                            let prefixMLXTokens = MLXArray(prefixTokens)
-                            _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
-                            eval(newCache)
-                            
-                            self.kvCache = newCache
-                            print("[TypeFlow-Debug] LLMEngine: Pre-warm complete with \(self.prefixLength) tokens.")
-                        } else {
-                            print("[TypeFlow-Debug] LLMEngine: Pre-warm cache hit — reusing KV prefix.")
-                        }
-                    } catch {
-                        print("[TypeFlow-Debug] LLMEngine: Pre-warm Error in inner do block: \(error)")
+                        let prefixInput = UserInput(prompt: staticPrefixPrompt)
+                        let prefixPrepared = try await modelContext.processor.prepare(input: prefixInput)
+                        let prefixTokens = prefixPrepared.text.tokens.asArray(Int.self)
+                        
+                        self.prefixLength = prefixTokens.count
+                        self.cachedPrefixPrompt = staticPrefixPrompt
+                        self.cachedPrefixSettingsKey = settingsKey
+                        
+                        let newCache = modelContext.model.newCache(parameters: nil)
+                        let prefixMLXTokens = MLXArray(prefixTokens)
+                        _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
+                        eval(newCache)
+                        
+                        self.kvCache = newCache
+                        print("[TypeFlow-Debug] LLMEngine: Pre-warm complete with \(self.prefixLength) tokens.")
+                    } else {
+                        print("[TypeFlow-Debug] LLMEngine: Pre-warm cache hit — reusing KV prefix.")
                     }
-                    return ""
+                } catch {
+                    print("[TypeFlow-Debug] LLMEngine: Pre-warm Error in inner do block: \(error)")
                 }
-            } catch {
-                print("[TypeFlow-Debug] LLMEngine: Pre-warm Error during container.perform: \(error)")
+                return ""
             }
         }
     }
