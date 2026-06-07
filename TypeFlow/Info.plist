@@ -22,5 +22,46 @@
 	<true/>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>TypeFlow needs Accessibility access to detect typing and inject completions.</string>
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Rewrite with TypeFlow</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>rewriteText</string>
+			<key>NSPortName</key>
+			<string>TypeFlow</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>NSStringPboardType</string>
+			</array>
+			<key>NSReturnTypes</key>
+			<array>
+				<string>NSStringPboardType</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>Expand with TypeFlow</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>expandText</string>
+			<key>NSPortName</key>
+			<string>TypeFlow</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>NSStringPboardType</string>
+			</array>
+			<key>NSReturnTypes</key>
+			<array>
+				<string>NSStringPboardType</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
