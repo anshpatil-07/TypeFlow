@@ -34,6 +34,7 @@ Current Position: End of Phase 19
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260607-x93 | Fix compiler warnings in AppDelegate, LLMEngine, and ScreenContextManager | 2026-06-07 | f6c0c24 | [260607-x93-fix-compiler-warnings-in-appdelegate-llm](./quick/260607-x93-fix-compiler-warnings-in-appdelegate-llm/) |
+| 260608-bnr | Reorder AXTextMarker checks for WebKit caret tracking | 2026-06-08 | 60451aa | [260608-bnr-reorder-axtextmarker-checks-for-webkit-c](./quick/260608-bnr-reorder-axtextmarker-checks-for-webkit-c/) |
 
 ## Accumulated Context
 

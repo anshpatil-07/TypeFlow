@@ -396,6 +396,49 @@ class AccessibilityMonitor {
         guard err == .success, let element = focusedElement else { return nil }
         let axElement = element as! AXUIElement
         
+        // --- Priority: WebKit/Chromium: AXSelectedTextMarkerRange and AXBoundsForTextMarkerRange ---
+        var markerRangeRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, "AXSelectedTextMarkerRange" as CFString, &markerRangeRef) == .success,
+           let markerRange = markerRangeRef {
+            var boundsValue: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(
+                axElement,
+                "AXBoundsForTextMarkerRange" as CFString,
+                markerRange,
+                &boundsValue
+            ) == .success {
+                var rect = CGRect.zero
+                if AXValueGetValue(boundsValue as! AXValue, .cgRect, &rect) {
+                    if rect.width > 0 || rect.height > 0 {
+                        print("[TypeFlow-Debug] Caret rect extracted via AXSelectedTextMarkerRange: \(rect)")
+                        return rect
+                    }
+                }
+            }
+        }
+        
+        // --- Priority: WebKit/Chromium: AXSelectedTextMarker and AXBoundsForTextMarker ---
+        var markerRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, "AXSelectedTextMarker" as CFString, &markerRef) == .success,
+           let marker = markerRef {
+            var boundsValue: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(
+                axElement,
+                "AXBoundsForTextMarker" as CFString,
+                marker,
+                &boundsValue
+            ) == .success {
+                var rect = CGRect.zero
+                if AXValueGetValue(boundsValue as! AXValue, .cgRect, &rect) {
+                    if rect.width > 0 || rect.height > 0 {
+                        print("[TypeFlow-Debug] Caret rect extracted via AXSelectedTextMarker: \(rect)")
+                        return rect
+                    }
+                }
+            }
+        }
+
+        // --- Standard fallback for native macOS apps ---
         var selectedRangeRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success {
             let rangeValue = selectedRangeRef as! AXValue
@@ -444,47 +487,6 @@ class AccessibilityMonitor {
             }
         }
         
-        // --- Fallback for WebKit/Chromium: AXSelectedTextMarker and AXBoundsForTextMarker ---
-        var markerRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, "AXSelectedTextMarker" as CFString, &markerRef) == .success,
-           let marker = markerRef {
-            var boundsValue: CFTypeRef?
-            if AXUIElementCopyParameterizedAttributeValue(
-                axElement,
-                "AXBoundsForTextMarker" as CFString,
-                marker,
-                &boundsValue
-            ) == .success {
-                var rect = CGRect.zero
-                if AXValueGetValue(boundsValue as! AXValue, .cgRect, &rect) {
-                    if rect.width > 0 || rect.height > 0 {
-                        print("[TypeFlow-Debug] Caret rect extracted via AXSelectedTextMarker: \(rect)")
-                        return rect
-                    }
-                }
-            }
-        }
-        
-        // --- Fallback for WebKit/Chromium: AXSelectedTextMarkerRange and AXBoundsForTextMarkerRange ---
-        var markerRangeRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, "AXSelectedTextMarkerRange" as CFString, &markerRangeRef) == .success,
-           let markerRange = markerRangeRef {
-            var boundsValue: CFTypeRef?
-            if AXUIElementCopyParameterizedAttributeValue(
-                axElement,
-                "AXBoundsForTextMarkerRange" as CFString,
-                markerRange,
-                &boundsValue
-            ) == .success {
-                var rect = CGRect.zero
-                if AXValueGetValue(boundsValue as! AXValue, .cgRect, &rect) {
-                    if rect.width > 0 || rect.height > 0 {
-                        print("[TypeFlow-Debug] Caret rect extracted via AXSelectedTextMarkerRange: \(rect)")
-                        return rect
-                    }
-                }
-            }
-        }
         
         // Fallback: use focused element's bottom-left corner with offset
         var positionVal: CFTypeRef?
