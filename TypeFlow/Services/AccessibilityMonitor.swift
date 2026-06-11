@@ -359,16 +359,11 @@ class AccessibilityMonitor {
         
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            print("[TypeFlow] Checking caret rect...")
-            let rect = self.getCurrentCaretRect()
-            
+            // NOTE: Caret rect is intentionally NOT fetched here.
+            // getCurrentCaretRect() is a heavy AX IPC call. Executing it on every
+            // keystroke was causing "Significant Energy" warnings and AXTextMarker spam.
+            // Caret position is now only fetched once, immediately before showing the overlay.
             DispatchQueue.main.async {
-                if let r = rect {
-                    print("[TypeFlow] Caret rect found: \(r)")
-                    self.onCaretMoved?(r)
-                } else {
-                    print("[TypeFlow] Caret rect not found! Calling onTextChanged anyway for debugging.")
-                }
                 CompletionManager.shared.onTextChanged(bufferFallback: bufferSnapshot)
             }
         }

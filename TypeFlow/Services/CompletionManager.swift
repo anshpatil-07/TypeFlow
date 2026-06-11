@@ -279,6 +279,8 @@ class CompletionManager: @unchecked Sendable {
                     // Show it as orange ghost text suggestion
                     activeSpellCorrection = (misspelled: word, corrected: correction)
                     let ghostText = getGhostText(misspelled: word, correction: correction)
+                    // Fetch caret rect lazily on the main thread just before showing the overlay —
+                    // never during the hot typing loop.
                     DispatchQueue.main.async {
                         self.currentCompletion = ghostText
                         if !ghostText.isEmpty {
@@ -330,6 +332,8 @@ class CompletionManager: @unchecked Sendable {
                         // Always show orange ghost text for inline mid-word typos so the user
                         // has visual feedback — even when Auto-correct is enabled.
                         // (Silent auto-fix only fires on the delimiter-triggered path above.)
+                        // Fetch caret rect lazily on the main thread just before showing the overlay —
+                        // never during the hot typing loop.
                         DispatchQueue.main.async {
                             self.currentCompletion = ghostText
                             if !ghostText.isEmpty {
@@ -347,9 +351,10 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // Debounce generation (300ms debounce timer for Hybrid Inference Engine)
+        // Debounce: 400ms ensures user has paused before spinning up GPU inference.
+        // A too-aggressive value causes rapid dispatch→cancel cycles that thrash GPU power state.
         debounceTimer?.invalidate()
-        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.30, repeats: false) { [weak self] _ in
+        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.40, repeats: false) { [weak self] _ in
             print("[TypeFlow-Debug] Debounce timer fired!")
             self?.triggerGeneration()
         }
@@ -444,6 +449,12 @@ class CompletionManager: @unchecked Sendable {
         activeSnippetKey = nil
         
         print("[TypeFlow-Debug] Dispatching LLM generation for: '\(activeLine)'")
+        
+        // Explicitly cancel and nil any inflight task before creating a new one.
+        // Failure to do so allows parallel Swift concurrency tasks that each hold
+        // a reference to GPU memory through LLMEngine, causing GPU power state thrashing.
+        currentGenerationTask?.cancel()
+        currentGenerationTask = nil
         
         currentGenerationTask = Task {
             let completion = await LLMEngine.shared.generateCompletion(
