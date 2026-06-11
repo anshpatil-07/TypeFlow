@@ -120,7 +120,11 @@ class PromptBuilder {
     }
 
     func buildPromptSuffix(textBeforeCaret: String) -> String {
-        let contextText = String(textBeforeCaret.suffix(120))
+        // Use a much larger suffix window (600 chars) instead of 120. 
+        // A tight sliding window drops the first character on every keystroke, 
+        // which completely breaks the LLM's LCP (Longest Common Prefix) KV cache 
+        // match from the start of the string. 600 ensures the start remains stable.
+        let contextText = String(textBeforeCaret.suffix(600))
         let trimmedContext = contextText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         var suffix = "\(trimmedContext)\n\n<completion>"
