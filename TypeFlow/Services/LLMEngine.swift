@@ -36,10 +36,6 @@ class LLMEngine {
     private var cachedPrefixSettingsKey: String = ""
     private var inactivityTimer: Timer?
     
-    /// True while a generation stream is active. CompletionManager checks this before
-    /// dispatching a new task — prevents re-entrant KV cache allocations that cause
-    /// the cache-trim loop seen in the energy profiler logs.
-    private(set) var isGenerating: Bool = false
     
     var isModelReady: Bool { modelContainer != nil }
     
@@ -150,16 +146,6 @@ class LLMEngine {
     /// preventing the model from echoing the raw prompt tokens.
     func generateCompletion(textBeforeCaret: String, toneProfile: ToneProfile) async -> String {
         print("[TypeFlow-Debug] LLMEngine: generateCompletion called with tone \(toneProfile.name) (temp: \(toneProfile.temperature), maxTokens: \(toneProfile.maxTokens))")
-        
-        // Traffic control: if a previous stream is still running (and being cancelled),
-        // the KV cache trim + reinit on the GPU would fire back-to-back. Block entry
-        // until the engine is quiescent.
-        guard !isGenerating else {
-            print("[TypeFlow-Debug] LLMEngine: isGenerating guard fired — previous task still winding down, skipping.")
-            return ""
-        }
-        isGenerating = true
-        defer { isGenerating = false }
         
         await loadModelIfNeeded()
         resetInactivityTimer()

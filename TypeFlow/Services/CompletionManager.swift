@@ -461,22 +461,19 @@ class CompletionManager: @unchecked Sendable {
         
         print("[TypeFlow-Debug] Dispatching LLM generation for: '\(activeLine)'")
         
-        // Token traffic control: if LLMEngine is still winding down a cancelled stream
-        // (clearing GPU tensors), don't spin up a new Task yet or we trigger the
-        // cache-trim thrash loop. The guard in LLMEngine.generateCompletion will also
-        // catch any race here as a secondary defence.
-        if LLMEngine.shared.isGenerating {
-            print("[TypeFlow-Debug] LLM still generating — dropping this completion request to protect KV cache.")
-            return
-        }
-        
-        // Explicitly cancel and nil any inflight task before creating a new one.
-        // Failure to do so allows parallel Swift concurrency tasks that each hold
+        // Explicitly cancel any inflight task before creating a new one.
+        // Await its completion to prevent parallel Swift concurrency tasks that each hold
         // a reference to GPU memory through LLMEngine, causing GPU power state thrashing.
         currentGenerationTask?.cancel()
-        currentGenerationTask = nil
+        let previousTask = currentGenerationTask
         
         currentGenerationTask = Task {
+            // Wait for the previous cancelled task to fully wind down
+            _ = await previousTask?.value
+            
+            // If this task was cancelled while waiting, abort early
+            if Task.isCancelled { return }
+            
             let completion = await LLMEngine.shared.generateCompletion(
                 textBeforeCaret: activeLine,
                 toneProfile: effectiveConfig.toneProfile
