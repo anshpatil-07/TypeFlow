@@ -28,8 +28,7 @@ class LLMEngine {
     private var isLoading = false
     private var loadError: Error?
     
-    private var cachedPrefixPrompt: String?
-    private var prefixLength = 0
+    private var cachedTokens: [Int] = []
     private var kvCache: [KVCache]?
     /// Stable cache key: tone-id + personalization flag, updated only when settings change.
     /// Changing the typing context (buffer clear) does NOT invalidate this key — only
@@ -60,8 +59,7 @@ class LLMEngine {
     /// Explicitly invalidate the KV cache — call only when tone or personalization changes.
     func invalidateKVCache() {
         kvCache = nil
-        cachedPrefixPrompt = nil
-        prefixLength = 0
+        cachedTokens = []
         cachedPrefixSettingsKey = ""
         print("[TypeFlow-Debug] LLMEngine: KV cache explicitly invalidated (settings change)")
     }
@@ -119,15 +117,13 @@ class LLMEngine {
                     let staticPrefixPrompt = PromptBuilder.shared.buildStaticPrefix(systemInstructions: toneProfile.systemInstructions)
                     let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)|\(SettingsManager.shared.useBritishEnglish)"
                     
-                    if self.kvCache == nil || self.cachedPrefixPrompt != staticPrefixPrompt || self.cachedPrefixSettingsKey != settingsKey {
+                    if self.kvCache == nil || self.cachedPrefixSettingsKey != settingsKey {
                         print("[TypeFlow-Debug] LLMEngine: Pre-warm cache miss — rebuilding static KV prefix...")
                         
                         let prefixInput = UserInput(prompt: staticPrefixPrompt)
                         let prefixPrepared = try await modelContext.processor.prepare(input: prefixInput)
                         let prefixTokens = prefixPrepared.text.tokens.asArray(Int.self)
                         
-                        self.prefixLength = prefixTokens.count
-                        self.cachedPrefixPrompt = staticPrefixPrompt
                         self.cachedPrefixSettingsKey = settingsKey
                         
                         let newCache = modelContext.model.newCache(parameters: nil)
@@ -136,7 +132,8 @@ class LLMEngine {
                         eval(newCache)
                         
                         self.kvCache = newCache
-                        print("[TypeFlow-Debug] LLMEngine: Pre-warm complete with \(self.prefixLength) tokens.")
+                        self.cachedTokens = prefixTokens
+                        print("[TypeFlow-Debug] LLMEngine: Pre-warm complete with \(self.cachedTokens.count) tokens.")
                     } else {
                         print("[TypeFlow-Debug] LLMEngine: Pre-warm cache hit — reusing KV prefix.")
                     }
@@ -194,68 +191,55 @@ class LLMEngine {
                     let fullPrepared = try await modelContext.processor.prepare(input: fullInput)
                     let fullTokens = fullPrepared.text.tokens.asArray(Int.self)
                     
-                    // The KV-cache prefix uses ONLY static content (system instructions +
-                    // personalization header) — NOT the current typed text. This means the
-                    // cache is valid for the entire typing session unless tone or
-                    // personalization settings actually change.
-                    let staticPrefixPrompt = PromptBuilder.shared.buildStaticPrefix(systemInstructions: toneProfile.systemInstructions)
                     let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)|\(SettingsManager.shared.useBritishEnglish)"
                     
                     // Invalidate ONLY when tone/personalization settings change.
-                    if self.kvCache == nil || self.cachedPrefixPrompt != staticPrefixPrompt || self.cachedPrefixSettingsKey != settingsKey {
-                        print("[TypeFlow-Debug] LLMEngine: Cache miss — rebuilding static KV prefix (settings changed or first run)...")
-                        
-                        let prefixInput = UserInput(prompt: staticPrefixPrompt)
-                        let prefixPrepared = try await modelContext.processor.prepare(input: prefixInput)
-                        let prefixTokens = prefixPrepared.text.tokens.asArray(Int.self)
-                        
-                        // Find the common prefix tokens between the static prefix and full prompt
-                        var common = [Int]()
-                        for i in 0..<min(prefixTokens.count, fullTokens.count) {
-                            if prefixTokens[i] == fullTokens[i] {
-                                common.append(prefixTokens[i])
-                            } else {
-                                break
-                            }
-                        }
-                        
-                        self.prefixLength = common.count
-                        self.cachedPrefixPrompt = staticPrefixPrompt
+                    if self.cachedPrefixSettingsKey != settingsKey {
+                        print("[TypeFlow-Debug] LLMEngine: Cache miss — settings changed. Clearing KV cache.")
+                        self.kvCache = nil
+                        self.cachedTokens = []
                         self.cachedPrefixSettingsKey = settingsKey
-                        
-                        // Instantiate a clean cache
-                        let newCache = modelContext.model.newCache(parameters: nil)
-                        
-                        // Prefill the prefix tokens in the model
-                        let prefixMLXTokens = MLXArray(common)
-                        _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
-                        eval(newCache)
-                        
-                        self.kvCache = newCache
-                        print("[TypeFlow-Debug] LLMEngine: KV cache prefilled with \(self.prefixLength) static tokens. Cache offset: \(newCache[0].offset)")
-                    } else {
-                        print("[TypeFlow-Debug] LLMEngine: Cache hit — reusing KV prefix (\(self.prefixLength) tokens).")
+                    }
+                    
+                    if self.kvCache == nil {
+                        self.kvCache = modelContext.model.newCache(parameters: nil)
+                        self.cachedTokens = []
                     }
                     
                     guard let cache = self.kvCache else {
                         throw KVCacheError(message: "Failed to resolve KV cache")
                     }
                     
-                    // Trim cache back to prefixLength
-                    let tokensToTrim = cache[0].offset - self.prefixLength
-                    if tokensToTrim > 0 {
-                        print("[TypeFlow-Debug] LLMEngine: Trimming \(tokensToTrim) generated/suffix tokens from cache...")
-                        trimPromptCache(cache, numTokens: tokensToTrim)
-                        print("[TypeFlow-Debug] LLMEngine: Trim complete. Cache offset: \(cache[0].offset)")
+                    // LCP (Longest Common Prefix) Match
+                    var lcpIndex = 0
+                    let maxLen = min(self.cachedTokens.count, fullTokens.count)
+                    while lcpIndex < maxLen && self.cachedTokens[lcpIndex] == fullTokens[lcpIndex] {
+                        lcpIndex += 1
                     }
                     
-                    // Suffix tokens to evaluate are everything from prefixLength onwards
-                    let safePrefix = min(self.prefixLength, fullTokens.count)
-                    let suffixTokens = Array(fullTokens[safePrefix...])
+                    // Trim cache back to the divergence point
+                    let currentCacheSize = cache[0].offset
+                    let tokensToTrim = currentCacheSize - lcpIndex
+                    if tokensToTrim > 0 {
+                        print("[TypeFlow-Debug] LLMEngine: LCP match is \(lcpIndex) tokens. Trimming \(tokensToTrim) divergent/generated tokens from cache...")
+                        trimPromptCache(cache, numTokens: tokensToTrim)
+                        if lcpIndex < self.cachedTokens.count {
+                            self.cachedTokens = Array(self.cachedTokens.prefix(lcpIndex))
+                        }
+                    } else {
+                        print("[TypeFlow-Debug] LLMEngine: Cache hit — reusing \(lcpIndex) tokens.")
+                    }
+                    
+                    // Suffix tokens to evaluate are everything from lcpIndex onwards
+                    let suffixTokens = Array(fullTokens[lcpIndex...])
                     guard !suffixTokens.isEmpty else {
                         print("[TypeFlow-Debug] LLMEngine: No suffix tokens to generate, returning empty string.")
                         return ""
                     }
+                    
+                    // Update cachedTokens with the new prompt tokens we are about to evaluate
+                    self.cachedTokens.append(contentsOf: suffixTokens)
+                    
                     let suffixInput = LMInput(tokens: MLXArray(suffixTokens))
                     
                     print("[TypeFlow-Debug] LLMEngine: Starting generate stream with suffix tokens count: \(suffixTokens.count)...")
