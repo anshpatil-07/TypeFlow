@@ -10,6 +10,9 @@ class CompletionManager: @unchecked Sendable {
     private var debounceTimer: Timer?
     private var currentGenerationTask: Task<Void, Never>?
     
+    /// Tracks the timestamp of the most recent keystroke for adaptive debounce.
+    private var lastKeystrokeTime: Date = .distantPast
+    
     private var pendingCompletionRequest: String?
     private var activeSpellCorrection: (misspelled: String, corrected: String)?
     private var activeSnippetKey: String?
@@ -351,10 +354,18 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // Debounce: 400ms ensures user has paused before spinning up GPU inference.
-        // A too-aggressive value causes rapid dispatch→cancel cycles that thrash GPU power state.
+        // Adaptive debounce: if the user is typing rapidly (<200ms between keystrokes),
+        // scale up the delay to 0.6s to keep the GPU fully asleep until they pause.
+        // Otherwise fall back to the baseline 0.4s.
+        let now = Date()
+        let keystrokeInterval = now.timeIntervalSince(lastKeystrokeTime)
+        lastKeystrokeTime = now
+        let debounceInterval: TimeInterval = keystrokeInterval < 0.2 ? 0.6 : 0.4
+        print("[TypeFlow-Debug] Adaptive debounce: keystroke interval \(String(format: "%.0f", keystrokeInterval * 1000))ms → using \(debounceInterval)s")
+        
+        // Debounce: 400–600ms ensures user has paused before spinning up GPU inference.
         debounceTimer?.invalidate()
-        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.40, repeats: false) { [weak self] _ in
+        debounceTimer = Timer.scheduledTimer(withTimeInterval: debounceInterval, repeats: false) { [weak self] _ in
             print("[TypeFlow-Debug] Debounce timer fired!")
             self?.triggerGeneration()
         }
@@ -449,6 +460,15 @@ class CompletionManager: @unchecked Sendable {
         activeSnippetKey = nil
         
         print("[TypeFlow-Debug] Dispatching LLM generation for: '\(activeLine)'")
+        
+        // Token traffic control: if LLMEngine is still winding down a cancelled stream
+        // (clearing GPU tensors), don't spin up a new Task yet or we trigger the
+        // cache-trim thrash loop. The guard in LLMEngine.generateCompletion will also
+        // catch any race here as a secondary defence.
+        if LLMEngine.shared.isGenerating {
+            print("[TypeFlow-Debug] LLM still generating — dropping this completion request to protect KV cache.")
+            return
+        }
         
         // Explicitly cancel and nil any inflight task before creating a new one.
         // Failure to do so allows parallel Swift concurrency tasks that each hold
