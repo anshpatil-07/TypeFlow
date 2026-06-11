@@ -153,8 +153,8 @@ class TypingHistoryManager {
         if selected.count < count {
             let needed = count - selected.count
             let remaining = history.filter { !selected.contains($0) }
-            let shuffled = remaining.shuffled()
-            selected.append(contentsOf: shuffled.prefix(needed))
+            // Use stable suffix instead of shuffled() to prevent breaking the LLM KV cache on every keystroke
+            selected.append(contentsOf: remaining.suffix(needed))
         }
         
         return selected
