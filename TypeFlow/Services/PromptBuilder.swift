@@ -123,20 +123,25 @@ class PromptBuilder {
     }
 
     func buildPromptSuffix(textBeforeCaret: String) -> String {
-        // Strict active-line isolation. 
-        // A sliding character window pulls in leading newlines that shift on every keystroke, 
-        // which completely breaks the LLM's LCP (Longest Common Prefix) KV cache byte-alignment.
-        // We only pass the currently active line the user is typing on.
-        let activeLine = textBeforeCaret.components(separatedBy: .newlines).last ?? ""
-        let trimmedContext = activeLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        // We give the model up to 5 lines of stable context. 
+        // By splitting on newlines and taking a fixed number of lines, the leading string boundary 
+        // NEVER shifts while the user is typing on the current line. This preserves LCP byte-alignment
+        // perfectly, while giving the model enough document context to stay in "completion mode"
+        // rather than falling back into "chat/markdown mode".
+        let lines = textBeforeCaret.components(separatedBy: .newlines)
+        let stableContext = lines.suffix(5).joined(separator: "\n")
 
-        var suffix = "\(trimmedContext)\n\n<completion>"
+        // DO NOT trim trailing whitespace! The LLM needs the exact trailing space or partial word
+        // to natively predict the correct next token.
+        // We also DO NOT append \n\n<completion> for normal typing, as that closes the text block
+        // and forces the LLM to start a new formatted markdown response.
+        var suffix = stableContext
 
         if hasClipboardTrigger(textBeforeCaret: textBeforeCaret) {
             let recentClipboard = Array(ClipboardMonitor.shared.recentItems.suffix(3))
             if !recentClipboard.isEmpty {
                 let formattedClipboard = recentClipboard.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
-                suffix = "\(trimmedContext)\n\nCRITICAL INSTRUCTION: The user is triggering a clipboard paste. Here is their recent clipboard history:\n\(formattedClipboard)\nBased on their sentence, either paste the single most relevant item, or output the exact formatted list provided above. Do NOT invent or hallucinate any URLs or text not present in this list. CRITICAL: Output ONLY the clipboard item(s). Do NOT repeat the user's input phrase. Start your response directly with the clipboard text.\n\n<completion>"
+                suffix += "\n\nCRITICAL INSTRUCTION: The user is triggering a clipboard paste. Here is their recent clipboard history:\n\(formattedClipboard)\nBased on their sentence, either paste the single most relevant item, or output the exact formatted list provided above. Do NOT invent or hallucinate any URLs or text not present in this list. CRITICAL: Output ONLY the clipboard item(s). Do NOT repeat the user's input phrase. Start your response directly with the clipboard text."
             }
         }
 
