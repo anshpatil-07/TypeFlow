@@ -173,6 +173,47 @@ class CompletionManager: @unchecked Sendable {
         return (word, delimiter, range)
     }
     
+    func handleSynchronousSpellcheck(bufferSnapshot: String) -> Bool {
+        guard SettingsManager.shared.autoCorrectEnabled else { return false }
+        if let completedWordInfo = getCompletedWord(from: bufferSnapshot) {
+            let word = completedWordInfo.word
+            let wordRange = completedWordInfo.range
+            let delimiter = completedWordInfo.delimiter
+            
+            if word.count >= 4, let correction = getSpellCorrection(in: bufferSnapshot, lastWordRange: wordRange) {
+                print("[TypeFlow-Debug] Synchronous auto-correct triggered: '\(word)' -> '\(correction)'")
+                
+                debounceTimer?.invalidate()
+                debounceTimer = nil
+                currentGenerationTask?.cancel()
+                currentGenerationTask = nil
+                
+                // Use the string without the delimiter to calculate the correct delete count,
+                // because the delimiter (e.g. Space) was swallowed by the event tap and never rendered!
+                let activeLineWithoutDelimiter = String(bufferSnapshot.dropLast(delimiter.count))
+                let deleteCount = calculateDeleteCount(activeLine: activeLineWithoutDelimiter, misspelled: word)
+                
+                // Wrap synthetic event dispatches in an async block so the physical Spacebar event 
+                // finishes dropping before the synthetic keystrokes fire, preventing race conditions.
+                DispatchQueue.main.async {
+                    TextInjector.shared.injectBackspaces(count: deleteCount)
+                    // Inject the correction via pasteboard
+                    TextInjector.shared.inject(text: correction)
+                    // Explicitly inject the space character as a separate CGEvent to preserve typing flow
+                    TextInjector.shared.injectCharByChar(text: delimiter)
+                }
+                
+                clearCompletion()
+                
+                let correctedLine = String(bufferSnapshot.dropLast(deleteCount + delimiter.count)) + correction + delimiter
+                print("[TypeFlow-Debug] Logging auto-corrected sentence to history: '\(correctedLine)'")
+                TypingHistoryManager.shared.logSentenceFromText(correctedLine)
+                return true
+            }
+        }
+        return false
+    }
+    
     func onTextChanged(bufferFallback: String = "") {
         if isRewrite || isSmartReply { return }
         print("[TypeFlow-Debug] onTextChanged called")
@@ -180,9 +221,9 @@ class CompletionManager: @unchecked Sendable {
         // Check for rejection before clearing
         if let current = currentCompletion, !current.isEmpty {
             consecutiveMisses += 1
-            if consecutiveMisses >= 2 {
-                print("[TypeFlow-Debug] Flow State Backoff: 2 consecutive misses. Suspending for 10s.")
-                backoffUntil = Date().addingTimeInterval(10)
+            if consecutiveMisses >= 5 {
+                print("[TypeFlow-Debug] Flow State Backoff: 5 consecutive misses. Suspending for 2s.")
+                backoffUntil = Date().addingTimeInterval(2)
                 consecutiveMisses = 0
             }
         }
@@ -202,18 +243,9 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // Prefer AX-extracted text; fall back to the CGEvent buffer snapshot captured
-        // at the tap site (before any racing focus-change dispatch could clear it).
-        let axText = accessibilityMonitor?.getTextBeforeCaret() ?? ""
-        let activeLine: String
-        if !axText.isEmpty {
-            activeLine = axText
-        } else if !bufferFallback.isEmpty {
-            print("[TypeFlow-Debug] AX returned empty — using CGEvent buffer snapshot for spell-check: '\(bufferFallback.suffix(50))'")
-            activeLine = bufferFallback
-        } else {
-            activeLine = ""
-        }
+        // For the spacebar spellcheck, isolate the extraction strictly to the current word buffer.
+        // We defer the heavy kAXValue polling to the debounce timer's background thread to prevent energy regression.
+        let activeLine = bufferFallback
         
         TypingHistoryManager.shared.logSentenceFromText(activeLine)
         
@@ -328,7 +360,23 @@ class CompletionManager: @unchecked Sendable {
         currentGenerationTask?.cancel()
         currentGenerationTask = nil
         
-        let activeLine = text ?? accessibilityMonitor?.getTextBeforeCaret() ?? ""
+        if let providedText = text {
+            self.continueGeneration(activeLine: providedText)
+        } else {
+            // We MUST fetch AX text on a background thread because kAXValue polling is extremely expensive.
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else { return }
+                let axText = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
+                let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                
+                DispatchQueue.main.async {
+                    self.continueGeneration(activeLine: finalLine)
+                }
+            }
+        }
+    }
+    
+    private func continueGeneration(activeLine: String) {
         guard !activeLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             print("[TypeFlow-Debug] Active line is empty, skipping generation.")
             return

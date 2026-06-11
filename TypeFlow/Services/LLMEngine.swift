@@ -243,7 +243,9 @@ class LLMEngine {
                     let suffixInput = LMInput(tokens: MLXArray(suffixTokens))
                     
                     print("[TypeFlow-Debug] LLMEngine: Starting generate stream with suffix tokens count: \(suffixTokens.count)...")
-                    let params = GenerateParameters(maxTokens: toneProfile.maxTokens, temperature: Float(toneProfile.temperature))
+                    let isClipboard = PromptBuilder.shared.hasClipboardTrigger(textBeforeCaret: textBeforeCaret)
+                    let activeMaxTokens = isClipboard ? 150 : toneProfile.maxTokens
+                    let params = GenerateParameters(maxTokens: activeMaxTokens, temperature: Float(toneProfile.temperature))
                     let stream = try MLXLMCommon.generate(
                         input: suffixInput,
                         cache: cache,
@@ -280,6 +282,12 @@ class LLMEngine {
             }
             
             var trimmedResult = cleanResult.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            
+            // Aggressive Stripper
+            let echoedContext = String(textBeforeCaret.suffix(120)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !echoedContext.isEmpty && trimmedResult.hasPrefix(echoedContext) {
+                trimmedResult = String(trimmedResult.dropFirst(echoedContext.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
             
             // If the original text ended in a space, prepend space if the output doesn't start with one
             if textBeforeCaret.hasSuffix(" ") && !trimmedResult.isEmpty {

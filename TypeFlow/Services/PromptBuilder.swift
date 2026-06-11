@@ -98,13 +98,7 @@ class PromptBuilder {
         return prompt
     }
     
-    func buildPromptSuffix(textBeforeCaret: String) -> String {
-        let contextText = String(textBeforeCaret.suffix(120))
-        let trimmedContext = contextText.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        var suffix = "\(trimmedContext)\n\n<completion>"
-
-        // Inject recent clipboard items if the caret text ends with a clipboard-seeking phrase
+    func hasClipboardTrigger(textBeforeCaret: String) -> Bool {
         let clipboardTriggers = [
             "here is the link:",
             "here is the url:",
@@ -116,17 +110,26 @@ class PromptBuilder {
             "the link is",
             "the url is",
             "contact me at",
+            "link: ",
+            "link:",
+            "url: ",
+            "code: "
         ]
-        let lowercasedText = textBeforeCaret.lowercased().trimmingCharacters(in: .whitespaces)
-        let hasClipboardTrigger = clipboardTriggers.contains { lowercasedText.hasSuffix($0) }
+        let lowercasedText = textBeforeCaret.lowercased()
+        return clipboardTriggers.contains { lowercasedText.hasSuffix($0) }
+    }
 
-        if hasClipboardTrigger {
-            let items = ClipboardMonitor.shared.recentItems
-            if !items.isEmpty {
-                let clipboardContext = items.enumerated()
-                    .map { "- \($0.element)" }
-                    .joined(separator: "\n")
-                suffix = "\(trimmedContext)\n\n[Recent Clipboard Items]:\n\(clipboardContext)\n\n<completion>"
+    func buildPromptSuffix(textBeforeCaret: String) -> String {
+        let contextText = String(textBeforeCaret.suffix(120))
+        let trimmedContext = contextText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var suffix = "\(trimmedContext)\n\n<completion>"
+
+        if hasClipboardTrigger(textBeforeCaret: textBeforeCaret) {
+            let recentClipboard = Array(ClipboardMonitor.shared.recentItems.suffix(3))
+            if !recentClipboard.isEmpty {
+                let formattedClipboard = recentClipboard.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+                suffix = "\(trimmedContext)\n\nCRITICAL INSTRUCTION: The user is triggering a clipboard paste. Here is their recent clipboard history:\n\(formattedClipboard)\nBased on their sentence, either paste the single most relevant item, or output the exact formatted list provided above. Do NOT invent or hallucinate any URLs or text not present in this list. CRITICAL: Output ONLY the clipboard item(s). Do NOT repeat the user's input phrase. Start your response directly with the clipboard text.\n\n<completion>"
             }
         }
 
