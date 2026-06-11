@@ -217,6 +217,27 @@ class LLMEngine {
                         lcpIndex += 1
                     }
                     
+                    if lcpIndex < 50 && !self.cachedTokens.isEmpty {
+                        let startIdx = max(0, lcpIndex - 5)
+                        let endCached = min(self.cachedTokens.count - 1, lcpIndex + 15)
+                        let endNew = min(fullTokens.count - 1, lcpIndex + 15)
+                        
+                        if startIdx <= endCached && startIdx <= endNew {
+                            let cachedDivergent = Array(self.cachedTokens[startIdx...endCached])
+                            let newDivergent = Array(fullTokens[startIdx...endNew])
+                            
+                            // The tokenizer decode function isn't directly exposed on UserInputProcessor,
+                            // so we dump the raw token IDs. We can cross-reference these IDs against the tokenizer
+                            // locally to see exactly what dynamic text is breaking the LCP cache.
+                            let cachedStr = "\(cachedDivergent)"
+                            let newStr = "\(newDivergent)"
+                            
+                            print("[TypeFlow-Debug] LLMEngine: LCP match suspiciously low (\(lcpIndex)). Dumping divergence:")
+                            print("[TypeFlow-Debug] LLMEngine: Cached context near break: '\(cachedStr)'")
+                            print("[TypeFlow-Debug] LLMEngine: New context near break:    '\(newStr)'")
+                        }
+                    }
+                    
                     // Trim cache back to the divergence point
                     let currentCacheSize = cache[0].offset
                     let tokensToTrim = currentCacheSize - lcpIndex
