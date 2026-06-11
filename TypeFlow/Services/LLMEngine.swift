@@ -184,7 +184,7 @@ class LLMEngine {
                 do {
                     // ── Build Prefix and Suffix prompts ──────────────────────────────
                     let suffixPrompt = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret)
-                    let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(textBeforeCaret: textBeforeCaret, systemInstructions: toneProfile.systemInstructions)
+                    let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(systemInstructions: toneProfile.systemInstructions)
                     
                     let fullPrompt = dynamicPrefixPrompt + suffixPrompt
                     let fullInput = UserInput(prompt: fullPrompt)

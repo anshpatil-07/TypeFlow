@@ -12,7 +12,7 @@ class PromptBuilder {
     }
     
     func buildPrompt(textBeforeCaret: String, systemInstructions: String) -> String {
-        let prefix = buildPromptPrefix(textBeforeCaret: textBeforeCaret, systemInstructions: systemInstructions)
+        let prefix = buildPromptPrefix(systemInstructions: systemInstructions)
         let suffix = buildPromptSuffix(textBeforeCaret: textBeforeCaret)
         return prefix + suffix
     }
@@ -58,15 +58,18 @@ class PromptBuilder {
         return prompt
     }
     
-    func buildPromptPrefix(textBeforeCaret: String, systemInstructions: String) -> String {
+    func buildPromptPrefix(systemInstructions: String) -> String {
         var prompt = ""
         
         let personalizationActive = SettingsManager.shared.personalizationEnabled
         print("[TypeFlow-Debug] PromptBuilder: personalizationEnabled=\(personalizationActive)")
         
         if personalizationActive {
-            let samples = TypingHistoryManager.shared.getRelevantSamples(for: textBeforeCaret, count: 3)
-            print("[TypeFlow-Debug] PromptBuilder: matched \(samples.count) relevant writing samples")
+            // Use recent samples without a text-specific filter. Filtering dynamically based on 
+            // the user's active typing completely shifts the prompt text on every keystroke,
+            // instantly breaking the LLM's KV Cache LCP alignment.
+            let samples = TypingHistoryManager.shared.getRecentSamples(count: 3)
+            print("[TypeFlow-Debug] PromptBuilder: injecting \(samples.count) static writing samples")
             if !samples.isEmpty {
                 prompt += "[Past user writing samples]:\n"
                 for sample in samples {
