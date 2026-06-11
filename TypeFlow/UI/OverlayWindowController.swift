@@ -314,13 +314,13 @@ class OverlayWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        overlayWindow.level = .floating
+        overlayWindow.level = .screenSaver
         overlayWindow.backgroundColor = .clear
         // Rewrite mode bar needs mouse events; ghost-text overlay ignores them
         overlayWindow.ignoresMouseEvents = false
         overlayWindow.isOpaque = false
         overlayWindow.contentView = overlayContentView
-        overlayWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        overlayWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
         super.init(window: overlayWindow)
 

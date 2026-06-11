@@ -5,7 +5,7 @@ class AccessibilityMonitor {
     var runLoopSource: CFRunLoopSource?
     var onCaretMoved: ((CGRect) -> Void)?
     private var retryTimer: Timer?
-    private var keystrokeBuffer: String = ""
+    var keystrokeBuffer: String = ""
     private var activeAppObserver: AXObserver?
     /// PID of the application whose AX observer is currently registered.
     /// Used to suppress intra-app focus-change noise (e.g. browser URL bar ↔ page).
@@ -310,6 +310,15 @@ class AccessibilityMonitor {
                         if keyCode == 49 || keyCode == 36 {
                             obj.handleKeystroke(keyCode: keyCode, event: event)
                             let bufferSnapshot = obj.keystrokeBuffer
+                            
+                            if keyCode == 49 {
+                                if CompletionManager.shared.handleSynchronousSpellcheck(bufferSnapshot: bufferSnapshot) {
+                                    print("[TypeFlow] Synchronous spellcheck consumed Space")
+                                    obj.clearKeystrokeBuffer()
+                                    return nil // Consume original Space to prevent duplication
+                                }
+                            }
+                            
                             obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: 0.0)
                             return Unmanaged.passRetained(event)
                         }
@@ -396,47 +405,31 @@ class AccessibilityMonitor {
         guard err == .success, let element = focusedElement else { return nil }
         let axElement = element as! AXUIElement
         
-        // --- Priority: WebKit/Chromium: AXSelectedTextMarkerRange and AXBoundsForTextMarkerRange ---
-        var markerRangeRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, "AXSelectedTextMarkerRange" as CFString, &markerRangeRef) == .success,
-           let markerRange = markerRangeRef {
+
+        // --- Priority: WebKit/Chromium AXTextMarker ---
+        let markerRangeAttr = "AXSelectedTextMarkerRange" as CFString
+        let boundsForRangeAttr = "AXBoundsForTextMarkerRange" as CFString
+
+        var rangeValue: CFTypeRef?
+        let rangeErr = AXUIElementCopyAttributeValue(axElement, markerRangeAttr, &rangeValue)
+
+        if rangeErr == .success, let range = rangeValue {
             var boundsValue: CFTypeRef?
-            if AXUIElementCopyParameterizedAttributeValue(
-                axElement,
-                "AXBoundsForTextMarkerRange" as CFString,
-                markerRange,
-                &boundsValue
-            ) == .success {
+            let boundsErr = AXUIElementCopyParameterizedAttributeValue(axElement, boundsForRangeAttr, range, &boundsValue)
+            
+            if boundsErr == .success {
+                // The value is an AXValue. We must decode it.
+                let axValue = boundsValue as! AXValue
                 var rect = CGRect.zero
-                if AXValueGetValue(boundsValue as! AXValue, .cgRect, &rect) {
-                    if rect.width > 0 || rect.height > 0 {
-                        print("[TypeFlow-Debug] Caret rect extracted via AXSelectedTextMarkerRange: \(rect)")
-                        return rect
-                    }
+                AXValueGetValue(axValue, .cgRect, &rect)
+                
+                if rect != .zero {
+                    print("[TypeFlow-Debug] Browser Caret found via AXTextMarker: \(rect)")
+                    return rect
                 }
             }
         }
-        
-        // --- Priority: WebKit/Chromium: AXSelectedTextMarker and AXBoundsForTextMarker ---
-        var markerRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, "AXSelectedTextMarker" as CFString, &markerRef) == .success,
-           let marker = markerRef {
-            var boundsValue: CFTypeRef?
-            if AXUIElementCopyParameterizedAttributeValue(
-                axElement,
-                "AXBoundsForTextMarker" as CFString,
-                marker,
-                &boundsValue
-            ) == .success {
-                var rect = CGRect.zero
-                if AXValueGetValue(boundsValue as! AXValue, .cgRect, &rect) {
-                    if rect.width > 0 || rect.height > 0 {
-                        print("[TypeFlow-Debug] Caret rect extracted via AXSelectedTextMarker: \(rect)")
-                        return rect
-                    }
-                }
-            }
-        }
+        print("[TypeFlow-Debug] Browser AXTextMarker extraction failed.")
 
         // --- Standard fallback for native macOS apps ---
         var selectedRangeRef: CFTypeRef?
@@ -497,9 +490,14 @@ class AccessibilityMonitor {
             var size = CGSize.zero
             AXValueGetValue(positionVal as! AXValue, .cgPoint, &pos)
             AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
-            let fallbackX = pos.x + 5
+            
+            let textLength = self.keystrokeBuffer.count
+            
+            let estimatedTextWidth = CGFloat(textLength) * 8.0
+            
+            let fallbackX = pos.x + 5 + estimatedTextWidth
             let fallbackY = pos.y + max(0, size.height - 18)
-            print("[TypeFlow] Caret bounds failed, falling back to element bottom-left (offset): x=\(fallbackX), y=\(fallbackY), size=\(size)")
+            print("[TypeFlow] Caret bounds failed, falling back to element bottom-left (offset): x=\(fallbackX), y=\(fallbackY), size=\(size), textLength=\(textLength)")
             return CGRect(x: fallbackX, y: fallbackY, width: 0, height: 15)
         }
         

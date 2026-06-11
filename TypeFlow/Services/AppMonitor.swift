@@ -26,5 +26,18 @@ class AppMonitor {
         if config.isEnabled {
             LLMEngine.shared.prewarmCache(toneProfile: config.toneProfile)
         }
+        
+        let lowerBundleId = bundleId.lowercased()
+        if lowerBundleId.contains("chrome") || lowerBundleId.contains("safari") || lowerBundleId.contains("zen") || lowerBundleId.contains("firefox") || lowerBundleId.contains("edge") || lowerBundleId.contains("brave") {
+            enableBrowserAccessibility(for: app.processIdentifier)
+        }
+    }
+    
+    private func enableBrowserAccessibility(for pid: pid_t) {
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 1.0)
+        AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        print("[TypeFlow-Debug] AppMonitor: Enabled enhanced accessibility for browser PID \(pid)")
     }
 }

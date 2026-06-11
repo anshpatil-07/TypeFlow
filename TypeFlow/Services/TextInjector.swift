@@ -80,11 +80,13 @@ class TextInjector {
             if let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
                 keyDownEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
                 keyDownEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
+                keyDownEvent.flags = [] // Clear all modifiers
                 keyDownEvent.post(tap: .cgSessionEventTap)
             }
             if let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
                 keyUpEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
                 keyUpEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
+                keyUpEvent.flags = [] // Clear all modifiers
                 keyUpEvent.post(tap: .cgSessionEventTap)
             }
         }
@@ -121,10 +123,12 @@ class TextInjector {
         for _ in 0..<count {
             if let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: true) {
                 keyDownEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
+                keyDownEvent.flags = [] // Clear all modifiers
                 keyDownEvent.post(tap: .cgSessionEventTap)
             }
             if let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: false) {
                 keyUpEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
+                keyUpEvent.flags = [] // Clear all modifiers
                 keyUpEvent.post(tap: .cgSessionEventTap)
             }
         }
