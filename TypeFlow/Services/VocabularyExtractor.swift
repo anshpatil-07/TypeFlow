@@ -6,6 +6,7 @@ class VocabularyExtractor {
     private var vocabulary: [String] = []
     private let fileURL: URL
     private var timer: Timer?
+    private var lastExtractionHistoryCount: Int = -1
     
     private init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -45,6 +46,12 @@ class VocabularyExtractor {
             return
         }
         
+        // Throttle: Only run extraction if the history has actually added new sentences
+        guard history.count != lastExtractionHistoryCount else {
+            print("[TypeFlow-Debug] VocabularyExtractor: History count unchanged (\(history.count)), skipping extraction to preserve cache stability")
+            return
+        }
+        
         print("[TypeFlow-Debug] VocabularyExtractor: Starting vocabulary extraction on \(history.count) history sentences...")
         let stopwords: Set<String> = [
             "the", "and", "a", "of", "to", "in", "is", "you", "that", "it", 
@@ -80,10 +87,14 @@ class VocabularyExtractor {
             .sorted { $0.value > $1.value }
             .map { $0.key }
         
-        let topWords = Array(sortedWords.prefix(15))
+        // Force alphabetical sorting so the prompt string is strictly deterministic.
+        // If sorting only by frequency, words with identical frequencies will randomly
+        // swap positions on every extraction, which immediately breaks the LLM LCP cache.
+        let topWords = Array(sortedWords.prefix(15)).sorted()
         
         DispatchQueue.main.async {
             self.vocabulary = topWords
+            self.lastExtractionHistoryCount = history.count
             self.saveVocabulary()
             print("[TypeFlow-Debug] VocabularyExtractor: Successfully extracted \(topWords.count) vocabulary words: \(topWords)")
         }
