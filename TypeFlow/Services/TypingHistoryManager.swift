@@ -72,6 +72,18 @@ class TypingHistoryManager {
         let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         
+        let words = trimmed.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        guard words.count >= 3 else {
+            print("[TypeFlow-Debug] TypingHistoryManager: Skipping short sentence (< 3 words): '\(trimmed)'")
+            return
+        }
+        
+        let avgWordLength = words.reduce(0) { $0 + $1.count } / words.count
+        guard avgWordLength >= 2 else {
+            print("[TypeFlow-Debug] TypingHistoryManager: Skipping likely gibberish testing string: '\(trimmed)'")
+            return
+        }
+        
         // Don't add duplicate adjacent sentences
         if history.last == trimmed {
             print("[TypeFlow-Debug] TypingHistoryManager: Skipping duplicate adjacent sentence: '\(trimmed)'")
@@ -118,8 +130,16 @@ class TypingHistoryManager {
         }
     }
     
+    
     func getHistory() -> [String] {
         return history
+    }
+    
+    func clearHistory() {
+        history.removeAll()
+        saveHistory()
+        print("[TypeFlow-Debug] TypingHistoryManager: History cleared.")
+        VocabularyExtractor.shared.extractVocabulary()
     }
     
     func getRelevantSamples(for text: String, count: Int) -> [String] {

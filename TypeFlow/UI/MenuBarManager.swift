@@ -36,6 +36,9 @@ class MenuBarManager {
         
         menu.addItem(NSMenuItem(title: "Dashboard...", action: #selector(openDashboard), keyEquivalent: "d"))
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Clear Typing History", action: #selector(clearHistory), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         
         // Use standard actions
@@ -82,6 +85,17 @@ class MenuBarManager {
         dashboardWindow?.contentView = NSHostingView(rootView: DashboardView())
         NSApp.activate(ignoringOtherApps: true)
         dashboardWindow?.makeKeyAndOrderFront(nil)
+    }
+    
+    @objc func clearHistory() {
+        TypingHistoryManager.shared.clearHistory()
+        let alert = NSAlert()
+        alert.messageText = "Typing History Cleared"
+        alert.informativeText = "Your local typing history database has been successfully purged."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
     
     @objc func quit() {
