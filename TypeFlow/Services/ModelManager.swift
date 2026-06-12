@@ -12,6 +12,8 @@ enum ModelStatus: String, Codable {
 struct MLXModel: Identifiable, Codable {
     var id: String
     var name: String
+    var sizeGB: Double?
+    var description: String?
     var status: ModelStatus
     var progress: Double
     var isCustom: Bool = false
@@ -27,13 +29,11 @@ class ModelManager: ObservableObject {
     @AppStorage("customModelsData") private var customModelsData: Data = Data()
     
     let recommendedModels: [MLXModel] = [
-        MLXModel(id: "mlx-community/gemma-4-E4B-it-4bit", name: "Gemma 4 E4B (4-bit)", status: .notDownloaded, progress: 0.0),
-        MLXModel(id: "mlx-community/gemma-4-12B-it-4bit", name: "Gemma 4 12B (4-bit)", status: .notDownloaded, progress: 0.0),
-        MLXModel(id: "mlx-community/Meta-Llama-3-8B-Instruct-4bit", name: "Llama 3 8B (4-bit)", status: .notDownloaded, progress: 0.0),
-        MLXModel(id: "mlx-community/Phi-3-mini-4k-instruct-4bit", name: "Phi-3 Mini (4-bit)", status: .notDownloaded, progress: 0.0),
-        MLXModel(id: "mlx-community/Qwen2.5-1.5B-Instruct-4bit", name: "Qwen 2.5 1.5B (4-bit)", status: .notDownloaded, progress: 0.0),
-        MLXModel(id: "mlx-community/Qwen2.5-7B-Instruct-4bit", name: "Qwen 2.5 7B (4-bit)", status: .notDownloaded, progress: 0.0),
-        MLXModel(id: "mlx-community/Mistral-7B-Instruct-v0.3-4bit", name: "Mistral v0.3 7B (4-bit)", status: .notDownloaded, progress: 0.0)
+        MLXModel(id: "mlx-community/Qwen2.5-0.5B-Instruct-4bit", name: "Qwen 2.5 0.5B (4-bit)", sizeGB: 0.5, description: "Lightning fast, ideal for instant autocomplete on older Macs.", status: .notDownloaded, progress: 0.0),
+        MLXModel(id: "mlx-community/Qwen2.5-1.5B-Instruct-4bit", name: "Qwen 2.5 1.5B (4-bit)", sizeGB: 1.1, description: "Great balance of speed and intelligence for everyday typing.", status: .notDownloaded, progress: 0.0),
+        MLXModel(id: "mlx-community/Phi-3-mini-4k-instruct-4bit", name: "Phi-3 Mini (4-bit)", sizeGB: 2.3, description: "Strong reasoning capabilities, good for code and logic.", status: .notDownloaded, progress: 0.0),
+        MLXModel(id: "mlx-community/gemma-4-E4B-it-4bit", name: "Gemma 4 E4B (4-bit)", sizeGB: 2.8, description: "Google's latest efficient model. High quality completions.", status: .notDownloaded, progress: 0.0),
+        MLXModel(id: "mlx-community/gemma-3-4b-it-qat-4bit", name: "Gemma 3 4B (4-bit)", sizeGB: 3.2, description: "Previous generation Gemma, very reliable formatting.", status: .notDownloaded, progress: 0.0)
     ]
     
     init() {
@@ -87,13 +87,11 @@ class ModelManager: ObservableObject {
         
         Task {
             do {
-                // Try using HubApi to snapshot the repo.
-                // We don't have granular byte progress from the static Hub.snapshot in MLX,
-                // so we rely on the indeterminate downloading state.
                 let _ = try await Hub.snapshot(from: id) { progress in
                     Task { @MainActor in
-                        // We could use progress.fractionCompleted if it was accurate for the whole repo,
-                        // but it's often per-file or indeterminate. We just keep it running.
+                        if let newIndex = self.models.firstIndex(where: { $0.id == id }) {
+                            self.models[newIndex].progress = progress.fractionCompleted
+                        }
                     }
                 }
                 
