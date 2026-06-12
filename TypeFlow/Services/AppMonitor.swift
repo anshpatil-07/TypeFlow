@@ -22,6 +22,13 @@ class AppMonitor {
         
         print("[TypeFlow-Debug] AppMonitor: Activated app '\(bundleId)'")
         
+        DispatchQueue.main.async {
+            CompletionManager.shared.cancelInflightTasks()
+            CompletionManager.shared.hideOverlay()
+            CompletionManager.shared.clearCompletion()
+            CompletionManager.shared.accessibilityMonitor?.clearKeystrokeBuffer()
+        }
+        
         UniversalContextManager.shared.refreshContext()
         ScreenContextManager.shared.performOCROnDemand()
         

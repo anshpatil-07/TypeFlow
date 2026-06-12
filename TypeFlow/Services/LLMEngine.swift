@@ -29,12 +29,10 @@ class LLMEngine {
     private var loadError: Error?
     private var currentLoadedModelId: String?
     
-    private var cachedTokens: [Int] = []
-    private var kvCache: [KVCache]?
-    /// Stable cache key: tone-id + personalization flag, updated only when settings change.
-    /// Changing the typing context (buffer clear) does NOT invalidate this key — only
-    /// tone swaps or personalization toggle do, which actually alter the system prefix.
-    private var cachedPrefixSettingsKey: String = ""
+    /// The persistent base KV cache containing only the frozen system prefix.
+    private var baseKVCache: [KVCache]?
+    /// The exact string used to generate baseKVCache. If the string changes, we rebuild.
+    private var cachedPrefixString: String = ""
     private var inactivityTimer: Timer?
     
     
@@ -55,10 +53,9 @@ class LLMEngine {
     
     /// Explicitly invalidate the KV cache — call only when tone or personalization changes.
     func invalidateKVCache() {
-        kvCache = nil
-        cachedTokens = []
-        cachedPrefixSettingsKey = ""
-        print("[TypeFlow-Debug] LLMEngine: KV cache explicitly invalidated (settings change)")
+        baseKVCache = nil
+        cachedPrefixString = ""
+        print("[TypeFlow-Debug] LLMEngine: KV cache explicitly invalidated")
     }
 
     private init() {
@@ -98,9 +95,13 @@ class LLMEngine {
         return availableBytes >= twoGB
     }
     
-    /// Pre-warm the cache when the active app changes so zero-latency can be achieved
+    /// Pre-warm the cache when the active app changes so zero-latency can be achieved.
+    /// Also invalidates the frozen prefix in PromptBuilder so the new app context
+    /// is picked up on the first keystroke in the new application.
     func prewarmCache(toneProfile: ToneProfile) {
         print("[TypeFlow-Debug] LLMEngine: Pre-warming cache for tone \(toneProfile.name)")
+        // App has switched — force a fresh prefix so the new appTitle is baked in.
+        PromptBuilder.shared.invalidateFrozenPrefix()
         Task {
             await loadModelIfNeeded()
             resetInactivityTimer()
@@ -112,27 +113,24 @@ class LLMEngine {
                 guard let self = self else { return "" }
                 do {
                     let staticPrefixPrompt = PromptBuilder.shared.buildStaticPrefix(systemInstructions: toneProfile.systemInstructions)
-                    let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)|\(SettingsManager.shared.useBritishEnglish)"
                     
-                    if self.kvCache == nil || self.cachedPrefixSettingsKey != settingsKey {
-                        print("[TypeFlow-Debug] LLMEngine: Pre-warm cache miss — rebuilding static KV prefix...")
+                    if self.baseKVCache == nil || self.cachedPrefixString != staticPrefixPrompt {
+                        print("[TypeFlow-Debug] LLMEngine: Pre-warm cache miss — rebuilding base KV prefix...")
                         
-                        let prefixInput = UserInput(prompt: staticPrefixPrompt)
-                        let prefixPrepared = try await modelContext.processor.prepare(input: prefixInput)
-                        let prefixTokens = prefixPrepared.text.tokens.asArray(Int.self)
-                        
-                        self.cachedPrefixSettingsKey = settingsKey
+                        let prefixTokens = modelContext.tokenizer.encode(text: staticPrefixPrompt)
                         
                         let newCache = modelContext.model.newCache(parameters: nil)
-                        let prefixMLXTokens = MLXArray(prefixTokens)
-                        _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
-                        eval(newCache)
+                        if !prefixTokens.isEmpty {
+                            let prefixMLXTokens = MLXArray(prefixTokens)
+                            _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
+                            eval(newCache)
+                        }
                         
-                        self.kvCache = newCache
-                        self.cachedTokens = prefixTokens
-                        print("[TypeFlow-Debug] LLMEngine: Pre-warm complete with \(self.cachedTokens.count) tokens.")
+                        self.baseKVCache = newCache
+                        self.cachedPrefixString = staticPrefixPrompt
+                        print("[TypeFlow-Debug] LLMEngine: Pre-warm complete with \(prefixTokens.count) tokens.")
                     } else {
-                        print("[TypeFlow-Debug] LLMEngine: Pre-warm cache hit — reusing KV prefix.")
+                        print("[TypeFlow-Debug] LLMEngine: Pre-warm cache hit — reusing base KV prefix.")
                     }
                 } catch {
                     print("[TypeFlow-Debug] LLMEngine: Pre-warm Error in inner do block: \(error)")
@@ -165,6 +163,12 @@ class LLMEngine {
             return ""
         }
         
+        // If the user just cleared the active line buffer, the frozen prefix must be
+        // regenerated so any stale vocabulary / OCR snapshots are discarded.
+        if textBeforeCaret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            PromptBuilder.shared.invalidateFrozenPrefix()
+        }
+
         do {
             let result = try await container.perform { [weak self] modelContext -> String in
                 guard let self = self else { return "" }
@@ -173,96 +177,43 @@ class LLMEngine {
                     let suffixPrompt = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret)
                     let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(systemInstructions: toneProfile.systemInstructions)
                     
-                    let fullPrompt = dynamicPrefixPrompt + suffixPrompt
-                    let fullTokens = modelContext.tokenizer.encode(text: fullPrompt)
-                    
-                    let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)|\(SettingsManager.shared.useBritishEnglish)"
-                    
-                    // Invalidate ONLY when tone/personalization settings change.
-                    if self.cachedPrefixSettingsKey != settingsKey {
-                        print("[TypeFlow-Debug] LLMEngine: Cache miss — settings changed. Clearing KV cache.")
-                        self.kvCache = nil
-                        self.cachedTokens = []
-                        self.cachedPrefixSettingsKey = settingsKey
-                    }
-                    
-                    if self.kvCache == nil {
-                        self.kvCache = modelContext.model.newCache(parameters: nil)
-                        self.cachedTokens = []
-                    }
-                    
-                    guard var cache = self.kvCache else {
-                        throw KVCacheError(message: "Failed to resolve KV cache")
-                    }
-                    
-                    // LCP (Longest Common Prefix) Match
-                    var lcpIndex = 0
-                    let maxLen = min(self.cachedTokens.count, fullTokens.count)
-                    while lcpIndex < maxLen && self.cachedTokens[lcpIndex] == fullTokens[lcpIndex] {
-                        lcpIndex += 1
-                    }
-                    
-                    if lcpIndex < 50 && !self.cachedTokens.isEmpty {
-                        let startIdx = max(0, lcpIndex - 5)
-                        let endCached = min(self.cachedTokens.count - 1, lcpIndex + 15)
-                        let endNew = min(fullTokens.count - 1, lcpIndex + 15)
+                    if self.baseKVCache == nil || self.cachedPrefixString != dynamicPrefixPrompt {
+                        print("[TypeFlow-Debug] LLMEngine: Base cache miss — rebuilding KV prefix...")
                         
-                        if startIdx <= endCached && startIdx <= endNew {
-                            let cachedDivergent = Array(self.cachedTokens[startIdx...endCached])
-                            let newDivergent = Array(fullTokens[startIdx...endNew])
-                            
-                            // The tokenizer decode function isn't directly exposed on UserInputProcessor,
-                            // so we dump the raw token IDs. We can cross-reference these IDs against the tokenizer
-                            // locally to see exactly what dynamic text is breaking the LCP cache.
-                            let cachedStr = "\(cachedDivergent)"
-                            let newStr = "\(newDivergent)"
-                            
-                            print("[TypeFlow-Debug] LLMEngine: LCP match suspiciously low (\(lcpIndex)). Dumping divergence:")
-                            print("[TypeFlow-Debug] LLMEngine: Cached context near break: '\(cachedStr)'")
-                            print("[TypeFlow-Debug] LLMEngine: New context near break:    '\(newStr)'")
+                        let prefixTokens = modelContext.tokenizer.encode(text: dynamicPrefixPrompt)
+                        let newCache = modelContext.model.newCache(parameters: nil)
+                        
+                        if !prefixTokens.isEmpty {
+                            let prefixMLXTokens = MLXArray(prefixTokens)
+                            _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
+                            eval(newCache)
                         }
-                    }
-                    
-                    // Trim cache back to the divergence point
-                    let currentCacheSize = cache[0].offset
-                    let tokensToTrim = currentCacheSize - lcpIndex
-                    if tokensToTrim > 0 {
-                        if canTrimPromptCache(cache) {
-                            print("[TypeFlow-Debug] LLMEngine: LCP match is \(lcpIndex) tokens. Trimming \(tokensToTrim) divergent/generated tokens from cache...")
-                            trimPromptCache(cache, numTokens: tokensToTrim)
-                            if lcpIndex < self.cachedTokens.count {
-                                self.cachedTokens = Array(self.cachedTokens.prefix(lcpIndex))
-                            }
-                        } else {
-                            print("[TypeFlow-Debug] LLMEngine: Cache is not trimmable. Resetting cache.")
-                            self.kvCache = nil
-                            self.cachedTokens = []
-                            
-                            let newCache = modelContext.model.newCache(parameters: nil)
-                            self.kvCache = newCache
-                            cache = newCache
-                            lcpIndex = 0
-                        }
+                        self.baseKVCache = newCache
+                        self.cachedPrefixString = dynamicPrefixPrompt
+                        print("[TypeFlow-Debug] LLMEngine: Base cache rebuilt with \(prefixTokens.count) tokens.")
                     } else {
-                        print("[TypeFlow-Debug] LLMEngine: Cache hit — reusing \(lcpIndex) tokens.")
+                        print("[TypeFlow-Debug] LLMEngine: Base cache hit — cloning prefix.")
                     }
                     
-                    // Suffix tokens to evaluate are everything from lcpIndex onwards
-                    let suffixTokens = Array(fullTokens[lcpIndex...])
+                    guard let baseCache = self.baseKVCache else {
+                        throw KVCacheError(message: "Failed to resolve base KV cache")
+                    }
+                    
+                    // Suffix tokens to evaluate
+                    let suffixTokens = modelContext.tokenizer.encode(text: suffixPrompt)
                     guard !suffixTokens.isEmpty else {
                         print("[TypeFlow-Debug] LLMEngine: No suffix tokens to generate, returning empty string.")
                         return ""
                     }
                     
-                    // Copy cache to avoid contamination with generated tokens
-                    let generatorCache = cache.map { $0.copy() }
-                    
+                    // Clone the base cache to avoid contamination with generated/suffix tokens
+                    let generatorCache = baseCache.map { $0.copy() }
                     let suffixInput = LMInput(tokens: MLXArray(suffixTokens))
                     
-                    print("[TypeFlow-Debug] LLMEngine: Starting generate stream with suffix tokens count: \(suffixTokens.count)...")
+                    print("[TypeFlow-Debug] LLMEngine: Starting generate stream with \(suffixTokens.count) suffix tokens...")
                     let isClipboard = PromptBuilder.shared.hasClipboardTrigger(textBeforeCaret: textBeforeCaret)
                     let activeMaxTokens = isClipboard ? 150 : toneProfile.maxTokens
-                    let params = GenerateParameters(maxTokens: activeMaxTokens, temperature: Float(toneProfile.temperature))
+                    let params = GenerateParameters(maxTokens: activeMaxTokens, temperature: Float(toneProfile.temperature), repetitionPenalty: 1.15)
                     
                     let stream = try MLXLMCommon.generate(
                         input: suffixInput,
@@ -271,25 +222,29 @@ class LLMEngine {
                         context: modelContext
                     )
                     
-                    // Evaluate suffix tokens on original cache synchronously so it's ready for the next keystroke
-                    let suffixMLXTokens = MLXArray(suffixTokens)
-                    _ = modelContext.model(suffixMLXTokens[.newAxis], cache: cache)
-                    eval(cache)
-                    self.cachedTokens = fullTokens
-                    
                     var outputText = ""
-                    let stopTokens = ["<end_of_turn>", "<start_of_turn>", "<eos>", "</completion>"]
-                    
+                    // Stop-token list — covers every Gemma 4 control-tag variant
+                    // including the closing-slash forms that leak as raw text.
+                    let stopTokens = [
+                        "<end_of_turn>",
+                        "</end_of_turn>",
+                        "<start_of_turn>",
+                        "</start_of_turn>",
+                        "<eos>",
+                        "</s>",
+                        "</completion>"
+                    ]
+
                     for await generation in stream {
                         if case .chunk(let text) = generation {
                             outputText += text
                             print("[TypeFlow-Debug] LLMEngine Chunk: '\(text)'")
-                            
+
                             var shouldStop = false
                             for token in stopTokens {
                                 if let range = outputText.range(of: token) {
                                     outputText = String(outputText[..<range.lowerBound])
-                                    print("[TypeFlow-Debug] LLMEngine: Found stop token \(token), stopping generation.")
+                                    print("[TypeFlow-Debug] LLMEngine: Found stop token '\(token)', halting stream.")
                                     shouldStop = true
                                     break
                                 }
@@ -405,7 +360,15 @@ class LLMEngine {
                 )
                 
                 var outputText = ""
-                let stopTokens = ["<end_of_turn>", "<start_of_turn>", "<eos>", "</completion>"]
+                let stopTokens = [
+                    "<end_of_turn>",
+                    "</end_of_turn>",
+                    "<start_of_turn>",
+                    "</start_of_turn>",
+                    "<eos>",
+                    "</s>",
+                    "</completion>"
+                ]
                 
                 for await generation in stream {
                     if case .chunk(let text) = generation {
@@ -474,7 +437,15 @@ class LLMEngine {
                 )
                 
                 var outputText = ""
-                let stopTokens = ["<end_of_turn>", "<start_of_turn>", "<eos>", "</completion>"]
+                let stopTokens = [
+                    "<end_of_turn>",
+                    "</end_of_turn>",
+                    "<start_of_turn>",
+                    "</start_of_turn>",
+                    "<eos>",
+                    "</s>",
+                    "</completion>"
+                ]
                 
                 for await generation in stream {
                     if case .chunk(let text) = generation {

@@ -3,6 +3,13 @@ import Combine
 import SwiftUI
 import Hub
 
+/// How well a model fits TypeFlow's <150 ms instant-completion target.
+enum ModelSpeedTier: String, Codable {
+    case instant    // ≤1.5 GB  — reliably < 150 ms on Apple Silicon
+    case good       // ≤3 GB   — typically 150-400 ms, acceptable
+    case borderline // >3 GB   — may exceed 400 ms; shown greyed
+}
+
 enum ModelStatus: String, Codable {
     case notDownloaded
     case downloading
@@ -14,12 +21,31 @@ struct MLXModel: Identifiable, Codable {
     var name: String
     var sizeGB: Double?
     var description: String?
+    var speedTier: ModelSpeedTier
     var status: ModelStatus
     var progress: Double
     var isCustom: Bool = false
-    
+
     var isDownloaded: Bool {
         return status == .downloaded
+    }
+
+    /// Label shown in the UI badge.
+    var speedLabel: String {
+        switch speedTier {
+        case .instant:    return "⚡ Instant"
+        case .good:       return "✓ Good"
+        case .borderline: return "⚠ Slow"
+        }
+    }
+
+    /// Accent colour for the speed badge.
+    var speedColor: Color {
+        switch speedTier {
+        case .instant:    return Color(hue: 0.38, saturation: 0.72, brightness: 0.55)
+        case .good:       return Color(hue: 0.58, saturation: 0.65, brightness: 0.60)
+        case .borderline: return Color(hue: 0.08, saturation: 0.75, brightness: 0.60)
+        }
     }
 }
 
@@ -27,13 +53,64 @@ struct MLXModel: Identifiable, Codable {
 class ModelManager: ObservableObject {
     @Published var models: [MLXModel] = []
     @AppStorage("customModelsData") private var customModelsData: Data = Data()
-    
+
+    // ── Curated list — only models proven capable of real-time autocomplete ──
+    // Rule: instant ≤ 1.5 GB · good ≤ 3 GB · borderline > 3 GB (shown but warned)
     let recommendedModels: [MLXModel] = [
-        MLXModel(id: "mlx-community/Qwen2.5-0.5B-Instruct-4bit", name: "Qwen 2.5 0.5B (4-bit)", sizeGB: 0.5, description: "Lightning fast, ideal for instant autocomplete on older Macs.", status: .notDownloaded, progress: 0.0),
-        MLXModel(id: "mlx-community/Qwen2.5-1.5B-Instruct-4bit", name: "Qwen 2.5 1.5B (4-bit)", sizeGB: 1.1, description: "Great balance of speed and intelligence for everyday typing.", status: .notDownloaded, progress: 0.0),
-        MLXModel(id: "mlx-community/Phi-3-mini-4k-instruct-4bit", name: "Phi-3 Mini (4-bit)", sizeGB: 2.3, description: "Strong reasoning capabilities, good for code and logic.", status: .notDownloaded, progress: 0.0),
-        MLXModel(id: "mlx-community/gemma-4-E4B-it-4bit", name: "Gemma 4 E4B (4-bit)", sizeGB: 2.8, description: "Google's latest efficient model. High quality completions.", status: .notDownloaded, progress: 0.0),
-        MLXModel(id: "mlx-community/gemma-3-4b-it-qat-4bit", name: "Gemma 3 4B (4-bit)", sizeGB: 3.2, description: "Previous generation Gemma, very reliable formatting.", status: .notDownloaded, progress: 0.0)
+        MLXModel(
+            id: "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+            name: "Qwen 2.5 0.5B",
+            sizeGB: 0.5,
+            description: "Tiny footprint, blazing speed. Best for older Macs or anyone who needs completions to feel instantaneous. Lower quality on complex sentences.",
+            speedTier: .instant,
+            status: .notDownloaded,
+            progress: 0.0
+        ),
+        MLXModel(
+            id: "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+            name: "Qwen 2.5 1.5B",
+            sizeGB: 1.1,
+            description: "Sweet spot for instant completions. Reliably under 150 ms on M1/M2/M3. Recommended for most users.",
+            speedTier: .instant,
+            status: .notDownloaded,
+            progress: 0.0
+        ),
+        MLXModel(
+            id: "mlx-community/gemma-3-1b-it-qat-4bit",
+            name: "Gemma 3 1B",
+            sizeGB: 0.7,
+            description: "Google's compact Gemma 3 model. Extremely fast with solid language quality. Great for everyday prose.",
+            speedTier: .instant,
+            status: .notDownloaded,
+            progress: 0.0
+        ),
+        MLXModel(
+            id: "mlx-community/Phi-3-mini-4k-instruct-4bit",
+            name: "Phi-3 Mini",
+            sizeGB: 2.3,
+            description: "Microsoft's Phi-3 Mini. Strong reasoning and code completion. Slightly slower — best on M2 Pro or better.",
+            speedTier: .good,
+            status: .notDownloaded,
+            progress: 0.0
+        ),
+        MLXModel(
+            id: "mlx-community/gemma-4-E4B-it-4bit",
+            name: "Gemma 4 E4B",
+            sizeGB: 2.8,
+            description: "Google's latest efficient Gemma 4 model. High-quality completions. Best on M2 Pro or M3 with 16 GB+ RAM.",
+            speedTier: .good,
+            status: .notDownloaded,
+            progress: 0.0
+        ),
+        MLXModel(
+            id: "mlx-community/gemma-3-4b-it-qat-4bit",
+            name: "Gemma 3 4B",
+            sizeGB: 3.2,
+            description: "Previous-generation Gemma 4B. Reliable formatting but noticeably slower. May exceed 400 ms on M1 base. Not recommended for real-time autocomplete.",
+            speedTier: .borderline,
+            status: .notDownloaded,
+            progress: 0.0
+        ),
     ]
     
     init() {
@@ -66,7 +143,7 @@ class ModelManager: ObservableObject {
         let cleanId = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanId.isEmpty, !models.contains(where: { $0.id == cleanId }) else { return }
         
-        let newModel = MLXModel(id: cleanId, name: cleanId, status: .notDownloaded, progress: 0.0, isCustom: true)
+        let newModel = MLXModel(id: cleanId, name: cleanId, speedTier: .good, status: .notDownloaded, progress: 0.0, isCustom: true)
         models.append(newModel)
         saveCustomModels()
         downloadModel(id: cleanId)
