@@ -175,98 +175,51 @@ struct ModelsSettingsView: View {
     @StateObject var modelManager = ModelManager()
     @ObservedObject var settings = SettingsManager.shared
     @State private var newModelId: String = ""
-    
+    @State private var infoPopoverModelId: String? = nil
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Recommended Models")
-                .font(.headline)
-                .padding(.horizontal, 40)
-                .padding(.top, 40)
-            
+        VStack(alignment: .leading, spacing: 0) {
+
+            // ── Header ─────────────────────────────────────────────────────────
+            VStack(alignment: .leading, spacing: 4) {
+                Text("AI Models")
+                    .font(.title2).bold()
+                Text("Only models rated ⚡ Instant or ✓ Good are suitable for TypeFlow's <150 ms real-time target.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 40)
+            .padding(.top, 36)
+            .padding(.bottom, 16)
+
+            Divider()
+
+            // ── Model list ─────────────────────────────────────────────────────
             ScrollView {
                 VStack(spacing: 0) {
                     ForEach(modelManager.models) { model in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(model.name)
-                                        .font(.body)
-                                        .bold()
-                                    
-                                    if let desc = model.description {
-                                        Image(systemName: "info.circle")
-                                            .foregroundColor(.secondary)
-                                            .help(desc)
-                                    }
-                                }
-                                
-                                if let size = model.sizeGB {
-                                    Text("\(String(format: "%.1f", size)) GB")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            
-                            Spacer()
-                            
-                            if settings.activeModelId == model.id {
-                                Text("Active")
-                                    .foregroundColor(.green)
-                                    .font(.subheadline)
-                                    .padding(.trailing, 8)
-                            } else if model.status == .downloaded {
-                                Button("Activate") {
-                                    modelManager.activateModel(id: model.id)
-                                }
-                            }
-                            
-                            if model.status == .notDownloaded {
-                                Button("Download") {
-                                    modelManager.downloadModel(id: model.id)
-                                }
-                            } else if model.status == .downloading {
-                                VStack(alignment: .trailing, spacing: 2) {
-                                    ProgressView(value: model.progress)
-                                        .progressViewStyle(LinearProgressViewStyle())
-                                        .frame(width: 80)
-                                    Text("\(Int(model.progress * 100))%")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                                .padding(.horizontal, 4)
-                            }
-                            
-                            if model.status == .downloaded && settings.activeModelId != model.id {
-                                Button(action: { modelManager.deleteModel(id: model.id) }) {
-                                    Image(systemName: "trash")
-                                }
-                                .buttonStyle(BorderlessButtonStyle())
-                                .foregroundColor(.red)
-                                .padding(.leading, 4)
-                            }
-                        }
-                        .padding(.vertical, 12)
-                        
-                        Divider()
+                        modelRow(model)
+                        Divider().opacity(0.5)
                     }
                 }
                 .padding(.horizontal, 40)
             }
-            .frame(maxHeight: 280)
-            
-            Spacer()
-            
-            VStack(alignment: .leading, spacing: 12) {
+            .frame(maxHeight: 320)
+
+            Divider()
+
+            // ── Custom model ───────────────────────────────────────────────────
+            VStack(alignment: .leading, spacing: 10) {
                 Text("Custom Model")
                     .font(.headline)
                 Text("Paste an MLX Community Hugging Face Repo ID (e.g. mlx-community/SmolLM-135M-Instruct-4bit)")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                
-                HStack {
+
+                HStack(spacing: 10) {
                     TextField("Repo ID", text: $newModelId)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
-                    
+
                     Button("Download & Set Active") {
                         modelManager.addCustomModel(id: newModelId)
                         modelManager.activateModel(id: newModelId)
@@ -276,10 +229,152 @@ struct ModelsSettingsView: View {
                 }
             }
             .padding(.horizontal, 40)
-            .padding(.bottom, 40)
+            .padding(.vertical, 24)
+        }
+    }
+
+    // MARK: - Model Row
+
+    @ViewBuilder
+    private func modelRow(_ model: MLXModel) -> some View {
+        let isActive = settings.activeModelId == model.id
+        let isBorderline = model.speedTier == .borderline
+
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 10) {
+
+                // ── Left: name + badges ────────────────────────────────────────
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(model.name)
+                            .font(.body).bold()
+                            .foregroundColor(isBorderline ? .secondary : .primary)
+
+                        // Speed tier badge
+                        Text(model.speedLabel)
+                            .font(.system(size: 10, weight: .semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(model.speedColor.opacity(0.18))
+                            .foregroundColor(model.speedColor)
+                            .clipShape(Capsule())
+
+                        // Info popover button
+                        if model.description != nil {
+                            Button {
+                                infoPopoverModelId = (infoPopoverModelId == model.id) ? nil : model.id
+                            } label: {
+                                Image(systemName: "info.circle")
+                                    .foregroundColor(.secondary)
+                                    .font(.system(size: 12))
+                            }
+                            .buttonStyle(BorderlessButtonStyle())
+                            .popover(isPresented: Binding(
+                                get: { infoPopoverModelId == model.id },
+                                set: { if !$0 { infoPopoverModelId = nil } }
+                            ), arrowEdge: .bottom) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(model.name).font(.headline)
+                                    if let desc = model.description {
+                                        Text(desc)
+                                            .font(.body)
+                                            .foregroundColor(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                                .padding(14)
+                                .frame(maxWidth: 260)
+                            }
+                        }
+                    }
+
+                    // Size label
+                    if let size = model.sizeGB {
+                        Text(String(format: "%.1f GB", size))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                // ── Right: action buttons ──────────────────────────────────────
+                HStack(spacing: 8) {
+                    if isActive {
+                        Label("Active", systemImage: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .font(.subheadline)
+                    } else if model.status == .downloaded {
+                        Button("Activate") {
+                            modelManager.activateModel(id: model.id)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
+                    if model.status == .notDownloaded {
+                        Button("Download") {
+                            modelManager.downloadModel(id: model.id)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(isBorderline)   // discourage downloading slow models
+                        .help(isBorderline ? "This model is too large for real-time autocomplete. Use at your own risk." : "")
+                    }
+
+                    if model.status == .downloaded && !isActive {
+                        Button {
+                            modelManager.deleteModel(id: model.id)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(BorderlessButtonStyle())
+                        .foregroundColor(.red)
+                        .controlSize(.small)
+                    }
+                }
+            }
+            .padding(.vertical, 14)
+            .opacity(isBorderline ? 0.65 : 1.0)
+
+            // ── Full-width animated download progress bar ──────────────────────
+            if model.status == .downloading {
+                VStack(alignment: .trailing, spacing: 3) {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color.secondary.opacity(0.15))
+                                .frame(height: 5)
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [Color.accentColor, Color.accentColor.opacity(0.7)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .frame(width: geo.size.width * model.progress, height: 5)
+                                .animation(.linear(duration: 0.2), value: model.progress)
+                        }
+                    }
+                    .frame(height: 5)
+
+                    HStack {
+                        Text("Downloading…")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("\(Int(model.progress * 100))%")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.bottom, 10)
+            }
         }
     }
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tones Tab View

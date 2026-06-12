@@ -4,6 +4,19 @@ import Cocoa
 class PromptBuilder {
     static let shared = PromptBuilder()
     
+    // ── Frozen prefix cache ────────────────────────────────────────────────────
+    // The system prefix (everything up to and including <start_of_turn>model\n)
+    // MUST be byte-for-byte identical across every keystroke within the same
+    // sentence so the MLX KV cache achieves the maximum LCP match and avoids
+    // constant full-prefix re-evaluations.
+    //
+    // We freeze it after the first call and only invalidate when:
+    //   • the active application changes  (appTitle changes)
+    //   • the active line becomes empty   (new sentence started)
+    //   • tone / personalization settings change
+    private var frozenPrefix: String = ""
+    private var frozenPrefixKey: String = ""   // app|tone|personalization|british
+
     private init() {
         let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
         for word in lexicon {
@@ -24,20 +37,39 @@ class PromptBuilder {
         return buildPromptPrefix(systemInstructions: systemInstructions)
     }
     
+    /// Call this whenever the active app changes or the buffer is cleared so the
+    /// frozen prefix will be regenerated on the next keystroke.
+    func invalidateFrozenPrefix() {
+        frozenPrefix = ""
+        frozenPrefixKey = ""
+        print("[TypeFlow-Debug] PromptBuilder: Frozen prefix invalidated.")
+    }
+    
     func buildPromptPrefix(systemInstructions: String) -> String {
+        let context = UniversalContextManager.shared.latestContext
+        let personalizationActive = SettingsManager.shared.personalizationEnabled
+        let british = SettingsManager.shared.useBritishEnglish
+
+        // Stable key: only changes when settings/app change, NOT when the user types
+        let stableKey = "\(context.appTitle)|\(systemInstructions.hashValue)|\(personalizationActive)|\(british)"
+
+        if frozenPrefixKey == stableKey && !frozenPrefix.isEmpty {
+            // Return the frozen copy — guaranteed byte-for-byte identical
+            return frozenPrefix
+        }
+
+        // ── Build fresh prefix ─────────────────────────────────────────────────
         // === TURN 1: User gives instructions ===
         var prompt = "<start_of_turn>user\n"
         prompt += "You are a seamless text completion engine."
         
-        let context = UniversalContextManager.shared.latestContext
-        prompt += " Context: \(context.appTitle)"
-        if !context.screenKeywords.isEmpty {
-            prompt += ", \(context.screenKeywords.joined(separator: ", "))"
-        }
-        prompt += "."
+        // Snapshot context & vocabulary once and freeze them.
+        // Using appTitle only (no screenKeywords) keeps the prefix stable even
+        // when OCR keywords fluctuate during typing.
+        prompt += " Context: \(context.appTitle)."
         
-        let personalizationActive = SettingsManager.shared.personalizationEnabled
         if personalizationActive {
+            // Snapshot vocabulary at freeze time; it won't change mid-sentence.
             let vocab = VocabularyExtractor.shared.getVocabulary()
             if !vocab.isEmpty {
                 prompt += " Vocabulary: \(vocab.joined(separator: ", "))."
@@ -49,7 +81,8 @@ class PromptBuilder {
         }
         
         var finalInstructions = systemInstructions
-        if SettingsManager.shared.useBritishEnglish {
+        finalInstructions += " CRITICAL RULE: Do not simply copy or repeat the context or history verbatim. Generate a natural, novel continuation of the active text."
+        if british {
             finalInstructions += " Use British English spelling."
         }
         let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
@@ -58,9 +91,13 @@ class PromptBuilder {
         }
         prompt += " \(finalInstructions)<end_of_turn>\n"
         
-        // === TURN 2: Model turn — activeLine is prefilled here by buildPromptSuffix ===
+        // === TURN 2: Model turn — activeLine is prefilled by buildPromptSuffix ===
         prompt += "<start_of_turn>model\n"
-        
+
+        // Freeze and return
+        frozenPrefix = prompt
+        frozenPrefixKey = stableKey
+        print("[TypeFlow-Debug] PromptBuilder: Prefix frozen (\(prompt.count) chars, key=\(stableKey.prefix(40))).")
         return prompt
     }
     

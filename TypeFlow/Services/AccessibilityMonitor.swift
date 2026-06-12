@@ -126,8 +126,14 @@ class AccessibilityMonitor {
                     obj.clearKeystrokeBuffer()
                 }
             } else {
-                // Intra-app focus jitter (same PID) — suppress
-                print("[TypeFlow-Debug] AXObserver: intra-app focus change (PID \(newPID)), suppressing buffer clear")
+                // Intra-app focus jitter (same PID)
+                print("[TypeFlow-Debug] AXObserver: intra-app focus change (PID \(newPID)), clearing overlay & buffer")
+                DispatchQueue.main.async {
+                    CompletionManager.shared.cancelInflightTasks()
+                    CompletionManager.shared.hideOverlay()
+                    CompletionManager.shared.clearCompletion()
+                    obj.clearKeystrokeBuffer()
+                }
             }
         }, &observer)
         
@@ -210,7 +216,7 @@ class AccessibilityMonitor {
     var consumedKeyCodes: Set<Int64> = []
     
     func start() {
-        let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
+        let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.rightMouseDown.rawValue)
         eventTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
@@ -223,10 +229,22 @@ class AccessibilityMonitor {
                 
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 
-                if type == .keyDown || type == .keyUp {
-                    if let monitor = refcon {
-                        let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
-                        let obj = unmanaged.takeUnretainedValue()
+                if let monitor = refcon {
+                    let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
+                    let obj = unmanaged.takeUnretainedValue()
+                    
+                    // Clear ghost text and buffers immediately on any mouse click
+                    if type == .leftMouseDown || type == .rightMouseDown {
+                        DispatchQueue.main.async {
+                            CompletionManager.shared.cancelInflightTasks()
+                            CompletionManager.shared.hideOverlay()
+                            CompletionManager.shared.clearCompletion()
+                            obj.clearKeystrokeBuffer()
+                        }
+                        return Unmanaged.passRetained(event)
+                    }
+                    
+                    if type == .keyDown || type == .keyUp {
                         
                         // Rewrite Shortcut
                         if obj.matchesRewriteShortcut(event: event) {
@@ -562,6 +580,7 @@ class AccessibilityMonitor {
                     print("[TypeFlow-Debug] Return pressed. Logging keystroke buffer to history: '\(trimmed)'")
                     TypingHistoryManager.shared.logSentence(trimmed)
                 }
+                CompletionManager.shared.handleReturnPressed()
             }
             clearKeystrokeBuffer()
             lastDeletedWord = nil

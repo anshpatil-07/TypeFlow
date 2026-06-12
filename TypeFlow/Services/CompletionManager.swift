@@ -23,6 +23,8 @@ class CompletionManager: @unchecked Sendable {
     var consecutiveMisses = 0
     var backoffUntil: Date?
     
+    var isSuppressedUntilNextTyping = false
+    
     var isRewrite: Bool {
         return activeRewritePID != nil || activeRewriteText != nil
     }
@@ -229,6 +231,14 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
+        if isSuppressedUntilNextTyping {
+            let activeLine = bufferFallback.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !activeLine.isEmpty {
+                print("[TypeFlow-Debug] Resetting submission suppression flag on new keystroke.")
+                isSuppressedUntilNextTyping = false
+            }
+        }
+        
         // Clear existing completion immediately when user types
         clearCompletion()
         
@@ -372,6 +382,11 @@ class CompletionManager: @unchecked Sendable {
     }
     
     private func triggerGeneration(with text: String? = nil) {
+        if isSuppressedUntilNextTyping {
+            print("[TypeFlow-Debug] triggerGeneration aborted due to isSuppressedUntilNextTyping.")
+            return
+        }
+        
         print("[TypeFlow-Debug] triggerGeneration started. Cancelling any previous inflight task...")
         currentGenerationTask?.cancel()
         currentGenerationTask = nil
@@ -794,6 +809,17 @@ class CompletionManager: @unchecked Sendable {
         return false // Let the event pass through
     }
     
+    func cancelInflightTasks() {
+        currentGenerationTask?.cancel()
+        currentGenerationTask = nil
+        debounceTimer?.invalidate()
+        debounceTimer = nil
+    }
+    
+    func hideOverlay() {
+        overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false, isSmartReply: false, smartReplyOptions: [])
+    }
+
     func clearCompletion() {
         currentCompletion = nil
         activeSpellCorrection = nil
@@ -801,9 +827,29 @@ class CompletionManager: @unchecked Sendable {
         activeRewriteText = nil
         activeRewritePID = nil
         activeSmartReplyPID = nil
-        currentGenerationTask?.cancel()
-        currentGenerationTask = nil
-        overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false, isSmartReply: false, smartReplyOptions: [])
+        cancelInflightTasks()
+        hideOverlay()
+    }
+
+    func handleReturnPressed() {
+        // Wait slightly for the target app to process the Return key before polling AX API
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self = self else { return }
+            let textAfterReturn = self.accessibilityMonitor?.getTextBeforeCaret()
+            
+            if textAfterReturn == nil || textAfterReturn!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                print("[TypeFlow-Debug] Smart Submission Detected: Field is empty or lost focus after Return.")
+                self.isSuppressedUntilNextTyping = true
+                self.debounceTimer?.invalidate()
+                self.debounceTimer = nil
+                self.currentGenerationTask?.cancel()
+                self.currentGenerationTask = nil
+                self.overlayWindowController?.updateText("")
+                self.clearCompletion()
+            } else {
+                print("[TypeFlow-Debug] Multi-line Newline Detected. Not suppressing.")
+            }
+        }
     }
     
     private func hasWordBoundaryBeforeSuffix(activeLine: String, suffix: String) -> Bool {
