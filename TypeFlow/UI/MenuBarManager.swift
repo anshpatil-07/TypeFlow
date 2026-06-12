@@ -61,6 +61,8 @@ class MenuBarManager {
             window.styleMask.insert(.closable)
             window.styleMask.insert(.miniaturizable)
             window.styleMask.insert(.titled)
+            window.styleMask.remove(.resizable)
+            window.standardWindowButton(.zoomButton)?.isEnabled = false
             window.center()
             window.isReleasedWhenClosed = false
             self.settingsWindow = window

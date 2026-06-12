@@ -207,9 +207,10 @@ class AccessibilityMonitor {
     }
     
     private var isRunning: Bool { eventTap != nil }
+    var consumedKeyCodes: Set<Int64> = []
     
     func start() {
-        let eventMask = (1 << CGEventType.keyDown.rawValue)
+        let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
         eventTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
@@ -220,8 +221,54 @@ class AccessibilityMonitor {
                     return Unmanaged.passRetained(event)
                 }
                 
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                
+                if type == .keyDown || type == .keyUp {
+                    if let monitor = refcon {
+                        let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
+                        let obj = unmanaged.takeUnretainedValue()
+                        
+                        // Rewrite Shortcut
+                        if obj.matchesRewriteShortcut(event: event) {
+                            if type == .keyDown {
+                                print("[TypeFlow] Intercepted Rewrite Shortcut (keyDown) — triggering Rewrite selection")
+                                DispatchQueue.main.async {
+                                    CompletionManager.shared.triggerRewrite()
+                                }
+                            }
+                            return nil // Consume event (both keyDown and keyUp) to prevent leakage
+                        }
+                        
+                        // Smart Reply Shortcut (Cmd+Shift+R)
+                        let flags = event.flags
+                        let hasCmd = flags.contains(.maskCommand)
+                        let hasShift = flags.contains(.maskShift)
+                        let hasOption = flags.contains(.maskAlternate)
+                        let hasCtrl = flags.contains(.maskControl)
+                        if keyCode == 15 && hasCmd && hasShift && !hasOption && !hasCtrl {
+                            if type == .keyDown {
+                                print("[TypeFlow] Intercepted Cmd+Shift+R (keyDown) — triggering Smart Reply")
+                                DispatchQueue.main.async {
+                                    CompletionManager.shared.triggerSmartReply()
+                                }
+                            }
+                            return nil // Consume event
+                        }
+                        
+                        // Smart Reply String Match
+                        if obj.matchesSmartReplyShortcut(event: event) {
+                            if type == .keyDown {
+                                print("[TypeFlow] Intercepted Smart Reply Shortcut (keyDown) — triggering Smart Reply")
+                                DispatchQueue.main.async {
+                                    CompletionManager.shared.triggerSmartReply()
+                                }
+                            }
+                            return nil // Consume event
+                        }
+                    }
+                }
+                
                 if type == .keyDown {
-                    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                     print("[TypeFlow] keyDown detected: keyCode=\(keyCode)")
                     
                     if let monitor = refcon {
@@ -238,36 +285,7 @@ class AccessibilityMonitor {
                             }
                         }
                         
-                        if obj.matchesRewriteShortcut(event: event) {
-                            print("[TypeFlow] Intercepted Rewrite Shortcut — triggering Rewrite selection")
-                            DispatchQueue.main.async {
-                                CompletionManager.shared.triggerRewrite()
-                            }
-                            return nil // Consume event to prevent printing characters
-                        }
-                        
-                        // Direct hardcoded check for Cmd+Shift+R (keyCode 15)
-                        // This bypasses string-parsing to guarantee reliable interception
-                        let flags = event.flags
-                        let hasCmd = flags.contains(.maskCommand)
-                        let hasShift = flags.contains(.maskShift)
-                        let hasOption = flags.contains(.maskAlternate)
-                        let hasCtrl = flags.contains(.maskControl)
-                        if keyCode == 15 && hasCmd && hasShift && !hasOption && !hasCtrl {
-                            print("[TypeFlow] Intercepted Cmd+Shift+R — triggering Smart Reply")
-                            DispatchQueue.main.async {
-                                CompletionManager.shared.triggerSmartReply()
-                            }
-                            return nil
-                        }
-                        
-                        if obj.matchesSmartReplyShortcut(event: event) {
-                            print("[TypeFlow] Intercepted Smart Reply Shortcut (string match) — triggering Smart Reply")
-                            DispatchQueue.main.async {
-                                CompletionManager.shared.triggerSmartReply()
-                            }
-                            return nil // Consume event
-                        }
+                        // (Shortcuts moved above for both keyDown/keyUp interception)
                     }
                     
                     if keyCode == 53 { // Escape
@@ -299,10 +317,12 @@ class AccessibilityMonitor {
                         
                         if tabConsumed {
                             obj.clearKeystrokeBuffer()
+                            obj.consumedKeyCodes.insert(keyCode)
                             return nil // Consume the event
                         }
                         
                         if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
+                            obj.consumedKeyCodes.insert(keyCode)
                             return nil // Ignore all other keystrokes during rewrite/smart-reply
                         }
                         
@@ -336,7 +356,19 @@ class AccessibilityMonitor {
                         
                         obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: delay)
                     }
+                } else if type == .keyUp {
+                    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                    if let monitor = refcon {
+                        let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
+                        let obj = unmanaged.takeUnretainedValue()
+                        
+                        if obj.consumedKeyCodes.contains(keyCode) {
+                            obj.consumedKeyCodes.remove(keyCode)
+                            return nil // Consume keyUp to prevent leakage
+                        }
+                    }
                 }
+                
                 return Unmanaged.passRetained(event)
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
