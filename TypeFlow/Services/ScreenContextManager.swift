@@ -9,18 +9,7 @@ class ScreenContextManager {
     private var timer: Timer?
     
     private init() {
-        start()
-    }
-    
-    func start() {
         checkAndRequestPermission()
-        
-        // Run OCR every 5 seconds
-        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-            self?.performOCR()
-        }
-        // Run immediately once
-        performOCR()
     }
     
     func checkAndRequestPermission() {
@@ -32,9 +21,8 @@ class ScreenContextManager {
         }
     }
     
-    func stop() {
-        timer?.invalidate()
-        timer = nil
+    func performOCROnDemand() {
+        performOCR()
     }
     
     private func performOCR() {

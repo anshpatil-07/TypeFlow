@@ -363,6 +363,8 @@ class CompletionManager: @unchecked Sendable {
         let debounceInterval: TimeInterval = keystrokeInterval < 0.2 ? 0.6 : 0.4
         print("[TypeFlow-Debug] Adaptive debounce: keystroke interval \(String(format: "%.0f", keystrokeInterval * 1000))ms → using \(debounceInterval)s")
         
+        NotificationCenter.default.post(name: Notification.Name("UserDidType"), object: nil)
+        
         // Debounce: 400–600ms ensures user has paused before spinning up GPU inference.
         debounceTimer?.invalidate()
         debounceTimer = Timer.scheduledTimer(withTimeInterval: debounceInterval, repeats: false) { [weak self] _ in
@@ -398,31 +400,11 @@ class CompletionManager: @unchecked Sendable {
             return
         }
         
-        // --- Hybrid Inference Engine Gate ---
-        let stopWords: Set<String> = ["the", "and", "is", "a", "to", "in", "of", "it", "that", "on", "for"]
+        // --- Adaptive Pattern Engine Gate ---
         let words = activeLine.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
-        if let lastWord = words.last?.lowercased(), stopWords.contains(lastWord) {
-            print("[TypeFlow-Debug] Hybrid Engine: Active line ends with stop-word '\(lastWord)'. Skipping MLX.")
+        if let lastWord = words.last?.lowercased(), AdaptivePatternLearner.shared.behaviors.stopWords.contains(lastWord) {
+            print("[TypeFlow-Debug] Adaptive Engine: Active line ends with learned stop-word '\(lastWord)'. Skipping MLX.")
             return
-        }
-        
-        if activeLine.count < 10 {
-            if let lastWordInfo = getLastWord(from: activeLine) {
-                let completions = NSSpellChecker.shared.completions(
-                    forPartialWordRange: NSRange(location: 0, length: lastWordInfo.word.utf16.count),
-                    in: lastWordInfo.word,
-                    language: NSSpellChecker.shared.language(),
-                    inSpellDocumentWithTag: 0
-                ) ?? []
-                
-                if completions.isEmpty {
-                    print("[TypeFlow-Debug] Hybrid Engine: Short context (<10 chars) and no spell check suggestions. Skipping MLX.")
-                    return
-                }
-            } else {
-                print("[TypeFlow-Debug] Hybrid Engine: Short context (<10 chars) and no word found. Skipping MLX.")
-                return
-            }
         }
         // ------------------------------------
         

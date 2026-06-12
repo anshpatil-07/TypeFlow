@@ -22,15 +22,26 @@ class AppMonitor {
         
         print("[TypeFlow-Debug] AppMonitor: Activated app '\(bundleId)'")
         
+        UniversalContextManager.shared.refreshContext()
+        ScreenContextManager.shared.performOCROnDemand()
+        
         let config = SettingsManager.shared.getEffectiveConfig(for: bundleId)
         if config.isEnabled {
             LLMEngine.shared.prewarmCache(toneProfile: config.toneProfile)
         }
         
-        let lowerBundleId = bundleId.lowercased()
-        if lowerBundleId.contains("chrome") || lowerBundleId.contains("safari") || lowerBundleId.contains("zen") || lowerBundleId.contains("firefox") || lowerBundleId.contains("edge") || lowerBundleId.contains("brave") {
-            enableBrowserAccessibility(for: app.processIdentifier)
-        }
+        checkAndEnableBrowserAccessibility(for: app.processIdentifier)
+    }
+    
+    private func checkAndEnableBrowserAccessibility(for pid: pid_t) {
+        let appElement = AXUIElementCreateApplication(pid)
+        
+        var mainRole: CFTypeRef?
+        AXUIElementCopyAttributeValue(appElement, kAXRoleAttribute as CFString, &mainRole)
+        
+        // Browsers often have AXWebArea children or their main document is an HTML document.
+        // For simplicity, we just enable it for any app that might need enhanced UI.
+        enableBrowserAccessibility(for: pid)
     }
     
     private func enableBrowserAccessibility(for pid: pid_t) {
