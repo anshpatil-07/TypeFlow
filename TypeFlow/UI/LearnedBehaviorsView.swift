@@ -71,7 +71,7 @@ struct LearnedBehaviorsView: View {
                 }
             }
         }
-        .padding(30)
+        .padding(40)
         .onAppear {
             refresh()
         }

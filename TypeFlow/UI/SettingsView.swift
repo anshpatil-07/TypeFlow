@@ -107,31 +107,32 @@ class HotkeyRecorderNSView: NSView {
 struct GeneralSettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
     var body: some View {
-        Form {
+        VStack(alignment: .leading, spacing: 20) {
             Picker("Completion Tone:", selection: $settings.tone) {
                 ForEach(settings.getTones()) { tone in
                     Text(tone.name).tag(tone.id)
                 }
             }
+            .pickerStyle(MenuPickerStyle())
 
             Toggle("Auto-correct misspelled words as you type", isOn: $settings.autoCorrectEnabled)
-                .padding(.top)
 
             Toggle("Enable personalization (Typing History)", isOn: $settings.personalizationEnabled)
-                .padding(.top)
 
             Toggle("Use British English spelling", isOn: $settings.useBritishEnglish)
-                .padding(.top)
+            
+            Spacer()
         }
-        .padding(30)
+        .padding(40)
     }
 }
 
 struct ShortcutsSettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
     var body: some View {
-        Form {
-            Section(header: Text("Accept Suggestion").font(.headline).foregroundColor(.primary)) {
+        VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Accept Suggestion").font(.headline).foregroundColor(.primary)
                 Picker("", selection: $settings.acceptShortcut) {
                     Text("Tab ⇥").tag("Tab")
                     Text("Right Arrow →").tag("Right Arrow")
@@ -143,12 +144,12 @@ struct ShortcutsSettingsView: View {
                     .foregroundColor(.secondary)
             }
 
-            Divider().padding(.vertical, 8)
+            Divider()
 
-            Section(header: Text("Rewrite Selection").font(.headline).foregroundColor(.primary)) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Rewrite Selection").font(.headline).foregroundColor(.primary)
                 HStack {
                     Text("Hotkey:")
-                        .frame(width: 70, alignment: .leading)
                     HotkeyRecorderView(shortcut: $settings.rewriteShortcut)
                         .frame(width: 160, height: 34)
                         .help("Click then press your desired modifier + key combination. Press Esc to cancel.")
@@ -163,8 +164,10 @@ struct ShortcutsSettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+            
+            Spacer()
         }
-        .padding(30)
+        .padding(40)
     }
 }
 
@@ -172,7 +175,7 @@ struct ModelsSettingsView: View {
     @StateObject var modelManager = ModelManager()
     @ObservedObject var settings = SettingsManager.shared
     var body: some View {
-        Form {
+        VStack(alignment: .leading, spacing: 20) {
             ForEach(modelManager.models) { model in
                 HStack {
                     Text(model.name)
@@ -204,8 +207,9 @@ struct ModelsSettingsView: View {
                 }
                 .padding(.vertical, 4)
             }
+            Spacer()
         }
-        .padding(30)
+        .padding(40)
     }
 }
 
@@ -313,7 +317,7 @@ struct TonesSettingsView: View {
                     
                     Spacer()
                 }
-                .padding(30)
+                .padding(40)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack {
@@ -489,7 +493,7 @@ struct SnippetsSettingsView: View {
                 }
                 .disabled(newShortcut.isEmpty || newReplacement.isEmpty)
             }
-            .padding(30)
+            .padding(40)
         }
     }
     
@@ -612,7 +616,7 @@ struct AppOverridesSettingsView: View {
                     
                     Spacer()
                 }
-                .padding(30)
+                .padding(40)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack {
