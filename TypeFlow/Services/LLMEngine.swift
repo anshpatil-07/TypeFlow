@@ -290,7 +290,6 @@ class LLMEngine {
             // Clear cached tensors after inference to release unified memory buffers
             MLX.Memory.clearCache()
             
-            // Strip the closing tag if it exists
             var cleanResult = result
             if let range = cleanResult.range(of: "</completion>") {
                 cleanResult = String(cleanResult[..<range.lowerBound])
@@ -298,17 +297,17 @@ class LLMEngine {
             
             var trimmedResult = cleanResult.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             
-            // Aggressive Stripper
+            // Aggressive echo stripper: remove any re-echoed portion of the input text
             let echoedContext = String(textBeforeCaret.suffix(120)).trimmingCharacters(in: .whitespacesAndNewlines)
             if !echoedContext.isEmpty && trimmedResult.hasPrefix(echoedContext) {
                 trimmedResult = String(trimmedResult.dropFirst(echoedContext.count)).trimmingCharacters(in: .whitespacesAndNewlines)
             }
             
-            // If the original text ended in a space, prepend space if the output doesn't start with one
-            if textBeforeCaret.hasSuffix(" ") && !trimmedResult.isEmpty {
-                if !trimmedResult.hasPrefix(" ") {
-                    trimmedResult = " " + trimmedResult
-                }
+            // The suffix fed to the model has trailing spaces stripped (to prevent premature
+            // <end_of_turn> closure). Restore the space boundary here so the ghost text reads
+            // correctly when appended after the user's last typed character.
+            if !trimmedResult.isEmpty && textBeforeCaret.hasSuffix(" ") && !trimmedResult.hasPrefix(" ") {
+                trimmedResult = " " + trimmedResult
             }
             
             print("[TypeFlow-Debug] LLMEngine: Generation successful. Result: '\(trimmedResult)'")

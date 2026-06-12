@@ -117,8 +117,12 @@ class PromptBuilder {
         // This makes the model believe it is mid-generation, causing it to naturally
         // continue the text rather than treating it as a new user question.
         //
-        // CRITICAL: Nothing is appended after the activeLine. The stream must be physically
-        // attached to the last character the user typed.
+        // CRITICAL: We MUST strip trailing whitespace before handing off to the tokeniser.
+        // When the suffix ends with a space (word boundary), the Instruct model concludes
+        // its turn is complete and immediately outputs \n<end_of_turn> with no actual text.
+        // By ending on the last non-space character we force it to predict the next token.
+        // The caller (generateCompletion) is responsible for prepending a space to the
+        // result when the original textBeforeCaret ended in whitespace.
         let lines = textBeforeCaret.components(separatedBy: .newlines)
         let stableContext = lines.suffix(5).joined(separator: "\n")
         
@@ -132,9 +136,9 @@ class PromptBuilder {
             }
         }
         
-        // Return with NO trailing newline, space, or control token — the model's stream
-        // must begin immediately at the final typed character.
-        return stableContext
+        // Strip trailing whitespace so the model's generation stream begins at the exact
+        // last non-space character, preventing premature <end_of_turn> closure.
+        return stableContext.trimmingCharacters(in: .init(charactersIn: " \t"))
     }
     
     func buildRewritePrompt(selectedText: String, systemInstructions: String, toneName: String) -> String {
