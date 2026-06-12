@@ -67,45 +67,41 @@ class PromptBuilder {
     }
     
     func buildPromptPrefix(systemInstructions: String) -> String {
+        // === TURN 1: User gives instructions ===
         var prompt = "<start_of_turn>user\n"
-        prompt += "You are a strict code and text completion engine. I will provide context and vocabulary. You must seamlessly output the exact next words to finish the sentence provided by the user. Do not explain. Do not format.\n"
+        prompt += "You are a seamless text completion engine."
         
         let context = UniversalContextManager.shared.latestContext
-        prompt += "Context: Active App: \(context.appTitle)"
+        prompt += " Context: \(context.appTitle)"
         if !context.screenKeywords.isEmpty {
-            prompt += ", Screen Keywords: \(context.screenKeywords.joined(separator: ", "))"
+            prompt += ", \(context.screenKeywords.joined(separator: ", "))"
         }
-        prompt += "\n"
+        prompt += "."
         
         let personalizationActive = SettingsManager.shared.personalizationEnabled
         if personalizationActive {
-            let samples = TypingHistoryManager.shared.getRecentSamples(count: 3)
-            if !samples.isEmpty {
-                prompt += "Past writing samples: " + samples.joined(separator: " | ") + "\n"
-            }
-            
             let vocab = VocabularyExtractor.shared.getVocabulary()
             if !vocab.isEmpty {
-                prompt += "Vocabulary: \(vocab.joined(separator: ", "))\n"
+                prompt += " Vocabulary: \(vocab.joined(separator: ", "))."
+            }
+            let samples = TypingHistoryManager.shared.getRecentSamples(count: 2)
+            if !samples.isEmpty {
+                prompt += " Style: \(samples.joined(separator: " | "))."
             }
         }
         
         var finalInstructions = systemInstructions
         if SettingsManager.shared.useBritishEnglish {
-            finalInstructions += " Always use British English spelling."
+            finalInstructions += " Use British English spelling."
         }
-        
         let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
-        let protectedWords = lexicon.isEmpty ? "" : " NEVER alter these exact words: [\(lexicon.joined(separator: ", "))]."
+        if !lexicon.isEmpty {
+            finalInstructions += " NEVER alter: [\(lexicon.joined(separator: ", "))]."
+        }
+        prompt += " \(finalInstructions)<end_of_turn>\n"
         
-        finalInstructions += protectedWords
-        prompt += "Instructions: \(finalInstructions)<end_of_turn>\n"
-        
+        // === TURN 2: Model turn — activeLine is prefilled here by buildPromptSuffix ===
         prompt += "<start_of_turn>model\n"
-        prompt += "Acknowledged. I am ready to seamlessly complete your text.<end_of_turn>\n"
-        
-        prompt += "<start_of_turn>user\n"
-        prompt += "Text to complete: "
         
         return prompt
     }
@@ -117,29 +113,28 @@ class PromptBuilder {
     }
 
     func buildPromptSuffix(textBeforeCaret: String) -> String {
-        // We give the model up to 5 lines of stable context. 
-        // By splitting on newlines and taking a fixed number of lines, the leading string boundary 
-        // NEVER shifts while the user is typing on the current line. This preserves LCP byte-alignment
-        // perfectly, while giving the model enough document context to stay in "completion mode"
-        // rather than falling back into "chat/markdown mode".
+        // The activeLine is placed INSIDE the model's response block (assistant pre-filling).
+        // This makes the model believe it is mid-generation, causing it to naturally
+        // continue the text rather than treating it as a new user question.
+        //
+        // CRITICAL: Nothing is appended after the activeLine. The stream must be physically
+        // attached to the last character the user typed.
         let lines = textBeforeCaret.components(separatedBy: .newlines)
         let stableContext = lines.suffix(5).joined(separator: "\n")
-
-        // DO NOT trim trailing whitespace! The LLM needs the exact trailing space or partial word
-        // to natively predict the correct next token.
-        // We also DO NOT append \n\n<completion> for normal typing, as that closes the text block
-        // and forces the LLM to start a new formatted markdown response.
-        var suffix = stableContext
-
+        
         if hasClipboardTrigger(textBeforeCaret: textBeforeCaret) {
             let recentClipboard = Array(ClipboardMonitor.shared.recentItems.suffix(3))
             if !recentClipboard.isEmpty {
-                let formattedClipboard = recentClipboard.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
-                suffix += "\n\nCRITICAL INSTRUCTION: The user is triggering a clipboard paste. Here is their recent clipboard history:\n\(formattedClipboard)\nBased on their sentence, either paste the single most relevant item, or output the exact formatted list provided above. Do NOT invent or hallucinate any URLs or text not present in this list. CRITICAL: Output ONLY the clipboard item(s). Do NOT repeat the user's input phrase. Start your response directly with the clipboard text."
+                let formattedClipboard = recentClipboard.enumerated()
+                    .map { "\($0.offset + 1). \($0.element)" }
+                    .joined(separator: "\n")
+                return stableContext + "\n\nPaste the single most relevant clipboard item or the formatted list exactly as-is:\n" + formattedClipboard
             }
         }
-
-        return suffix
+        
+        // Return with NO trailing newline, space, or control token — the model's stream
+        // must begin immediately at the final typed character.
+        return stableContext
     }
     
     func buildRewritePrompt(selectedText: String, systemInstructions: String, toneName: String) -> String {
