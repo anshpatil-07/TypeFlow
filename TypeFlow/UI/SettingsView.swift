@@ -221,7 +221,7 @@ struct TonesSettingsView: View {
     @State private var selectedToneId: String = "Neutral"
     
     var body: some View {
-        HStack(spacing: 0) {
+        NavigationSplitView {
             // Sidebar List of Tone Profiles
             VStack(spacing: 0) {
                 List(selection: $selectedToneId) {
@@ -259,10 +259,8 @@ struct TonesSettingsView: View {
                 }
                 .padding(8)
             }
-            .frame(width: 180)
-            
-            Divider()
-            
+            .navigationSplitViewColumnWidth(min: 150, ideal: 200)
+        } detail: {
             // Editor Panel on Right
             if let tone = getTone(by: selectedToneId) {
                 VStack(alignment: .leading, spacing: 12) {
@@ -318,13 +316,13 @@ struct TonesSettingsView: View {
                     Spacer()
                 }
                 .padding(40)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 350, maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack {
                     Text("Select a tone to edit or view details.")
                         .foregroundColor(.secondary)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 350, maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
@@ -558,7 +556,7 @@ struct AppOverridesSettingsView: View {
     @State private var selectedBundleId: String = ""
     
     var body: some View {
-        HStack(spacing: 0) {
+        NavigationSplitView {
             // Sidebar List of App Overrides
             VStack(spacing: 0) {
                 List(selection: $selectedBundleId) {
@@ -583,10 +581,8 @@ struct AppOverridesSettingsView: View {
                 }
                 .padding(8)
             }
-            .frame(width: 180)
-            
-            Divider()
-            
+            .navigationSplitViewColumnWidth(min: 150, ideal: 200)
+        } detail: {
             // Detail Editor
             if !selectedBundleId.isEmpty, let config = settings.getAppConfigs()[selectedBundleId] {
                 VStack(alignment: .leading, spacing: 12) {
@@ -617,13 +613,13 @@ struct AppOverridesSettingsView: View {
                     Spacer()
                 }
                 .padding(40)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 350, maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack {
                     Text("Select or add an App Bundle ID to configure overrides.")
                         .foregroundColor(.secondary)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 350, maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }
