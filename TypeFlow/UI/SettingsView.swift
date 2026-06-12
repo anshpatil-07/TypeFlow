@@ -174,40 +174,86 @@ struct ShortcutsSettingsView: View {
 struct ModelsSettingsView: View {
     @StateObject var modelManager = ModelManager()
     @ObservedObject var settings = SettingsManager.shared
+    @State private var newModelId: String = ""
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            ForEach(modelManager.models) { model in
-                HStack {
-                    Text(model.name)
-                        .font(.headline)
-                    
-                    Spacer()
-                    
-                    if settings.activeModelId == model.id {
-                        Text("Active")
-                            .foregroundColor(.green)
-                            .font(.subheadline)
-                            .padding(.trailing, 8)
-                    } else if model.status == .downloaded {
-                        Button("Activate") {
-                            modelManager.activateModel(id: model.id)
+            Text("Recommended Models")
+                .font(.headline)
+            
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(modelManager.models) { model in
+                        HStack {
+                            Text(model.name)
+                                .font(.body)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            
+                            Spacer()
+                            
+                            if settings.activeModelId == model.id {
+                                Text("Active")
+                                    .foregroundColor(.green)
+                                    .font(.subheadline)
+                                    .padding(.trailing, 8)
+                            } else if model.status == .downloaded {
+                                Button("Activate") {
+                                    modelManager.activateModel(id: model.id)
+                                }
+                            }
+                            
+                            if model.status == .notDownloaded {
+                                Button("Download") {
+                                    modelManager.downloadModel(id: model.id)
+                                }
+                            } else if model.status == .downloading {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .padding(.horizontal, 4)
+                                Text("Downloading...")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            if model.status == .downloaded && settings.activeModelId != model.id {
+                                Button(action: { modelManager.deleteModel(id: model.id) }) {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(BorderlessButtonStyle())
+                                .foregroundColor(.red)
+                                .padding(.leading, 4)
+                            }
                         }
-                    }
-                    
-                    if model.status == .notDownloaded {
-                        Button("Download") {
-                            modelManager.downloadModel(id: model.id)
-                        }
-                    } else if model.status == .downloading {
-                        ProgressView(value: model.progress)
-                            .frame(width: 100)
-                        Text("\(Int(model.progress * 100))%")
-                            .font(.caption)
+                        .padding(.vertical, 8)
+                        
+                        Divider()
                     }
                 }
-                .padding(.vertical, 4)
             }
+            .frame(maxHeight: 250)
+            
             Spacer()
+            
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Custom Model")
+                    .font(.headline)
+                Text("Paste an MLX Community Hugging Face Repo ID (e.g. mlx-community/SmolLM-135M-Instruct-4bit)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                HStack {
+                    TextField("Repo ID", text: $newModelId)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                    
+                    Button("Download & Set Active") {
+                        modelManager.addCustomModel(id: newModelId)
+                        modelManager.activateModel(id: newModelId)
+                        newModelId = ""
+                    }
+                    .disabled(newModelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
         }
         .padding(40)
     }
