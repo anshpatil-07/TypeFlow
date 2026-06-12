@@ -260,14 +260,23 @@ class LLMEngine {
                     )
                     
                     var outputText = ""
+                    let stopTokens = ["<end_of_turn>", "<start_of_turn>", "<eos>", "</completion>"]
+                    
                     for await generation in stream {
                         if case .chunk(let text) = generation {
                             outputText += text
                             print("[TypeFlow-Debug] LLMEngine Chunk: '\(text)'")
-                            if outputText.contains("</completion>") {
-                                print("[TypeFlow-Debug] LLMEngine: Found </completion> tag, stopping generation.")
-                                break
+                            
+                            var shouldStop = false
+                            for token in stopTokens {
+                                if let range = outputText.range(of: token) {
+                                    outputText = String(outputText[..<range.lowerBound])
+                                    print("[TypeFlow-Debug] LLMEngine: Found stop token \(token), stopping generation.")
+                                    shouldStop = true
+                                    break
+                                }
                             }
+                            if shouldStop { break }
                         }
                     }
                     print("[TypeFlow-Debug] LLMEngine: Stream finished. Total output: '\(outputText)'")
@@ -379,12 +388,21 @@ class LLMEngine {
                 )
                 
                 var outputText = ""
+                let stopTokens = ["<end_of_turn>", "<start_of_turn>", "<eos>", "</completion>"]
+                
                 for await generation in stream {
                     if case .chunk(let text) = generation {
                         outputText += text
-                        if outputText.contains("</completion>") {
-                            break
+                        
+                        var shouldStop = false
+                        for token in stopTokens {
+                            if let range = outputText.range(of: token) {
+                                outputText = String(outputText[..<range.lowerBound])
+                                shouldStop = true
+                                break
+                            }
                         }
+                        if shouldStop { break }
                     }
                 }
                 return outputText
@@ -439,12 +457,21 @@ class LLMEngine {
                 )
                 
                 var outputText = ""
+                let stopTokens = ["<end_of_turn>", "<start_of_turn>", "<eos>", "</completion>"]
+                
                 for await generation in stream {
                     if case .chunk(let text) = generation {
                         outputText += text
-                        if outputText.contains("</completion>") {
-                            break
+                        
+                        var shouldStop = false
+                        for token in stopTokens {
+                            if let range = outputText.range(of: token) {
+                                outputText = String(outputText[..<range.lowerBound])
+                                shouldStop = true
+                                break
+                            }
                         }
+                        if shouldStop { break }
                     }
                 }
                 return outputText
