@@ -200,10 +200,8 @@ class CompletionManager: @unchecked Sendable {
                 // finishes dropping before the synthetic keystrokes fire, preventing race conditions.
                 DispatchQueue.main.async {
                     TextInjector.shared.injectBackspaces(count: deleteCount)
-                    // Inject the correction via pasteboard
-                    TextInjector.shared.inject(text: correction)
-                    // Explicitly inject the space character as a separate CGEvent to preserve typing flow
-                    TextInjector.shared.injectCharByChar(text: delimiter)
+                    // Inject the correction and explicitly append the trailing space via pasteboard
+                    TextInjector.shared.inject(text: correction + delimiter)
                 }
                 
                 clearCompletion()
