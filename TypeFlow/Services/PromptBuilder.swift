@@ -21,49 +21,7 @@ class PromptBuilder {
     /// This is what we prefill into the KV cache — it only changes when tone or
     /// personalization settings change, not when the user types a new sentence.
     func buildStaticPrefix(systemInstructions: String) -> String {
-        var prompt = ""
-        
-        let context = UniversalContextManager.shared.latestContext
-        prompt += "[System Context: Environment]\n"
-        prompt += "Active App: \(context.appTitle)\n"
-        if !context.screenKeywords.isEmpty {
-            prompt += "Screen Keywords: \(context.screenKeywords.joined(separator: ", "))\n"
-        }
-        prompt += "\n"
-        
-        let personalizationActive = SettingsManager.shared.personalizationEnabled
-        
-        if personalizationActive {
-            // Use recent samples without a text-specific filter so the prefix stays stable.
-            let samples = TypingHistoryManager.shared.getRecentSamples(count: 3)
-            if !samples.isEmpty {
-                prompt += "[Past user writing samples]:\n"
-                for sample in samples {
-                    prompt += "- \(sample)\n"
-                }
-                prompt += "\n"
-            }
-            
-            let vocab = VocabularyExtractor.shared.getVocabulary()
-            if !vocab.isEmpty {
-                let vocabStr = vocab.joined(separator: ", ")
-                prompt += "[Passive Stylistic Vocabulary Influence]:\n\(vocabStr)\n\n"
-            }
-        }
-        
-        var finalInstructions = systemInstructions
-        if SettingsManager.shared.useBritishEnglish {
-            finalInstructions += " Always use British English spelling (e.g., colour, prioritise)."
-        }
-        
-        let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
-        let protectedWords = lexicon.isEmpty ? "" : " NEVER alter these exact user-specific words: [\(lexicon.joined(separator: ", "))]."
-        
-        finalInstructions += " CRITICAL: You are an invisible autocomplete engine. DO NOT recite, list, or explicitly mention the provided vocabulary words. Only use them naturally if they flawlessly fit the immediate grammatical context of the suffix. Prioritize the user's document context above all else.\(protectedWords)"
-        
-        prompt += "[System Instructions]:\n\(finalInstructions)\n\n"
-        prompt += "[Current text to complete]:\n"
-        return prompt
+        return buildPromptPrefix(systemInstructions: systemInstructions)
     }
     
     func buildPromptPrefix(systemInstructions: String) -> String {

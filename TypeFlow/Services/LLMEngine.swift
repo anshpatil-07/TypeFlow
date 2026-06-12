@@ -191,7 +191,7 @@ class LLMEngine {
                         self.cachedTokens = []
                     }
                     
-                    guard let cache = self.kvCache else {
+                    guard var cache = self.kvCache else {
                         throw KVCacheError(message: "Failed to resolve KV cache")
                     }
                     
@@ -227,10 +227,21 @@ class LLMEngine {
                     let currentCacheSize = cache[0].offset
                     let tokensToTrim = currentCacheSize - lcpIndex
                     if tokensToTrim > 0 {
-                        print("[TypeFlow-Debug] LLMEngine: LCP match is \(lcpIndex) tokens. Trimming \(tokensToTrim) divergent/generated tokens from cache...")
-                        trimPromptCache(cache, numTokens: tokensToTrim)
-                        if lcpIndex < self.cachedTokens.count {
-                            self.cachedTokens = Array(self.cachedTokens.prefix(lcpIndex))
+                        if canTrimPromptCache(cache) {
+                            print("[TypeFlow-Debug] LLMEngine: LCP match is \(lcpIndex) tokens. Trimming \(tokensToTrim) divergent/generated tokens from cache...")
+                            trimPromptCache(cache, numTokens: tokensToTrim)
+                            if lcpIndex < self.cachedTokens.count {
+                                self.cachedTokens = Array(self.cachedTokens.prefix(lcpIndex))
+                            }
+                        } else {
+                            print("[TypeFlow-Debug] LLMEngine: Cache is not trimmable. Resetting cache.")
+                            self.kvCache = nil
+                            self.cachedTokens = []
+                            
+                            let newCache = modelContext.model.newCache(parameters: nil)
+                            self.kvCache = newCache
+                            cache = newCache
+                            lcpIndex = 0
                         }
                     } else {
                         print("[TypeFlow-Debug] LLMEngine: Cache hit — reusing \(lcpIndex) tokens.")
@@ -243,8 +254,8 @@ class LLMEngine {
                         return ""
                     }
                     
-                    // Update cachedTokens with the new prompt tokens we are about to evaluate
-                    self.cachedTokens.append(contentsOf: suffixTokens)
+                    // Copy cache to avoid contamination with generated tokens
+                    let generatorCache = cache.map { $0.copy() }
                     
                     let suffixInput = LMInput(tokens: MLXArray(suffixTokens))
                     
@@ -252,12 +263,19 @@ class LLMEngine {
                     let isClipboard = PromptBuilder.shared.hasClipboardTrigger(textBeforeCaret: textBeforeCaret)
                     let activeMaxTokens = isClipboard ? 150 : toneProfile.maxTokens
                     let params = GenerateParameters(maxTokens: activeMaxTokens, temperature: Float(toneProfile.temperature))
+                    
                     let stream = try MLXLMCommon.generate(
                         input: suffixInput,
-                        cache: cache,
+                        cache: generatorCache,
                         parameters: params,
                         context: modelContext
                     )
+                    
+                    // Evaluate suffix tokens on original cache synchronously so it's ready for the next keystroke
+                    let suffixMLXTokens = MLXArray(suffixTokens)
+                    _ = modelContext.model(suffixMLXTokens[.newAxis], cache: cache)
+                    eval(cache)
+                    self.cachedTokens = fullTokens
                     
                     var outputText = ""
                     let stopTokens = ["<end_of_turn>", "<start_of_turn>", "<eos>", "</completion>"]
