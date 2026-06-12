@@ -67,53 +67,41 @@ class PromptBuilder {
     }
     
     func buildPromptPrefix(systemInstructions: String) -> String {
-        var prompt = ""
+        var prompt = "<start_of_turn>user\n"
+        prompt += "You are an inline autocomplete engine. Output only the logical continuation of the text. Do not repeat the prompt. Do not explain.\n"
         
         let context = UniversalContextManager.shared.latestContext
-        prompt += "[System Context: Environment]\n"
-        prompt += "Active App: \(context.appTitle)\n"
+        prompt += "Context: Active App: \(context.appTitle)"
         if !context.screenKeywords.isEmpty {
-            prompt += "Screen Keywords: \(context.screenKeywords.joined(separator: ", "))\n"
+            prompt += ", Screen Keywords: \(context.screenKeywords.joined(separator: ", "))"
         }
         prompt += "\n"
         
         let personalizationActive = SettingsManager.shared.personalizationEnabled
-        print("[TypeFlow-Debug] PromptBuilder: personalizationEnabled=\(personalizationActive)")
-        
         if personalizationActive {
-            // Use recent samples without a text-specific filter. Filtering dynamically based on 
-            // the user's active typing completely shifts the prompt text on every keystroke,
-            // instantly breaking the LLM's KV Cache LCP alignment.
             let samples = TypingHistoryManager.shared.getRecentSamples(count: 3)
-            print("[TypeFlow-Debug] PromptBuilder: injecting \(samples.count) static writing samples")
             if !samples.isEmpty {
-                prompt += "[Past user writing samples]:\n"
-                for sample in samples {
-                    prompt += "- \(sample)\n"
-                }
-                prompt += "\n"
+                prompt += "Past writing samples: " + samples.joined(separator: " | ") + "\n"
             }
             
             let vocab = VocabularyExtractor.shared.getVocabulary()
-            print("[TypeFlow-Debug] PromptBuilder: active vocabulary words count: \(vocab.count) (\(vocab))")
             if !vocab.isEmpty {
-                let vocabStr = vocab.joined(separator: ", ")
-                prompt += "[Passive Stylistic Vocabulary Influence]:\n\(vocabStr)\n\n"
+                prompt += "Vocabulary: \(vocab.joined(separator: ", "))\n"
             }
         }
         
         var finalInstructions = systemInstructions
         if SettingsManager.shared.useBritishEnglish {
-            finalInstructions += " Always use British English spelling (e.g., colour, prioritise)."
+            finalInstructions += " Always use British English spelling."
         }
         
         let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
-        let protectedWords = lexicon.isEmpty ? "" : " NEVER alter these exact user-specific words: [\(lexicon.joined(separator: ", "))]."
+        let protectedWords = lexicon.isEmpty ? "" : " NEVER alter these exact words: [\(lexicon.joined(separator: ", "))]."
         
-        finalInstructions += " CRITICAL: You are an invisible autocomplete engine. DO NOT recite, list, or explicitly mention the provided vocabulary words. Only use them naturally if they flawlessly fit the immediate grammatical context of the suffix. Prioritize the user's document context above all else.\(protectedWords)"
+        finalInstructions += protectedWords
+        prompt += "Instructions: \(finalInstructions)\n"
+        prompt += "Text to complete:\n"
         
-        prompt += "[System Instructions]:\n\(finalInstructions)\n\n"
-        prompt += "[Current text to complete]:\n"
         return prompt
     }
     
@@ -145,6 +133,8 @@ class PromptBuilder {
                 suffix += "\n\nCRITICAL INSTRUCTION: The user is triggering a clipboard paste. Here is their recent clipboard history:\n\(formattedClipboard)\nBased on their sentence, either paste the single most relevant item, or output the exact formatted list provided above. Do NOT invent or hallucinate any URLs or text not present in this list. CRITICAL: Output ONLY the clipboard item(s). Do NOT repeat the user's input phrase. Start your response directly with the clipboard text."
             }
         }
+        
+        suffix += "<end_of_turn>\n<start_of_turn>model\n"
 
         return suffix
     }
