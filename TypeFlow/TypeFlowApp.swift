@@ -6,7 +6,7 @@ struct TypeFlowApp: App {
     
     var body: some Scene {
         Settings {
-            SettingsView()
+            EmptyView()
         }
     }
 }
