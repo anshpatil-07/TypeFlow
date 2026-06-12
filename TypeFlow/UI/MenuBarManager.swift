@@ -63,6 +63,7 @@ class MenuBarManager {
             window.styleMask.insert(.titled)
             window.styleMask.remove(.resizable)
             window.standardWindowButton(.zoomButton)?.isEnabled = false
+            window.setContentSize(NSSize(width: 750, height: 550))
             window.center()
             window.isReleasedWhenClosed = false
             self.settingsWindow = window
@@ -80,7 +81,7 @@ class SettingsTabViewController: NSTabViewController {
         self.tabStyle = .toolbar
         
         func addTab<V: View>(title: String, icon: String, view: V) {
-            let vc = NSHostingController(rootView: view.frame(minWidth: 600, idealWidth: 600, minHeight: 500))
+            let vc = NSHostingController(rootView: view.frame(maxWidth: .infinity, maxHeight: .infinity))
             vc.title = title
             let item = NSTabViewItem(viewController: vc)
             item.label = title
