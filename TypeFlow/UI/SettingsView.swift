@@ -229,6 +229,12 @@ struct SettingsView: View {
                 .tabItem {
                     Label("Apps", systemImage: "app.badge")
                 }
+            
+            // Behaviors Tab
+            LearnedBehaviorsView()
+                .tabItem {
+                    Label("Behaviors", systemImage: "brain.head.profile")
+                }
         }
         .frame(width: 600, height: 450)
     }

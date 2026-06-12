@@ -23,6 +23,14 @@ class PromptBuilder {
     func buildStaticPrefix(systemInstructions: String) -> String {
         var prompt = ""
         
+        let context = UniversalContextManager.shared.latestContext
+        prompt += "[System Context: Environment]\n"
+        prompt += "Active App: \(context.appTitle)\n"
+        if !context.screenKeywords.isEmpty {
+            prompt += "Screen Keywords: \(context.screenKeywords.joined(separator: ", "))\n"
+        }
+        prompt += "\n"
+        
         let personalizationActive = SettingsManager.shared.personalizationEnabled
         
         if personalizationActive {
@@ -60,6 +68,14 @@ class PromptBuilder {
     
     func buildPromptPrefix(systemInstructions: String) -> String {
         var prompt = ""
+        
+        let context = UniversalContextManager.shared.latestContext
+        prompt += "[System Context: Environment]\n"
+        prompt += "Active App: \(context.appTitle)\n"
+        if !context.screenKeywords.isEmpty {
+            prompt += "Screen Keywords: \(context.screenKeywords.joined(separator: ", "))\n"
+        }
+        prompt += "\n"
         
         let personalizationActive = SettingsManager.shared.personalizationEnabled
         print("[TypeFlow-Debug] PromptBuilder: personalizationEnabled=\(personalizationActive)")
@@ -102,22 +118,7 @@ class PromptBuilder {
     }
     
     func hasClipboardTrigger(textBeforeCaret: String) -> Bool {
-        let clipboardTriggers = [
-            "here is the link:",
-            "here is the url:",
-            "my email is",
-            "my email address is",
-            "the code is",
-            "the snippet is",
-            "paste it:",
-            "the link is",
-            "the url is",
-            "contact me at",
-            "link: ",
-            "link:",
-            "url: ",
-            "code: "
-        ]
+        let clipboardTriggers = AdaptivePatternLearner.shared.behaviors.clipboardTriggers
         let lowercasedText = textBeforeCaret.lowercased()
         return clipboardTriggers.contains { lowercasedText.hasSuffix($0) }
     }
