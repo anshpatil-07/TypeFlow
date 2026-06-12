@@ -68,7 +68,7 @@ class PromptBuilder {
     
     func buildPromptPrefix(systemInstructions: String) -> String {
         var prompt = "<start_of_turn>user\n"
-        prompt += "You are a seamless text completion engine. Your task is to accurately predict the next few words of the user's active sentence. Reply ONLY with the exact words that should immediately follow the provided text. No introductions, no formatting.\n"
+        prompt += "You are a strict code and text completion engine. I will provide context and vocabulary. You must seamlessly output the exact next words to finish the sentence provided by the user. Do not explain. Do not format.\n"
         
         let context = UniversalContextManager.shared.latestContext
         prompt += "Context: Active App: \(context.appTitle)"
@@ -99,8 +99,13 @@ class PromptBuilder {
         let protectedWords = lexicon.isEmpty ? "" : " NEVER alter these exact words: [\(lexicon.joined(separator: ", "))]."
         
         finalInstructions += protectedWords
-        prompt += "Instructions: \(finalInstructions)\n"
-        prompt += "Text to complete:\n"
+        prompt += "Instructions: \(finalInstructions)<end_of_turn>\n"
+        
+        prompt += "<start_of_turn>model\n"
+        prompt += "Acknowledged. I am ready to seamlessly complete your text.<end_of_turn>\n"
+        
+        prompt += "<start_of_turn>user\n"
+        prompt += "Text to complete: "
         
         return prompt
     }
@@ -133,8 +138,6 @@ class PromptBuilder {
                 suffix += "\n\nCRITICAL INSTRUCTION: The user is triggering a clipboard paste. Here is their recent clipboard history:\n\(formattedClipboard)\nBased on their sentence, either paste the single most relevant item, or output the exact formatted list provided above. Do NOT invent or hallucinate any URLs or text not present in this list. CRITICAL: Output ONLY the clipboard item(s). Do NOT repeat the user's input phrase. Start your response directly with the clipboard text."
             }
         }
-        
-        suffix += "<end_of_turn>\n<start_of_turn>model\n"
 
         return suffix
     }
