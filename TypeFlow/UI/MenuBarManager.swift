@@ -80,7 +80,7 @@ class SettingsTabViewController: NSTabViewController {
         self.tabStyle = .toolbar
         
         func addTab<V: View>(title: String, icon: String, view: V) {
-            let vc = NSHostingController(rootView: view.frame(width: 600, height: 450))
+            let vc = NSHostingController(rootView: view.frame(width: 750, height: 500))
             vc.title = title
             let item = NSTabViewItem(viewController: vc)
             item.label = title

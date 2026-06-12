@@ -123,8 +123,7 @@ struct GeneralSettingsView: View {
             Toggle("Use British English spelling", isOn: $settings.useBritishEnglish)
                 .padding(.top)
         }
-        .padding()
-        .frame(width: 600, height: 450)
+        .padding(30)
     }
 }
 
@@ -165,8 +164,7 @@ struct ShortcutsSettingsView: View {
                     .foregroundColor(.secondary)
             }
         }
-        .padding()
-        .frame(width: 600, height: 450)
+        .padding(30)
     }
 }
 
@@ -207,8 +205,7 @@ struct ModelsSettingsView: View {
                 .padding(.vertical, 4)
             }
         }
-        .padding()
-        .frame(width: 600, height: 450)
+        .padding(30)
     }
 }
 
@@ -316,7 +313,7 @@ struct TonesSettingsView: View {
                     
                     Spacer()
                 }
-                .padding()
+                .padding(30)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack {
@@ -492,7 +489,7 @@ struct SnippetsSettingsView: View {
                 }
                 .disabled(newShortcut.isEmpty || newReplacement.isEmpty)
             }
-            .padding()
+            .padding(30)
         }
     }
     
@@ -615,7 +612,7 @@ struct AppOverridesSettingsView: View {
                     
                     Spacer()
                 }
-                .padding()
+                .padding(30)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack {
