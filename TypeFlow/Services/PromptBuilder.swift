@@ -68,7 +68,7 @@ class PromptBuilder {
     
     func buildPromptPrefix(systemInstructions: String) -> String {
         var prompt = "<start_of_turn>user\n"
-        prompt += "You are an inline autocomplete engine. Output only the logical continuation of the text. Do not repeat the prompt. Do not explain.\n"
+        prompt += "You are a seamless text completion engine. Your task is to accurately predict the next few words of the user's active sentence. Reply ONLY with the exact words that should immediately follow the provided text. No introductions, no formatting.\n"
         
         let context = UniversalContextManager.shared.latestContext
         prompt += "Context: Active App: \(context.appTitle)"
