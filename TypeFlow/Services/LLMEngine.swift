@@ -174,9 +174,7 @@ class LLMEngine {
                     let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(systemInstructions: toneProfile.systemInstructions)
                     
                     let fullPrompt = dynamicPrefixPrompt + suffixPrompt
-                    let fullInput = UserInput(prompt: fullPrompt)
-                    let fullPrepared = try await modelContext.processor.prepare(input: fullInput)
-                    let fullTokens = fullPrepared.text.tokens.asArray(Int.self)
+                    let fullTokens = modelContext.tokenizer.encode(text: fullPrompt)
                     
                     let settingsKey = "\(toneProfile.name)|\(toneProfile.systemInstructions.hashValue)|\(SettingsManager.shared.personalizationEnabled)|\(SettingsManager.shared.useBritishEnglish)"
                     
