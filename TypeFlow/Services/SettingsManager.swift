@@ -17,7 +17,7 @@ class SettingsManager: ObservableObject {
     @AppStorage("tone") var tone: String = "Neutral"
     @AppStorage("snippetsData") var snippetsData: Data = Data()
     @AppStorage("appConfigsData") var appConfigsData: Data = Data()
-    @AppStorage("activeModelId") var activeModelId: String = "gemma-3-4b-it-qat-4bit"
+    @AppStorage("activeModelId") var activeModelId: String = "mlx-community/gemma-4-E4B-it-4bit"
     
     @AppStorage("customTonesData") var customTonesData: Data = Data()
     

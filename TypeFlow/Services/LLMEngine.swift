@@ -27,6 +27,7 @@ class LLMEngine {
     private var modelContainer: ModelContainer?
     private var isLoading = false
     private var loadError: Error?
+    private var currentLoadedModelId: String?
     
     private var cachedTokens: [Int] = []
     private var kvCache: [KVCache]?
@@ -316,17 +317,27 @@ class LLMEngine {
     
     @MainActor
     private func loadModelIfNeeded() async {
+        let activeModelId = SettingsManager.shared.activeModelId
+        
+        // If the active model changed, invalidate the current one
+        if currentLoadedModelId != activeModelId {
+            modelContainer = nil
+            currentLoadedModelId = nil
+            loadError = nil
+            MLX.Memory.clearCache()
+        }
+        
         guard modelContainer == nil, !isLoading else { return }
         isLoading = true
         NotificationCenter.default.post(name: Notification.Name("TypeFlowModelLoadingStateChanged"), object: true)
 
         do {
-            // Gemma 3 4B 4-bit (Gemma 4 E2B) ≈ 3.2 GB
             let config = ModelConfiguration(
-                id: "mlx-community/gemma-3-4b-it-qat-4bit",
+                id: activeModelId,
                 extraEOSTokens: ["<end_of_turn>"]
             )
             self.modelContainer = try await #huggingFaceLoadModelContainer(configuration: config)
+            self.currentLoadedModelId = activeModelId
             print("[TypeFlow] Model loaded: \(config.id)")
         } catch {
             self.loadError = error
