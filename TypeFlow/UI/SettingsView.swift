@@ -180,15 +180,32 @@ struct ModelsSettingsView: View {
         VStack(alignment: .leading, spacing: 20) {
             Text("Recommended Models")
                 .font(.headline)
+                .padding(.horizontal, 40)
+                .padding(.top, 40)
             
             ScrollView {
                 VStack(spacing: 0) {
                     ForEach(modelManager.models) { model in
                         HStack {
-                            Text(model.name)
-                                .font(.body)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(model.name)
+                                        .font(.body)
+                                        .bold()
+                                    
+                                    if let desc = model.description {
+                                        Image(systemName: "info.circle")
+                                            .foregroundColor(.secondary)
+                                            .help(desc)
+                                    }
+                                }
+                                
+                                if let size = model.sizeGB {
+                                    Text("\(String(format: "%.1f", size)) GB")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
                             
                             Spacer()
                             
@@ -208,12 +225,15 @@ struct ModelsSettingsView: View {
                                     modelManager.downloadModel(id: model.id)
                                 }
                             } else if model.status == .downloading {
-                                ProgressView()
-                                    .controlSize(.small)
-                                    .padding(.horizontal, 4)
-                                Text("Downloading...")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    ProgressView(value: model.progress)
+                                        .progressViewStyle(LinearProgressViewStyle())
+                                        .frame(width: 80)
+                                    Text("\(Int(model.progress * 100))%")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.horizontal, 4)
                             }
                             
                             if model.status == .downloaded && settings.activeModelId != model.id {
@@ -225,13 +245,14 @@ struct ModelsSettingsView: View {
                                 .padding(.leading, 4)
                             }
                         }
-                        .padding(.vertical, 8)
+                        .padding(.vertical, 12)
                         
                         Divider()
                     }
                 }
+                .padding(.horizontal, 40)
             }
-            .frame(maxHeight: 250)
+            .frame(maxHeight: 280)
             
             Spacer()
             
@@ -254,8 +275,9 @@ struct ModelsSettingsView: View {
                     .disabled(newModelId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
+            .padding(.horizontal, 40)
+            .padding(.bottom, 40)
         }
-        .padding(40)
     }
 }
 
