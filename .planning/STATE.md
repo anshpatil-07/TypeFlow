@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-05-23)
 Phase: 19
 Plan: Not started
 Status: Executing Phase 19
-Last activity: 2026-06-07 - Completed quick task 260607-x93: Fix compiler warnings in AppDelegate, LLMEngine, and ScreenContextManager
+Last activity: 2026-06-12 - Completed quick task 260612-kmg: Fix KV cache contamination and prewarm cache format mismatch
 Current Position: End of Phase 19
 
 ### Quick Tasks Completed
@@ -35,6 +35,7 @@ Current Position: End of Phase 19
 |---|-------------|------|--------|-----------|
 | 260607-x93 | Fix compiler warnings in AppDelegate, LLMEngine, and ScreenContextManager | 2026-06-07 | f6c0c24 | [260607-x93-fix-compiler-warnings-in-appdelegate-llm](./quick/260607-x93-fix-compiler-warnings-in-appdelegate-llm/) |
 | 260608-bnr | Reorder AXTextMarker checks for WebKit caret tracking | 2026-06-08 | 60451aa | [260608-bnr-reorder-axtextmarker-checks-for-webkit-c](./quick/260608-bnr-reorder-axtextmarker-checks-for-webkit-c/) |
+| 260612-kmg | Fix KV cache contamination and prewarm cache format mismatch | 2026-06-12 | fdc6f42 | [260612-kmg-fix-kv-cache-contamination-and-prewarm-c](./quick/260612-kmg-fix-kv-cache-contamination-and-prewarm-c/) |
 
 ## Accumulated Context
 
