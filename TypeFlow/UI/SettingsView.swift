@@ -102,140 +102,112 @@ class HotkeyRecorderNSView: NSView {
     }
 }
 
-// ─── Settings View ────────────────────────────────────────────────────────────
+// ─── Extracted Tab Views ────────────────────────────────────────────────────────
 
-struct SettingsView: View {
+struct GeneralSettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
-    @StateObject var modelManager = ModelManager()
-
     var body: some View {
-        TabView {
-            // General Tab
-            Form {
-                Picker("Completion Tone:", selection: $settings.tone) {
-                    ForEach(settings.getTones()) { tone in
-                        Text(tone.name).tag(tone.id)
-                    }
-                }
-
-                Toggle("Auto-correct misspelled words as you type", isOn: $settings.autoCorrectEnabled)
-                    .padding(.top)
-
-                Toggle("Enable personalization (Typing History)", isOn: $settings.personalizationEnabled)
-                    .padding(.top)
-
-                Toggle("Use British English spelling", isOn: $settings.useBritishEnglish)
-                    .padding(.top)
-            }
-            .padding()
-            .tabItem {
-                Label("General", systemImage: "gear")
-            }
-
-            // Shortcuts Tab
-            Form {
-                Section(header: Text("Accept Suggestion").font(.headline).foregroundColor(.primary)) {
-                    Picker("", selection: $settings.acceptShortcut) {
-                        Text("Tab ⇥").tag("Tab")
-                        Text("Right Arrow →").tag("Right Arrow")
-                    }
-                    .pickerStyle(SegmentedPickerStyle())
-                    .labelsHidden()
-                    Text("Press this key to accept a ghost-text suggestion inline.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Divider().padding(.vertical, 8)
-
-                Section(header: Text("Rewrite Selection").font(.headline).foregroundColor(.primary)) {
-                    HStack {
-                        Text("Hotkey:")
-                            .frame(width: 70, alignment: .leading)
-                        HotkeyRecorderView(shortcut: $settings.rewriteShortcut)
-                            .frame(width: 160, height: 34)
-                            .help("Click then press your desired modifier + key combination. Press Esc to cancel.")
-                        Button("Reset") {
-                            settings.rewriteShortcut = "⌥R"
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundColor(.secondary)
-                        .font(.caption)
-                    }
-                    Text("Select text in any app, then press this hotkey to trigger the AI Rewrite panel.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+        Form {
+            Picker("Completion Tone:", selection: $settings.tone) {
+                ForEach(settings.getTones()) { tone in
+                    Text(tone.name).tag(tone.id)
                 }
             }
-            .padding()
-            .tabItem {
-                Label("Shortcuts", systemImage: "keyboard")
-            }
 
-            // Models Tab
+            Toggle("Auto-correct misspelled words as you type", isOn: $settings.autoCorrectEnabled)
+                .padding(.top)
 
-            Form {
-                ForEach(modelManager.models) { model in
-                    HStack {
-                        Text(model.name)
-                            .font(.headline)
-                        
-                        Spacer()
-                        
-                        if settings.activeModelId == model.id {
-                            Text("Active")
-                                .foregroundColor(.green)
-                                .font(.subheadline)
-                                .padding(.trailing, 8)
-                        } else if model.status == .downloaded {
-                            Button("Activate") {
-                                modelManager.activateModel(id: model.id)
-                            }
-                        }
-                        
-                        if model.status == .notDownloaded {
-                            Button("Download") {
-                                modelManager.downloadModel(id: model.id)
-                            }
-                        } else if model.status == .downloading {
-                            ProgressView(value: model.progress)
-                                .frame(width: 100)
-                            Text("\(Int(model.progress * 100))%")
-                                .font(.caption)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-            .padding()
-            .tabItem {
-                Label("Models", systemImage: "cpu")
-            }
-            
-            // Tones Tab (Replaces Persona Tab)
-            TonesSettingsView()
-                .tabItem {
-                    Label("Tones", systemImage: "person.text.rectangle")
-                }
-            
-            // Snippets Tab
-            SnippetsSettingsView()
-                .tabItem {
-                    Label("Snippets", systemImage: "text.badge.plus")
-                }
-            
-            // Apps Tab
-            AppOverridesSettingsView()
-                .tabItem {
-                    Label("Apps", systemImage: "app.badge")
-                }
-            
-            // Behaviors Tab
-            LearnedBehaviorsView()
-                .tabItem {
-                    Label("Behaviors", systemImage: "brain.head.profile")
-                }
+            Toggle("Enable personalization (Typing History)", isOn: $settings.personalizationEnabled)
+                .padding(.top)
+
+            Toggle("Use British English spelling", isOn: $settings.useBritishEnglish)
+                .padding(.top)
         }
+        .padding()
+        .frame(width: 600, height: 450)
+    }
+}
+
+struct ShortcutsSettingsView: View {
+    @ObservedObject var settings = SettingsManager.shared
+    var body: some View {
+        Form {
+            Section(header: Text("Accept Suggestion").font(.headline).foregroundColor(.primary)) {
+                Picker("", selection: $settings.acceptShortcut) {
+                    Text("Tab ⇥").tag("Tab")
+                    Text("Right Arrow →").tag("Right Arrow")
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .labelsHidden()
+                Text("Press this key to accept a ghost-text suggestion inline.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Divider().padding(.vertical, 8)
+
+            Section(header: Text("Rewrite Selection").font(.headline).foregroundColor(.primary)) {
+                HStack {
+                    Text("Hotkey:")
+                        .frame(width: 70, alignment: .leading)
+                    HotkeyRecorderView(shortcut: $settings.rewriteShortcut)
+                        .frame(width: 160, height: 34)
+                        .help("Click then press your desired modifier + key combination. Press Esc to cancel.")
+                    Button("Reset") {
+                        settings.rewriteShortcut = "⌥R"
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                    .font(.caption)
+                }
+                Text("Select text in any app, then press this hotkey to trigger the AI Rewrite panel.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .frame(width: 600, height: 450)
+    }
+}
+
+struct ModelsSettingsView: View {
+    @StateObject var modelManager = ModelManager()
+    @ObservedObject var settings = SettingsManager.shared
+    var body: some View {
+        Form {
+            ForEach(modelManager.models) { model in
+                HStack {
+                    Text(model.name)
+                        .font(.headline)
+                    
+                    Spacer()
+                    
+                    if settings.activeModelId == model.id {
+                        Text("Active")
+                            .foregroundColor(.green)
+                            .font(.subheadline)
+                            .padding(.trailing, 8)
+                    } else if model.status == .downloaded {
+                        Button("Activate") {
+                            modelManager.activateModel(id: model.id)
+                        }
+                    }
+                    
+                    if model.status == .notDownloaded {
+                        Button("Download") {
+                            modelManager.downloadModel(id: model.id)
+                        }
+                    } else if model.status == .downloading {
+                        ProgressView(value: model.progress)
+                            .frame(width: 100)
+                        Text("\(Int(model.progress * 100))%")
+                            .font(.caption)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .padding()
         .frame(width: 600, height: 450)
     }
 }

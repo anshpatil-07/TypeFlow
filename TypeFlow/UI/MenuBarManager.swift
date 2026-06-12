@@ -55,21 +55,46 @@ class MenuBarManager {
     
     @objc func openSettings() {
         if settingsWindow == nil {
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 600, height: 450),
-                styleMask: [.titled, .closable, .miniaturizable],
-                backing: .buffered, defer: false)
+            let tabVC = SettingsTabViewController()
+            let window = NSWindow(contentViewController: tabVC)
             window.title = "TypeFlow Settings"
-            window.isReleasedWhenClosed = false
+            window.styleMask.insert(.closable)
+            window.styleMask.insert(.miniaturizable)
+            window.styleMask.insert(.titled)
             window.center()
+            window.isReleasedWhenClosed = false
             self.settingsWindow = window
         }
         
-        // Always refresh the content view to pick up any code changes
-        settingsWindow?.contentView = NSHostingView(rootView: SettingsView().frame(width: 600, height: 450))
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
+
+// ─── Native Settings Tab Controller ─────────────────────────────────────────────
+
+class SettingsTabViewController: NSTabViewController {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        self.tabStyle = .toolbar
+        
+        func addTab<V: View>(title: String, icon: String, view: V) {
+            let vc = NSHostingController(rootView: view.frame(width: 600, height: 450))
+            vc.title = title
+            let item = NSTabViewItem(viewController: vc)
+            item.label = title
+            item.image = NSImage(systemSymbolName: icon, accessibilityDescription: nil)
+            self.addTabViewItem(item)
+        }
+        
+        addTab(title: "General", icon: "gear", view: GeneralSettingsView())
+        addTab(title: "Shortcuts", icon: "keyboard", view: ShortcutsSettingsView())
+        addTab(title: "Models", icon: "cpu", view: ModelsSettingsView())
+        addTab(title: "Tones", icon: "person.text.rectangle", view: TonesSettingsView())
+        addTab(title: "Snippets", icon: "text.badge.plus", view: SnippetsSettingsView())
+        addTab(title: "Apps", icon: "app.badge", view: AppOverridesSettingsView())
+        addTab(title: "Behaviors", icon: "brain.head.profile", view: LearnedBehaviorsView())
+    }
+}
 
     @objc func openDashboard() {
         if dashboardWindow == nil {
