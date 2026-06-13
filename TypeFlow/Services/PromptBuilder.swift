@@ -81,7 +81,7 @@ class PromptBuilder {
         prompt += "Vocabulary: \(extractedVocabulary)"
         
         var finalInstructions = systemInstructions
-        finalInstructions += "\nCRITICAL INSTRUCTION: Output only the exact text to continue the user's active line. Do not repeat instructions. If the context specifies a value, you MUST use that exact value."
+        finalInstructions += "\nCRITICAL INSTRUCTION: Output only the exact text to continue the user's active line. Do not paraphrase. If the context contains file paths, line numbers, hex constants, variable names, or specific identifiers, reproduce them character-for-character exactly as they appear in the context."
         if british {
             finalInstructions += " Use British English spelling."
         }

@@ -16,7 +16,13 @@ class AppMonitor {
         print("[TypeFlow-Debug] AppMonitor started listening for app switches.")
     }
     
+    private static let testingMode: Bool = ProcessInfo.processInfo.arguments.contains("-runTQB")
+    
     @objc private func appActivated(_ notification: Notification) {
+        // During TQB runs, app-switch events must not invalidate injected mock context,
+        // cancel inflight generation tasks, or overwrite the frozen prefix.
+        guard !AppMonitor.testingMode else { return }
+        
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
               let bundleId = app.bundleIdentifier else { return }
         
