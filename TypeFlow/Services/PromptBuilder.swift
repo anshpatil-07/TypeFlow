@@ -50,8 +50,9 @@ class PromptBuilder {
         let personalizationActive = SettingsManager.shared.personalizationEnabled
         let british = SettingsManager.shared.useBritishEnglish
 
-        // Stable key: only changes when settings/app change, NOT when the user types
-        let stableKey = "\(context.appTitle)|\(systemInstructions.hashValue)|\(personalizationActive)|\(british)"
+        // Stable key: only changes when settings/app/screen change, NOT when the user types
+        let screenHash = ScreenContextManager.shared.latestScreenText.hashValue
+        let stableKey = "\(context.appTitle)|\(systemInstructions.hashValue)|\(personalizationActive)|\(british)|\(screenHash)"
 
         if frozenPrefixKey == stableKey && !frozenPrefix.isEmpty {
             // Return the frozen copy — guaranteed byte-for-byte identical
@@ -61,27 +62,26 @@ class PromptBuilder {
         // ── Build fresh prefix ─────────────────────────────────────────────────
         // === TURN 1: User gives instructions ===
         var prompt = "<start_of_turn>user\n"
-        prompt += "You are a seamless text completion engine."
+        prompt += "You are a real-time autocomplete engine. Use the following context to seamlessly finish the user's active line.\n"
         
-        // Snapshot context & vocabulary once and freeze them.
-        // Using appTitle only (no screenKeywords) keeps the prefix stable even
-        // when OCR keywords fluctuate during typing.
-        prompt += " Context: \(context.appTitle)."
+        let currentScreen = ScreenContextManager.shared.latestScreenText
+        prompt += "<screen_context>\n\(currentScreen)\n</screen_context>\n"
         
+        let previousScreen = ScreenContextManager.shared.previousScreenText
+        prompt += "<background_context>\n\(previousScreen)\n</background_context>\n"
+        
+        var extractedVocabulary = ""
         if personalizationActive {
-            // Snapshot vocabulary at freeze time; it won't change mid-sentence.
             let vocab = VocabularyExtractor.shared.getVocabulary()
             if !vocab.isEmpty {
-                prompt += " Vocabulary: \(vocab.joined(separator: ", "))."
-            }
-            let samples = TypingHistoryManager.shared.getRecentSamples(count: 2)
-            if !samples.isEmpty {
-                prompt += " Style: \(samples.joined(separator: " | "))."
+                extractedVocabulary = vocab.joined(separator: ", ")
             }
         }
         
+        prompt += "Vocabulary: \(extractedVocabulary)"
+        
         var finalInstructions = systemInstructions
-        finalInstructions += " CRITICAL RULE: Do not simply copy or repeat the context or history verbatim. Generate a natural, novel continuation of the active text."
+        finalInstructions += "\nCRITICAL INSTRUCTION: Output only the exact text to continue the user's active line. Do not repeat instructions. If the context specifies a value, you MUST use that exact value."
         if british {
             finalInstructions += " Use British English spelling."
         }
@@ -93,6 +93,7 @@ class PromptBuilder {
         
         // === TURN 2: Model turn — activeLine is prefilled by buildPromptSuffix ===
         prompt += "<start_of_turn>model\n"
+        prompt += "Continuing text seamlessly: "
 
         // Freeze and return
         frozenPrefix = prompt

@@ -5,10 +5,12 @@ import ScreenCaptureKit
 class ScreenContextManager {
     static let shared = ScreenContextManager()
     
-    private(set) var latestScreenText: String = ""
+    var latestScreenText: String = ""
+    var previousScreenText: String = ""
     private var timer: Timer?
     
-    private init() {
+    // For testing and programmatic manipulation without locking out other services
+    init() {
         checkAndRequestPermission()
     }
     
@@ -16,6 +18,17 @@ class ScreenContextManager {
         if !CGPreflightScreenCaptureAccess() {
             print("[TypeFlow] Requesting Screen Recording permission...")
             CGRequestScreenCaptureAccess()
+            
+            // Fallback: Trigger immediately via SCShareableContent
+            Task {
+                do {
+                    _ = try await SCShareableContent.current
+                } catch {}
+            }
+            
+            if UserDefaults.standard.bool(forKey: "runTQB") || CommandLine.arguments.contains("-runTQB") {
+                print("[TypeFlow-Fatal] Screen Recording Permission Denied - OCR tests will fail")
+            }
         } else {
             print("[TypeFlow] Screen Recording permission is already granted.")
         }
@@ -58,6 +71,7 @@ class ScreenContextManager {
                     }
                     
                     DispatchQueue.main.async {
+                        self?.previousScreenText = self?.latestScreenText ?? ""
                         self?.latestScreenText = extractedText
                     }
                 }

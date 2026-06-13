@@ -39,11 +39,22 @@ class TypingHistoryManager {
     private let fileURL: URL
     private var symmetricKey: SymmetricKey?
     
+    // Evaluated once at init time using ProcessInfo so it cannot be affected by late-loading.
+    private static let testingMode: Bool = ProcessInfo.processInfo.arguments.contains("-runTQB")
+    
     private init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let typeFlowDir = appSupport.appendingPathComponent("TypeFlow")
         try? FileManager.default.createDirectory(at: typeFlowDir, withIntermediateDirectories: true)
         fileURL = typeFlowDir.appendingPathComponent("history.enc")
+        
+        // Early-exit before ANY SecItem calls when running under TQB test harness.
+        if TypingHistoryManager.testingMode {
+            print("[TypeFlow-Debug] TypingHistoryManager: TQB Test Mode - in-memory only, zero Keychain calls")
+            history = []
+            symmetricKey = SymmetricKey(size: .bits256)
+            return
+        }
         
         let keyName = "com.cotyper.TypeFlow.historyKey"
         if let keyData = KeychainHelper.load(key: keyName) {
@@ -188,6 +199,8 @@ class TypingHistoryManager {
     }
     
     private func saveHistory() {
+        if TypingHistoryManager.testingMode { return }
+        
         guard let key = symmetricKey else {
             print("[TypeFlow-Debug] TypingHistoryManager: saveHistory failed - symmetricKey is nil")
             return
@@ -203,6 +216,8 @@ class TypingHistoryManager {
     }
     
     private func loadHistory() {
+        if TypingHistoryManager.testingMode { return }
+        
         guard let key = symmetricKey else {
             print("[TypeFlow-Debug] TypingHistoryManager: loadHistory failed - symmetricKey is nil")
             history = []
