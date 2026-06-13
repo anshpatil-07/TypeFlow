@@ -11,7 +11,7 @@ struct CurrentContext {
 class UniversalContextManager {
     static let shared = UniversalContextManager()
     
-    private(set) var latestContext: CurrentContext
+    var latestContext: CurrentContext
     
     private init() {
         self.latestContext = CurrentContext(

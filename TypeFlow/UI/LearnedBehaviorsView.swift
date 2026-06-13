@@ -2,6 +2,10 @@ import SwiftUI
 
 struct LearnedBehaviorsView: View {
     @State private var behaviors = AdaptivePatternLearner.shared.behaviors
+    @State private var newClipboardTrigger: String = ""
+    @State private var newStopWord: String = ""
+    @State private var newAbbreviationShort: String = ""
+    @State private var newAbbreviationExpanded: String = ""
     
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -23,6 +27,18 @@ struct LearnedBehaviorsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                     
+                    HStack {
+                        TextField("New trigger...", text: $newClipboardTrigger)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                        Button(action: {
+                            if !newClipboardTrigger.isEmpty {
+                                AdaptivePatternLearner.shared.addClipboardTrigger(trigger: newClipboardTrigger)
+                                newClipboardTrigger = ""
+                                refresh()
+                            }
+                        }) { Image(systemName: "plus") }
+                    }
+                    
                     List {
                         ForEach(behaviors.clipboardTriggers, id: \.self) { trigger in
                             HStack {
@@ -39,7 +55,7 @@ struct LearnedBehaviorsView: View {
                             }
                         }
                     }
-                    .frame(height: 200)
+                    .frame(height: 150)
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3), lineWidth: 1))
                 }
                 
@@ -49,6 +65,18 @@ struct LearnedBehaviorsView: View {
                     Text("Words that suppress autocomplete.")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                    
+                    HStack {
+                        TextField("New stop-word...", text: $newStopWord)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                        Button(action: {
+                            if !newStopWord.isEmpty {
+                                AdaptivePatternLearner.shared.addStopWord(word: newStopWord)
+                                newStopWord = ""
+                                refresh()
+                            }
+                        }) { Image(systemName: "plus") }
+                    }
                     
                     List {
                         ForEach(behaviors.stopWords, id: \.self) { word in
@@ -66,9 +94,56 @@ struct LearnedBehaviorsView: View {
                             }
                         }
                     }
-                    .frame(height: 200)
+                    .frame(height: 150)
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3), lineWidth: 1))
                 }
+            }
+            
+            Divider()
+            
+            VStack(alignment: .leading) {
+                Text("Abbreviation Expansions")
+                    .font(.headline)
+                Text("Auto-replace shortcodes with full words instantly while typing.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                HStack {
+                    TextField("Short (e.g. elts)", text: $newAbbreviationShort)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                    TextField("Expanded (e.g. elements)", text: $newAbbreviationExpanded)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                    Button(action: {
+                        if !newAbbreviationShort.isEmpty && !newAbbreviationExpanded.isEmpty {
+                            AdaptivePatternLearner.shared.addAbbreviation(short: newAbbreviationShort, expanded: newAbbreviationExpanded)
+                            newAbbreviationShort = ""
+                            newAbbreviationExpanded = ""
+                            refresh()
+                        }
+                    }) { Image(systemName: "plus") }
+                }
+                
+                List {
+                    ForEach(behaviors.abbreviationExpansions.keys.sorted(), id: \.self) { short in
+                        HStack {
+                            Text(short)
+                                .font(.system(.body, design: .monospaced))
+                            Image(systemName: "arrow.right").foregroundColor(.secondary)
+                            Text(behaviors.abbreviationExpansions[short] ?? "")
+                            Spacer()
+                            Button(action: {
+                                AdaptivePatternLearner.shared.deleteAbbreviation(short: short)
+                                refresh()
+                            }) {
+                                Image(systemName: "trash")
+                                    .foregroundColor(.red)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+                    }
+                }
+                .frame(height: 150)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3), lineWidth: 1))
             }
         }
         .padding(40)

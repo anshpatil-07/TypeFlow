@@ -47,7 +47,7 @@ class MenuBarManager {
         self.statusItem.menu = menu
         
         // Handle launch at login registration
-        try? SMAppService.mainApp.register()
+        // try? SMAppService.mainApp.register()
     }
     
     var settingsWindow: NSWindow?

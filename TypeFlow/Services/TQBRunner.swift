@@ -20,11 +20,13 @@ class TQBRunner {
         Task {
             print("[TypeFlow-Debug] Waiting for LLMEngine to become ready...")
             var attempts = 0
-            while !LLMEngine.shared.isModelReady && attempts < 120 {
+            var isReady = await LLMEngine.shared.isModelReady
+            while !isReady && attempts < 120 {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 attempts += 1
+                isReady = await LLMEngine.shared.isModelReady
             }
-            guard LLMEngine.shared.isModelReady else {
+            guard await LLMEngine.shared.isModelReady else {
                 print("[TypeFlow-Debug] LLMEngine failed to become ready after 60 seconds.")
                 exit(1)
             }
@@ -73,6 +75,7 @@ class TQBRunner {
     private func generateAndWait(prompt: String, maxTokens: Int = 20) async throws -> String {
         return await LLMEngine.shared.generateCompletion(
             textBeforeCaret: prompt,
+            liveBuffer: "",
             toneProfile: SettingsManager.shared.getToneProfile(by: "Neutral") ?? ToneProfile(id: "", name: "", systemInstructions: "", temperature: 0.1, maxTokens: maxTokens, isBuiltIn: true)
         )
     }
@@ -184,7 +187,6 @@ class TQBRunner {
                 threehalfs = 1.5
                 x2 = number * 0.5
                 y = number
-                # The algorithm from the previous tab uses the magic constant 0x5f3759df
                 i = struct.unpack('i', struct.pack('f', y))[0]
                 i = 0x5f3759df - (i >> 1)
                 y = struct.unpack('f', struct.pack('i', i))[0]
@@ -218,10 +220,7 @@ class TQBRunner {
     // ---------------------------------------------------------------------------
     func testAdaptiveCodeCompletion() async throws {
         print("Running Test 5: Adaptive Code Completion (variable-aware)...")
-        ScreenContextManager.shared.latestScreenText = """
-            let user_elements = [1, 2, 3]
-            // Iterate: for(int i = 0; i < user_elements.count; i++) {
-            """
+        ScreenContextManager.shared.latestScreenText = "let user_elements = [1, 2, 3]"
         ScreenContextManager.shared.previousScreenText = ""
         UniversalContextManager.shared.latestContext = CurrentContext(
             appBundleId: "com.apple.dt.Xcode",

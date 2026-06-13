@@ -7,7 +7,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var overlayWindowController: OverlayWindowController?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
+        let isTestingMode = ProcessInfo.processInfo.arguments.contains("-runTQB") || UserDefaults.standard.bool(forKey: "runTQB") || FileManager.default.fileExists(atPath: "/tmp/typeflow_tqb_active")
+        if isTestingMode {
+            // Redirect stdout and stderr to a log file
+            let logPath = "/tmp/typeflow_tqb.log"
+            try? "".write(toFile: logPath, atomically: true, encoding: .utf8)
+            freopen(logPath, "w", stdout)
+            freopen(logPath, "w", stderr)
+            setvbuf(stdout, nil, _IONBF, 0)
+            setvbuf(stderr, nil, _IONBF, 0)
+            print("[TypeFlow-Debug] Redirected output to \(logPath) (unbuffered)")
+            
+            NSApp.setActivationPolicy(.regular)
+        } else {
+            NSApp.setActivationPolicy(.accessory)
+        }
+        
         menuBarManager = MenuBarManager()
         overlayWindowController = OverlayWindowController()
         
@@ -31,10 +46,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.servicesProvider = TypeFlowServicesProvider()
         NSUpdateDynamicServices()
         
-        // Register App Intents / Shortcuts
-        Task {
-            TypeFlowShortcuts.updateAppShortcutParameters()
-            print("[TypeFlow-Debug] Successfully registered App Shortcuts.")
+
+        if isTestingMode {
+            print("[TypeFlow-Debug] -runTQB flag detected. Starting TQB Tests...")
+            TQBRunner.shared.runTests()
+            
+            // Open settings window to force foreground active window context
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                self?.menuBarManager?.openSettings()
+            }
+        }
+        
+        // Request screen capture permission after a delay when application is finished launching
+        // and main window is active.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            ScreenContextManager.shared.checkAndRequestPermission()
         }
     }
 

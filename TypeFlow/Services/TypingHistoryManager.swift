@@ -39,22 +39,23 @@ class TypingHistoryManager {
     private let fileURL: URL
     private var symmetricKey: SymmetricKey?
     
-    // Evaluated once at init time using ProcessInfo so it cannot be affected by late-loading.
-    private static let testingMode: Bool = ProcessInfo.processInfo.arguments.contains("-runTQB")
+    // Evaluated once at init time using file check and ProcessInfo.
+    private static let testingMode: Bool = FileManager.default.fileExists(atPath: "/tmp/typeflow_tqb_active") || ProcessInfo.processInfo.arguments.contains("-runTQB")
     
     private init() {
+        // Early-exit before ANY directories are created or SecItem calls when running under TQB.
+        if TypingHistoryManager.testingMode {
+            print("[TypeFlow-Debug] TypingHistoryManager: TQB Test Mode via file trigger - in-memory only, zero Keychain/disk calls")
+            self.fileURL = URL(fileURLWithPath: "/tmp/typeflow_dummy_history.enc")
+            self.symmetricKey = SymmetricKey(size: .bits256)
+            self.history = []
+            return
+        }
+        
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let typeFlowDir = appSupport.appendingPathComponent("TypeFlow")
         try? FileManager.default.createDirectory(at: typeFlowDir, withIntermediateDirectories: true)
         fileURL = typeFlowDir.appendingPathComponent("history.enc")
-        
-        // Early-exit before ANY SecItem calls when running under TQB test harness.
-        if TypingHistoryManager.testingMode {
-            print("[TypeFlow-Debug] TypingHistoryManager: TQB Test Mode - in-memory only, zero Keychain calls")
-            history = []
-            symmetricKey = SymmetricKey(size: .bits256)
-            return
-        }
         
         let keyName = "com.cotyper.TypeFlow.historyKey"
         if let keyData = KeychainHelper.load(key: keyName) {

@@ -3,6 +3,7 @@ import Foundation
 struct LearnedBehaviors: Codable {
     var clipboardTriggers: [String] = []
     var stopWords: [String] = []
+    var abbreviationExpansions: [String: String] = [:]
 }
 
 class AdaptivePatternLearner {
@@ -73,13 +74,37 @@ class AdaptivePatternLearner {
         }
     }
     
+    func addClipboardTrigger(trigger: String) {
+        if !behaviors.clipboardTriggers.contains(trigger) {
+            behaviors.clipboardTriggers.append(trigger)
+            saveBehaviors()
+        }
+    }
+    
     func deleteBehavior(trigger: String) {
         behaviors.clipboardTriggers.removeAll { $0 == trigger }
         saveBehaviors()
     }
     
+    func addStopWord(word: String) {
+        if !behaviors.stopWords.contains(word) {
+            behaviors.stopWords.append(word)
+            saveBehaviors()
+        }
+    }
+    
     func deleteStopWord(word: String) {
         behaviors.stopWords.removeAll { $0 == word }
+        saveBehaviors()
+    }
+    
+    func addAbbreviation(short: String, expanded: String) {
+        behaviors.abbreviationExpansions[short] = expanded
+        saveBehaviors()
+    }
+    
+    func deleteAbbreviation(short: String) {
+        behaviors.abbreviationExpansions.removeValue(forKey: short)
         saveBehaviors()
     }
     
@@ -91,7 +116,8 @@ class AdaptivePatternLearner {
             // Default baseline behaviors
             self.behaviors = LearnedBehaviors(
                 clipboardTriggers: ["here is the link:", "my email is", "the url is"],
-                stopWords: ["the", "and", "is", "a", "to", "in", "of", "it", "that", "on", "for"]
+                stopWords: ["the", "and", "is", "a", "to", "in", "of", "it", "that", "on", "for"],
+                abbreviationExpansions: [:]
             )
             saveBehaviors()
         }

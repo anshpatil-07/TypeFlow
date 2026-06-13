@@ -9,52 +9,86 @@ import MLX
 import Darwin
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LLMEngine — Real on-device inference via MLXLLM
+// LLMEngine — Real on-device inference via MLXLLM (Hard-Lock Thread-Safe)
 //
-// The first time `generateCompletion` is called it downloads the model
-// (~1.5 GB for Gemma 3 1B 4-bit) into ~/Library/Caches/huggingface.
-// Subsequent launches load from cache — no network needed.
+// CONCURRENCY CONTRACT:
+//   mlxLock is an NSLock that serializes ALL calls into the MLX C++ runtime.
+//   Swift actor isolation alone is insufficient because container.perform { }
+//   dispatches its closure to a global concurrent thread pool, escaping actor
+//   isolation. The lock is the ONLY barrier that guarantees single-threaded
+//   access to mlx::core::detail::compile and the internal unordered_map.
+//
+//   Rule: any code that touches modelContext.model(...), eval(...), or
+//         MLXLMCommon.generate(...) MUST be wrapped in mlxLock.withLock { }.
+//         If the task is cancelled while waiting for the lock, drop it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct KVCacheError: Error {
     let message: String
 }
 
-class LLMEngine {
+
+struct GenerationResult: Sendable {
+    let outputText: String
+}
+
+
+private final class CacheStore: @unchecked Sendable {
+    var cache: [KVCache]?
+    var prefixString: String = ""
+}
+
+actor LLMEngine {
     static let shared = LLMEngine()
+    
+    private let cacheStore = CacheStore()
 
     // Lazily-loaded model container — loaded once, reused on every completion.
     private var modelContainer: ModelContainer?
     private var isLoading = false
     private var loadError: Error?
     private var currentLoadedModelId: String?
-    
-    /// The persistent base KV cache containing only the frozen system prefix.
-    private var baseKVCache: [KVCache]?
-    /// The exact string used to generate baseKVCache. If the string changes, we rebuild.
-    private var cachedPrefixString: String = ""
     private var inactivityTimer: Timer?
     
-    
     var isModelReady: Bool { modelContainer != nil }
+    
+    private func unloadModel() {
+        self.modelContainer = nil
+        self.invalidateKVCache()
+        print("[TypeFlow-Debug] LLMEngine: Model unloaded due to 5 minutes of inactivity")
+    }
     
     private func resetInactivityTimer() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.inactivityTimer?.invalidate()
-            self.inactivityTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
+            Task {
+                await self.invalidateTimer()
+            }
+            let timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
                 guard let self = self else { return }
-                self.modelContainer = nil
-                self.invalidateKVCache()
-                print("[TypeFlow-Debug] LLMEngine: Model unloaded due to 5 minutes of inactivity")
+                Task {
+                    await self.unloadModel()
+                }
+            }
+            Task {
+                await self.setTimer(timer)
             }
         }
     }
     
+    private func invalidateTimer() {
+        inactivityTimer?.invalidate()
+        inactivityTimer = nil
+    }
+    
+    private func setTimer(_ timer: Timer) {
+        inactivityTimer = timer
+    }
+    
     /// Explicitly invalidate the KV cache — call only when tone or personalization changes.
     func invalidateKVCache() {
-        baseKVCache = nil
-        cachedPrefixString = ""
+        cacheStore.cache = nil
+        cacheStore.prefixString = ""
         print("[TypeFlow-Debug] LLMEngine: KV cache explicitly invalidated")
     }
 
@@ -89,61 +123,50 @@ class LLMEngine {
         let availableBytes = availablePages * UInt64(pageSize)
         
         let twoGB: UInt64 = 2 * 1024 * 1024 * 1024
-        // Commenting out repetitive log to avoid console spam on every keystroke
-        // print("[TypeFlow] Available memory check: \(availableBytes / 1024 / 1024) MB (Page size: \(pageSize) bytes)")
-        
         return availableBytes >= twoGB
     }
     
     /// Pre-warm the cache when the active app changes so zero-latency can be achieved.
-    /// Also invalidates the frozen prefix in PromptBuilder so the new app context
-    /// is picked up on the first keystroke in the new application.
-    func prewarmCache(toneProfile: ToneProfile) {
+    func prewarmCache(toneProfile: ToneProfile) async {
         print("[TypeFlow-Debug] LLMEngine: Pre-warming cache for tone \(toneProfile.name)")
-        // App has switched — force a fresh prefix so the new appTitle is baked in.
         PromptBuilder.shared.invalidateFrozenPrefix()
-        Task {
-            await loadModelIfNeeded()
-            resetInactivityTimer()
+        
+        await loadModelIfNeeded()
+        resetInactivityTimer()
+        
+        guard let container = modelContainer else { return }
+        guard checkMemoryStatus() else { return }
+        
+        let staticPrefixPrompt = PromptBuilder.shared.buildStaticPrefix(systemInstructions: toneProfile.systemInstructions)
+        let cacheStore = self.cacheStore
+        await container.perform { modelContext in
+            defer { 
+                // Barrier to ensure asyncEval background tasks finish before unlocking
+                MLX.eval(MLXArray(0))
+                MLX.Memory.clearCache()
+            }
             
-            guard let container = modelContainer else { return }
-            guard checkMemoryStatus() else { return }
-            
-            _ = await container.perform { [weak self] modelContext -> String in
-                guard let self = self else { return "" }
-                do {
-                    let staticPrefixPrompt = PromptBuilder.shared.buildStaticPrefix(systemInstructions: toneProfile.systemInstructions)
-                    
-                    if self.baseKVCache == nil || self.cachedPrefixString != staticPrefixPrompt {
-                        print("[TypeFlow-Debug] LLMEngine: Pre-warm cache miss — rebuilding base KV prefix...")
-                        
-                        let prefixTokens = modelContext.tokenizer.encode(text: staticPrefixPrompt)
-                        
-                        let newCache = modelContext.model.newCache(parameters: nil)
-                        if !prefixTokens.isEmpty {
-                            let prefixMLXTokens = MLXArray(prefixTokens)
-                            _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
-                            eval(newCache)
-                        }
-                        
-                        self.baseKVCache = newCache
-                        self.cachedPrefixString = staticPrefixPrompt
-                        print("[TypeFlow-Debug] LLMEngine: Pre-warm complete with \(prefixTokens.count) tokens.")
-                    } else {
-                        print("[TypeFlow-Debug] LLMEngine: Pre-warm cache hit — reusing base KV prefix.")
-                    }
-                } catch {
-                    print("[TypeFlow-Debug] LLMEngine: Pre-warm Error in inner do block: \(error)")
+            if cacheStore.cache == nil || cacheStore.prefixString != staticPrefixPrompt {
+                print("[TypeFlow-Debug] LLMEngine: Pre-warm cache miss — rebuilding base KV prefix...")
+                
+                let prefixTokens = modelContext.tokenizer.encode(text: staticPrefixPrompt)
+                let newCache = modelContext.model.newCache(parameters: nil)
+                if !prefixTokens.isEmpty {
+                    let prefixMLXTokens = MLXArray(prefixTokens)
+                    _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
+                    eval(newCache)
                 }
-                return ""
+                print("[TypeFlow-Debug] LLMEngine: Pre-warm complete with \(prefixTokens.count) tokens.")
+                cacheStore.cache = newCache
+                cacheStore.prefixString = staticPrefixPrompt
+            } else {
+                print("[TypeFlow-Debug] LLMEngine: Pre-warm cache hit — reusing base KV prefix.")
             }
         }
     }
 
     /// Generate a completion for the given text-before-caret.
-    /// Uses the chat message API so the model's instruct chat template is applied,
-    /// preventing the model from echoing the raw prompt tokens.
-    func generateCompletion(textBeforeCaret: String, toneProfile: ToneProfile) async -> String {
+    func generateCompletion(textBeforeCaret: String, liveBuffer: String, toneProfile: ToneProfile) async -> String {
         print("[TypeFlow-Debug] LLMEngine: generateCompletion called with tone \(toneProfile.name) (temp: \(toneProfile.temperature), maxTokens: \(toneProfile.maxTokens))")
         
         await loadModelIfNeeded()
@@ -157,144 +180,181 @@ class LLMEngine {
             return ""
         }
         
-        // Guard to cancel inference if available memory drops below 2GB
         guard checkMemoryStatus() else {
             print("[TypeFlow-Debug] LLMEngine: Low memory guard triggered! Cancelling generation.")
             return ""
         }
         
-        // If the user just cleared the active line buffer, the frozen prefix must be
-        // regenerated so any stale vocabulary / OCR snapshots are discarded.
         if textBeforeCaret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             PromptBuilder.shared.invalidateFrozenPrefix()
         }
 
-        do {
-            let result = try await container.perform { [weak self] modelContext -> String in
-                guard let self = self else { return "" }
-                do {
-                    // ── Build Prefix and Suffix prompts ──────────────────────────────
-                    let suffixPrompt = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret)
-                    let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(systemInstructions: toneProfile.systemInstructions)
-                    
-                    if self.baseKVCache == nil || self.cachedPrefixString != dynamicPrefixPrompt {
-                        print("[TypeFlow-Debug] LLMEngine: Base cache miss — rebuilding KV prefix...")
-                        
-                        let prefixTokens = modelContext.tokenizer.encode(text: dynamicPrefixPrompt)
-                        let newCache = modelContext.model.newCache(parameters: nil)
-                        
-                        if !prefixTokens.isEmpty {
-                            let prefixMLXTokens = MLXArray(prefixTokens)
-                            _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
-                            eval(newCache)
-                        }
-                        self.baseKVCache = newCache
-                        self.cachedPrefixString = dynamicPrefixPrompt
-                        print("[TypeFlow-Debug] LLMEngine: Base cache rebuilt with \(prefixTokens.count) tokens.")
-                    } else {
-                        print("[TypeFlow-Debug] LLMEngine: Base cache hit — cloning prefix.")
-                    }
-                    
-                    guard let baseCache = self.baseKVCache else {
-                        throw KVCacheError(message: "Failed to resolve base KV cache")
-                    }
-                    
-                    // Suffix tokens to evaluate
-                    let suffixTokens = modelContext.tokenizer.encode(text: suffixPrompt)
-                    guard !suffixTokens.isEmpty else {
-                        print("[TypeFlow-Debug] LLMEngine: No suffix tokens to generate, returning empty string.")
-                        return ""
-                    }
-                    
-                    // Clone the base cache to avoid contamination with generated/suffix tokens
-                    let generatorCache = baseCache.map { $0.copy() }
-                    let suffixInput = LMInput(tokens: MLXArray(suffixTokens))
-                    
-                    print("[TypeFlow-Debug] LLMEngine: Starting generate stream with \(suffixTokens.count) suffix tokens...")
-                    let isClipboard = PromptBuilder.shared.hasClipboardTrigger(textBeforeCaret: textBeforeCaret)
-                    let activeMaxTokens = isClipboard ? 150 : toneProfile.maxTokens
-                    let params = GenerateParameters(maxTokens: activeMaxTokens, temperature: Float(toneProfile.temperature), repetitionPenalty: 1.15)
-                    
-                    let stream = try MLXLMCommon.generate(
-                        input: suffixInput,
-                        cache: generatorCache,
-                        parameters: params,
-                        context: modelContext
-                    )
-                    
-                    var outputText = ""
-                    // Stop-token list — covers every Gemma 4 control-tag variant
-                    // including the closing-slash forms that leak as raw text.
-                    let stopTokens = [
-                        "<end_of_turn>",
-                        "</end_of_turn>",
-                        "<start_of_turn>",
-                        "</start_of_turn>",
-                        "<eos>",
-                        "</s>",
-                        "</completion>"
-                    ]
-
-                    for await generation in stream {
-                        if case .chunk(let text) = generation {
-                            outputText += text
-                            print("[TypeFlow-Debug] LLMEngine Chunk: '\(text)'")
-
-                            var shouldStop = false
-                            for token in stopTokens {
-                                if let range = outputText.range(of: token) {
-                                    outputText = String(outputText[..<range.lowerBound])
-                                    print("[TypeFlow-Debug] LLMEngine: Found stop token '\(token)', halting stream.")
-                                    shouldStop = true
-                                    break
-                                }
-                            }
-                            if shouldStop { break }
-                        }
-                    }
-                    print("[TypeFlow-Debug] LLMEngine: Stream finished. Total output: '\(outputText)'")
-                    return outputText
-                } catch {
-                    print("[TypeFlow-Debug] LLMEngine Error in generation loop: \(error)")
-                    throw error
-                }
-            }
-            
-            // Clear cached tensors after inference to release unified memory buffers
-            MLX.Memory.clearCache()
-            
-            var cleanResult = result
-            if let range = cleanResult.range(of: "</completion>") {
-                cleanResult = String(cleanResult[..<range.lowerBound])
-            }
-            
-            var trimmedResult = cleanResult.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            
-            // Aggressive echo stripper: remove any re-echoed portion of the input text
-            let echoedContext = String(textBeforeCaret.suffix(120)).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !echoedContext.isEmpty && trimmedResult.hasPrefix(echoedContext) {
-                trimmedResult = String(trimmedResult.dropFirst(echoedContext.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-            
-            // The suffix fed to the model has trailing spaces stripped (to prevent premature
-            // <end_of_turn> closure). Restore the space boundary here so the ghost text reads
-            // correctly when appended after the user's last typed character.
-            if !trimmedResult.isEmpty && textBeforeCaret.hasSuffix(" ") && !trimmedResult.hasPrefix(" ") {
-                trimmedResult = " " + trimmedResult
-            }
-            
-            print("[TypeFlow-Debug] LLMEngine: Generation successful. Result: '\(trimmedResult)'")
-            return trimmedResult
-            
-        } catch {
-            print("[TypeFlow-Debug] LLMEngine Error during container.perform: \(error)")
+        let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(systemInstructions: toneProfile.systemInstructions)
+        let cacheStore = self.cacheStore
+        
+        // Check for task cancellation before entering the lock
+        if Task.isCancelled {
+            print("[TypeFlow-Debug] LLMEngine: Task cancelled before acquiring lock, dropping.")
             return ""
         }
+        
+        let result: GenerationResult = await container.perform { modelContext -> GenerationResult in
+            // HARD SERIAL LOCK: blocks this thread until MLX is free.
+            // If the calling task was cancelled while blocked here, drop immediately after acquiring.
+            defer { 
+                // Barrier to ensure asyncEval background tasks finish before unlocking
+                MLX.eval(MLXArray(0))
+                MLX.Memory.clearCache()
+            }
+            
+            // Re-check cancellation immediately after acquiring the lock.
+            if Task.isCancelled {
+                print("[TypeFlow-Debug] LLMEngine: Task cancelled after acquiring lock, dropping.")
+                return GenerationResult(outputText: "")
+            }
+            
+            do {
+                let suffixResult = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer)
+                let suffixPrompt = suffixResult.text
+                
+                if suffixResult.requiresHealing {
+                    cacheStore.cache = nil
+                    print("[TypeFlow-Debug] LLMEngine: Bypassing base cache due to token healing boundary.")
+                }
+                
+                if cacheStore.cache == nil || cacheStore.prefixString != dynamicPrefixPrompt {
+                    print("[TypeFlow-Debug] LLMEngine: Base cache miss — rebuilding KV prefix...")
+                    
+                    let prefixTokens = modelContext.tokenizer.encode(text: dynamicPrefixPrompt)
+                    let newCache = modelContext.model.newCache(parameters: nil)
+                    
+                    if !prefixTokens.isEmpty {
+                        let prefixMLXTokens = MLXArray(prefixTokens)
+                        _ = modelContext.model(prefixMLXTokens[.newAxis], cache: newCache)
+                        eval(newCache)
+                    }
+                    cacheStore.cache = newCache
+                    cacheStore.prefixString = dynamicPrefixPrompt
+                    print("[TypeFlow-Debug] LLMEngine: Base cache rebuilt with \(prefixTokens.count) tokens.")
+                } else {
+                    print("[TypeFlow-Debug] LLMEngine: Base cache hit — cloning prefix.")
+                }
+                
+                guard let baseCache = cacheStore.cache else {
+                    throw KVCacheError(message: "Failed to resolve base KV cache")
+                }
+                
+                var suffixTokens = modelContext.tokenizer.encode(text: suffixPrompt)
+                
+                // CRITICAL FIX: The MLX Tokenizer may automatically prepend a BOS token to every encode call.
+                // Since the prefix already has a BOS token, appending a second BOS token in the middle
+                // of the generation sequence destroys the causal mask and causes severe hallucinations (e.g., /w_pass).
+                let bosTokens = modelContext.tokenizer.encode(text: "")
+                if let bosTokenId = bosTokens.first, let firstSuffixId = suffixTokens.first, bosTokenId == firstSuffixId {
+                    suffixTokens.removeFirst()
+                    print("[TypeFlow-Debug] LLMEngine: Stripped illegal double BOS token from suffix.")
+                }
+                
+                guard !suffixTokens.isEmpty else {
+                    print("[TypeFlow-Debug] LLMEngine: No suffix tokens to generate, returning empty string.")
+                    return GenerationResult(outputText: "")
+                }
+                
+                let generatorCache = baseCache.map { $0.copy() }
+                let suffixInput = LMInput(tokens: MLXArray(suffixTokens))
+                
+                print("[TypeFlow-Debug] LLMEngine: Starting generate stream with \(suffixTokens.count) suffix tokens...\n--- FULL COMBINED PROMPT LOG ---\n\(dynamicPrefixPrompt)\(suffixPrompt)\n--------------------------------")
+                let isClipboard = PromptBuilder.shared.hasClipboardTrigger(textBeforeCaret: textBeforeCaret)
+                let activeMaxTokens = isClipboard ? 150 : toneProfile.maxTokens
+                let params = GenerateParameters(maxTokens: activeMaxTokens, temperature: Float(toneProfile.temperature), repetitionPenalty: 1.15)
+                
+                var iterator = try TokenIterator(
+                    input: suffixInput, model: modelContext.model, cache: generatorCache, parameters: params)
+                var detokenizer = NaiveStreamingDetokenizer(tokenizer: modelContext.tokenizer)
+                
+                var outputText = ""
+                let stopTokens = [
+                    "<end_of_turn>",
+                    "</end_of_turn>",
+                    "<start_of_turn>",
+                    "</start_of_turn>",
+                    "<eos>",
+                    "</s>",
+                    "</completion>",
+                    "<turn|>",
+                    "<|channel>",
+                    "thought",
+                    "User:",
+                    "\n"
+                ]
+
+                while let token = iterator.next() {
+                    if Task.isCancelled {
+                        print("[TypeFlow-Debug] LLMEngine: Generation task was cancelled mid-stream. Aborting.")
+                        break
+                    }
+                    
+                    detokenizer.append(token: token)
+                    if let text = detokenizer.next() {
+                        outputText += text
+                        print("[TypeFlow-Debug] LLMEngine Chunk: '\(text)'")
+
+                        var shouldStop = false
+                        for stopToken in stopTokens {
+                            if let range = outputText.range(of: stopToken) {
+                                outputText = String(outputText[..<range.lowerBound])
+                                print("[TypeFlow-Debug] LLMEngine: Found stop token '\(stopToken)', halting stream.")
+                                shouldStop = true
+                                break
+                            }
+                        }
+                        if shouldStop { break }
+                    }
+                }
+                
+
+                print("[TypeFlow-Debug] LLMEngine: Stream finished. Total output: '\(outputText)'")
+                return GenerationResult(outputText: outputText)
+            } catch {
+                print("[TypeFlow-Debug] LLMEngine Error during MLX inference: \(error)")
+                return GenerationResult(outputText: "")
+            }
+        }
+        
+        MLX.Memory.clearCache()
+        
+        var cleanResult = result.outputText
+        if let range = cleanResult.range(of: "</completion>") {
+            cleanResult = String(cleanResult[..<range.lowerBound])
+        }
+        
+        var trimmedResult = cleanResult.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        
+        // Strict case-sensitive overlap strip: find the longest suffix of echoedContext
+        // that exactly matches a prefix of trimmedResult, then drop it.
+        let echoedContext = String(textBeforeCaret.suffix(120)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !echoedContext.isEmpty {
+            let maxOv = min(echoedContext.count, trimmedResult.count)
+            for i in stride(from: maxOv, through: 1, by: -1) {
+                let suffix = String(echoedContext.suffix(i))
+                let prefix = String(trimmedResult.prefix(i))
+                if suffix == prefix {
+                    trimmedResult = String(trimmedResult.dropFirst(i))
+                    break
+                }
+            }
+        }
+        
+        if !trimmedResult.isEmpty && textBeforeCaret.hasSuffix(" ") && !trimmedResult.hasPrefix(" ") {
+            trimmedResult = " " + trimmedResult
+        }
+        
+        print("[TypeFlow-Debug] LLMEngine: Generation successful. Result: '\(trimmedResult)'")
+        return trimmedResult
     }
 
     // ── Model loading (MLXLLM) ────────────────────────────────────────────────
     
-    @MainActor
     private func loadModelIfNeeded() async {
         let activeModelId = SettingsManager.shared.activeModelId
         
@@ -303,6 +363,7 @@ class LLMEngine {
             modelContainer = nil
             currentLoadedModelId = nil
             loadError = nil
+            MLX.eval(MLXArray(0))
             MLX.Memory.clearCache()
         }
         
@@ -339,8 +400,18 @@ class LLMEngine {
             return ""
         }
         
-        do {
-            let result = try await container.perform { (modelContext: ModelContext) async throws -> String in
+        if Task.isCancelled { return "" }
+        
+        let result: String = await container.perform { (modelContext: ModelContext) async -> String in
+            defer { 
+                // Barrier to ensure asyncEval background tasks finish before unlocking
+                MLX.eval(MLXArray(0))
+                MLX.Memory.clearCache()
+            }
+            
+            if Task.isCancelled { return "" }
+            
+            do {
                 let prompt = PromptBuilder.shared.buildRewritePrompt(
                     selectedText: selectedText,
                     systemInstructions: toneProfile.systemInstructions,
@@ -352,12 +423,9 @@ class LLMEngine {
                 let maxTokens = max(100, selectedText.count / 2)
                 let params = GenerateParameters(maxTokens: maxTokens, temperature: Float(toneProfile.temperature))
                 
-                let stream = try MLXLMCommon.generate(
-                    input: prepared,
-                    cache: modelContext.model.newCache(parameters: nil),
-                    parameters: params,
-                    context: modelContext
-                )
+                var iterator = try TokenIterator(
+                    input: prepared, model: modelContext.model, cache: modelContext.model.newCache(parameters: nil), parameters: params)
+                var detokenizer = NaiveStreamingDetokenizer(tokenizer: modelContext.tokenizer)
                 
                 var outputText = ""
                 let stopTokens = [
@@ -367,16 +435,21 @@ class LLMEngine {
                     "</start_of_turn>",
                     "<eos>",
                     "</s>",
-                    "</completion>"
+                    "</completion>",
+                    "<turn|>",
+                    "<|channel>",
+                    "thought"
                 ]
                 
-                for await generation in stream {
-                    if case .chunk(let text) = generation {
+                while let token = iterator.next() {
+                    if Task.isCancelled { break }
+                    detokenizer.append(token: token)
+                    if let text = detokenizer.next() {
                         outputText += text
                         
                         var shouldStop = false
-                        for token in stopTokens {
-                            if let range = outputText.range(of: token) {
+                        for stopToken in stopTokens {
+                            if let range = outputText.range(of: stopToken) {
                                 outputText = String(outputText[..<range.lowerBound])
                                 shouldStop = true
                                 break
@@ -385,20 +458,22 @@ class LLMEngine {
                         if shouldStop { break }
                     }
                 }
+                
+
                 return outputText
+            } catch {
+                print("[TypeFlow-Debug] LLMEngine rewrite error: \(error)")
+                return ""
             }
-            
-            MLX.Memory.clearCache()
-            
-            var cleanResult = result
-            if let range = cleanResult.range(of: "</completion>") {
-                cleanResult = String(cleanResult[..<range.lowerBound])
-            }
-            return cleanResult.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-        } catch {
-            print("[TypeFlow-Debug] LLMEngine rewrite error: \(error)")
-            return ""
         }
+        
+        // MLX.Memory.clearCache() moved inside lock
+        
+        var cleanResult = result
+        if let range = cleanResult.range(of: "</completion>") {
+            cleanResult = String(cleanResult[..<range.lowerBound])
+        }
+        return cleanResult.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
     }
     
     func generateSmartReplies(contextText: String) async -> [String] {
@@ -413,8 +488,18 @@ class LLMEngine {
             return []
         }
         
-        do {
-            let result = try await container.perform { (modelContext: ModelContext) async throws -> String in
+        if Task.isCancelled { return [] }
+        
+        let result: String = await container.perform { (modelContext: ModelContext) async -> String in
+            defer { 
+                // Barrier to ensure asyncEval background tasks finish before unlocking
+                MLX.eval(MLXArray(0))
+                MLX.Memory.clearCache()
+            }
+            
+            if Task.isCancelled { return "" }
+            
+            do {
                 let prompt = """
                 You are a context-aware smart reply assistant. Based on the conversation context provided below, generate exactly 3 short, distinct reply options (e.g. Professional, Casual, Concise) that the user could send in response.
                 Output the 3 options separated EXACTLY by the delimiter '|||' and nothing else. No formatting, no prefixes.
@@ -429,12 +514,9 @@ class LLMEngine {
                 
                 let params = GenerateParameters(maxTokens: 150, temperature: 0.6)
                 
-                let stream = try MLXLMCommon.generate(
-                    input: prepared,
-                    cache: modelContext.model.newCache(parameters: nil),
-                    parameters: params,
-                    context: modelContext
-                )
+                var iterator = try TokenIterator(
+                    input: prepared, model: modelContext.model, cache: modelContext.model.newCache(parameters: nil), parameters: params)
+                var detokenizer = NaiveStreamingDetokenizer(tokenizer: modelContext.tokenizer)
                 
                 var outputText = ""
                 let stopTokens = [
@@ -444,16 +526,21 @@ class LLMEngine {
                     "</start_of_turn>",
                     "<eos>",
                     "</s>",
-                    "</completion>"
+                    "</completion>",
+                    "<turn|>",
+                    "<|channel>",
+                    "thought"
                 ]
                 
-                for await generation in stream {
-                    if case .chunk(let text) = generation {
+                while let token = iterator.next() {
+                    if Task.isCancelled { break }
+                    detokenizer.append(token: token)
+                    if let text = detokenizer.next() {
                         outputText += text
                         
                         var shouldStop = false
-                        for token in stopTokens {
-                            if let range = outputText.range(of: token) {
+                        for stopToken in stopTokens {
+                            if let range = outputText.range(of: stopToken) {
                                 outputText = String(outputText[..<range.lowerBound])
                                 shouldStop = true
                                 break
@@ -462,24 +549,26 @@ class LLMEngine {
                         if shouldStop { break }
                     }
                 }
+                
+
                 return outputText
+            } catch {
+                print("[TypeFlow-Debug] LLMEngine smart replies error: \(error)")
+                return ""
             }
-            
-            MLX.Memory.clearCache()
-            
-            var cleanResult = result
-            if let range = cleanResult.range(of: "</completion>") {
-                cleanResult = String(cleanResult[..<range.lowerBound])
-            }
-            
-            let options = cleanResult.components(separatedBy: "|||")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            
-            return Array(options.prefix(3))
-        } catch {
-            print("[TypeFlow-Debug] LLMEngine smart replies error: \(error)")
-            return []
         }
+        
+        // MLX.Memory.clearCache() moved inside lock
+        
+        var cleanResult = result
+        if let range = cleanResult.range(of: "</completion>") {
+            cleanResult = String(cleanResult[..<range.lowerBound])
+        }
+        
+        let options = cleanResult.components(separatedBy: "|||")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        
+        return Array(options.prefix(3))
     }
 }
