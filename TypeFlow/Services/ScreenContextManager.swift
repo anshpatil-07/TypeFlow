@@ -9,8 +9,17 @@ class ScreenContextManager {
     var previousScreenText: String = ""
     private var timer: Timer?
     
+    // Evaluated at class-load time via ProcessInfo — same pattern as TypingHistoryManager.
+    private static let testingMode: Bool = ProcessInfo.processInfo.arguments.contains("-runTQB")
+    
     // For testing and programmatic manipulation without locking out other services
     init() {
+        // Skip all TCC permission prompts during automated TQB runs.
+        // TQBRunner sets latestScreenText/previousScreenText directly before each test.
+        guard !ScreenContextManager.testingMode else {
+            print("[TypeFlow-Debug] ScreenContextManager: TQB Test Mode - physical OCR bypassed")
+            return
+        }
         checkAndRequestPermission()
     }
     
@@ -35,6 +44,9 @@ class ScreenContextManager {
     }
     
     func performOCROnDemand() {
+        // In TQB test mode, latestScreenText is already set by the test harness.
+        // Do not call the physical capture API which requires TCC permission.
+        guard !ScreenContextManager.testingMode else { return }
         performOCR()
     }
     
