@@ -16,7 +16,7 @@ class AppMonitor {
         print("[TypeFlow-Debug] AppMonitor started listening for app switches.")
     }
     
-    private static let testingMode: Bool = ProcessInfo.processInfo.arguments.contains("-runTQB")
+    private static let testingMode: Bool = FileManager.default.fileExists(atPath: "/tmp/typeflow_tqb_active") || ProcessInfo.processInfo.arguments.contains("-runTQB")
     
     @objc private func appActivated(_ notification: Notification) {
         // During TQB runs, app-switch events must not invalidate injected mock context,
@@ -40,7 +40,9 @@ class AppMonitor {
         
         let config = SettingsManager.shared.getEffectiveConfig(for: bundleId)
         if config.isEnabled {
-            LLMEngine.shared.prewarmCache(toneProfile: config.toneProfile)
+            Task {
+                await LLMEngine.shared.prewarmCache(toneProfile: config.toneProfile)
+            }
         }
         
         checkAndEnableBrowserAccessibility(for: app.processIdentifier)

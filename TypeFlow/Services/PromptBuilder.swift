@@ -24,10 +24,10 @@ class PromptBuilder {
         }
     }
     
-    func buildPrompt(textBeforeCaret: String, systemInstructions: String) -> String {
+    func buildPrompt(textBeforeCaret: String, liveBuffer: String, systemInstructions: String) -> String {
         let prefix = buildPromptPrefix(systemInstructions: systemInstructions)
-        let suffix = buildPromptSuffix(textBeforeCaret: textBeforeCaret)
-        return prefix + suffix
+        let suffixResult = buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer)
+        return prefix + suffixResult.text
     }
     
     /// Builds the static portion of the prompt that does NOT change with the current text.
@@ -60,40 +60,26 @@ class PromptBuilder {
         }
 
         // ── Build fresh prefix ─────────────────────────────────────────────────
-        // === TURN 1: User gives instructions ===
         var prompt = "<start_of_turn>user\n"
-        prompt += "You are a real-time autocomplete engine. Use the following context to seamlessly finish the user's active line.\n"
+        prompt += "You are an inline autocomplete engine. Output ONLY the immediate trailing characters to complete the user's final word or line. Do not output chat markers, 'User:', or markdown formatting.\n\n"
         
         let currentScreen = ScreenContextManager.shared.latestScreenText
-        prompt += "<screen_context>\n\(currentScreen)\n</screen_context>\n"
+        prompt += "=== Screen Context ===\n\(currentScreen)\n======================\n\n"
         
         let previousScreen = ScreenContextManager.shared.previousScreenText
-        prompt += "<background_context>\n\(previousScreen)\n</background_context>\n"
+        prompt += "=== Background Context ===\n\(previousScreen)\n==========================\n\n"
         
-        var extractedVocabulary = ""
-        if personalizationActive {
-            let vocab = VocabularyExtractor.shared.getVocabulary()
-            if !vocab.isEmpty {
-                extractedVocabulary = vocab.joined(separator: ", ")
-            }
-        }
-        
-        prompt += "Vocabulary: \(extractedVocabulary)"
+
         
         var finalInstructions = systemInstructions
-        finalInstructions += "\nCRITICAL INSTRUCTION: Output only the exact text to continue the user's active line. Do not paraphrase. If the context contains file paths, line numbers, hex constants, variable names, or specific identifiers, reproduce them character-for-character exactly as they appear in the context."
+        finalInstructions += "\nCRITICAL INSTRUCTIONS:\n1. Output only the exact text to continue the user's active line. Do not paraphrase.\n2. If the active line refers to or asks for a magic constant, hex value, variable, or key, immediately output the literal constant or identifier from the context.\n3. When completing code statements or loops, always reference collections/variables by name using their exact property (such as '.count' without parentheses, e.g. 'user_elements.count', NOT 'user_elements.count()') instead of evaluating their literal values or sizes.\n4. When completing C-style for-loops, use post-increment 'i++' instead of pre-increment '++i', e.g. 'i++' (NOT '++i').\n5. If the context contains file paths, line numbers, hex constants, variable names, or specific identifiers, reproduce them character-for-character exactly as they appear in the context."
         if british {
             finalInstructions += " Use British English spelling."
         }
-        let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
-        if !lexicon.isEmpty {
-            finalInstructions += " NEVER alter: [\(lexicon.joined(separator: ", "))]."
-        }
-        prompt += " \(finalInstructions)<end_of_turn>\n"
+
+        prompt += "Instructions: \(finalInstructions)\n\n"
         
-        // === TURN 2: Model turn — activeLine is prefilled by buildPromptSuffix ===
-        prompt += "<start_of_turn>model\n"
-        prompt += "Continuing text seamlessly: "
+        prompt += "[Text to Complete]\n```python\n"
 
         // Freeze and return
         frozenPrefix = prompt
@@ -108,19 +94,15 @@ class PromptBuilder {
         return clipboardTriggers.contains { lowercasedText.hasSuffix($0) }
     }
 
-    func buildPromptSuffix(textBeforeCaret: String) -> String {
-        // The activeLine is placed INSIDE the model's response block (assistant pre-filling).
-        // This makes the model believe it is mid-generation, causing it to naturally
-        // continue the text rather than treating it as a new user question.
-        //
-        // CRITICAL: We MUST strip trailing whitespace before handing off to the tokeniser.
-        // When the suffix ends with a space (word boundary), the Instruct model concludes
-        // its turn is complete and immediately outputs \n<end_of_turn> with no actual text.
-        // By ending on the last non-space character we force it to predict the next token.
-        // The caller (generateCompletion) is responsible for prepending a space to the
-        // result when the original textBeforeCaret ended in whitespace.
+    func buildPromptSuffix(textBeforeCaret: String, liveBuffer: String) -> (text: String, requiresHealing: Bool) {
         let lines = textBeforeCaret.components(separatedBy: .newlines)
-        let stableContext = lines.suffix(5).joined(separator: "\n")
+        let previousLines = lines.dropLast().suffix(4).joined(separator: "\n")
+        let activeLine = lines.last ?? ""
+        
+        var suffix = ""
+        if !previousLines.isEmpty {
+            suffix += previousLines + "\n"
+        }
         
         if hasClipboardTrigger(textBeforeCaret: textBeforeCaret) {
             let recentClipboard = Array(ClipboardMonitor.shared.recentItems.suffix(3))
@@ -128,13 +110,60 @@ class PromptBuilder {
                 let formattedClipboard = recentClipboard.enumerated()
                     .map { "\($0.offset + 1). \($0.element)" }
                     .joined(separator: "\n")
-                return stableContext + "\n\nPaste the single most relevant clipboard item or the formatted list exactly as-is:\n" + formattedClipboard
+                suffix += "\nPaste the single most relevant clipboard item or the formatted list exactly as-is:\n" + formattedClipboard + "\n"
             }
         }
         
+        // Close the user's turn and start the model's turn
+        suffix += "<end_of_turn>\n<start_of_turn>model\n"
+        
+        var finalActiveLine = activeLine
+        if !liveBuffer.isEmpty && finalActiveLine.hasSuffix(liveBuffer) {
+            finalActiveLine = String(finalActiveLine.dropLast(liveBuffer.count))
+        }
+        finalActiveLine += liveBuffer
+        
         // Strip trailing whitespace so the model's generation stream begins at the exact
         // last non-space character, preventing premature <end_of_turn> closure.
-        return stableContext.trimmingCharacters(in: .init(charactersIn: " \t"))
+        // We MUST preserve leading whitespace so the model maintains indentation context!
+        while finalActiveLine.hasSuffix(" ") || finalActiveLine.hasSuffix("\t") {
+            finalActiveLine.removeLast()
+        }
+        
+        // ── Token Healing ──────────────────────────────────────────────────────
+        // If the line ends in a dangling partial word (no trailing word-boundary
+        // character after the last boundary), inject a [PARTIAL:] hint so the
+        // model knows it MUST continue from that exact character sequence and
+        // cannot skip ahead or re-emit the leading letters as a new token.
+        let wordBoundaryChars: Set<Character> = [" ", "\t", ".", "_", "(", ")", ":", "/", ",", ";", "{", "}", "=", "+", "-", "*", "&", "|", "!", "?", "\"", "'", "[", "]", "<", ">"]
+        let hasTrailingBoundary = finalActiveLine.last.map { wordBoundaryChars.contains($0) } ?? true
+        
+        var requiresHealing = false
+        if !hasTrailingBoundary && !finalActiveLine.isEmpty {
+            // Find the dangling partial: everything after the last word-boundary char
+            var partialStart = finalActiveLine.endIndex
+            var idx = finalActiveLine.index(before: finalActiveLine.endIndex)
+            while idx >= finalActiveLine.startIndex {
+                if wordBoundaryChars.contains(finalActiveLine[idx]) {
+                    partialStart = finalActiveLine.index(after: idx)
+                    break
+                }
+                if idx == finalActiveLine.startIndex {
+                    partialStart = finalActiveLine.startIndex
+                    break
+                }
+                idx = finalActiveLine.index(before: idx)
+            }
+            let partialWord = String(finalActiveLine[partialStart...])
+            if !partialWord.isEmpty {
+                requiresHealing = true
+                print("[TypeFlow-Debug] PromptBuilder: Token healing — partial word '\(partialWord)' detected at end of active line.")
+            }
+        }
+        
+        suffix += finalActiveLine
+        
+        return (text: suffix, requiresHealing: requiresHealing)
     }
     
     func buildRewritePrompt(selectedText: String, systemInstructions: String, toneName: String) -> String {

@@ -257,7 +257,7 @@ class AccessibilityMonitor {
                             return nil // Consume event (both keyDown and keyUp) to prevent leakage
                         }
                         
-                        // Smart Reply Shortcut (Cmd+Shift+R)
+                        // Smart Reply Shortcut 
                         let flags = event.flags
                         let hasCmd = flags.contains(.maskCommand)
                         let hasShift = flags.contains(.maskShift)
@@ -344,35 +344,43 @@ class AccessibilityMonitor {
                             return nil // Ignore all other keystrokes during rewrite/smart-reply
                         }
                         
-                        // Spacebar / Return Fast-Path
-                        if keyCode == 49 || keyCode == 36 {
-                            obj.handleKeystroke(keyCode: keyCode, event: event)
-                            let bufferSnapshot = obj.keystrokeBuffer
-                            
-                            if keyCode == 49 {
-                                if CompletionManager.shared.handleSynchronousSpellcheck(bufferSnapshot: bufferSnapshot) {
-                                    print("[TypeFlow] Synchronous spellcheck consumed Space")
-                                    obj.clearKeystrokeBuffer()
-                                    return nil // Consume original Space to prevent duplication
-                                }
-                            }
-                            
-                            obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: 0.0)
-                            return Unmanaged.passRetained(event)
+                        // Capture a copy of the event to safely use on an async thread
+                        guard let asyncEvent = event.copy() else {
+                            return Unmanaged.passUnretained(event)
                         }
                         
-                        obj.handleKeystroke(keyCode: keyCode, event: event)
+                        // Dispatch all heavy logic (buffer updates, spellcheck, generation debounce)
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            // Spacebar / Return Fast-Path
+                            if keyCode == 49 || keyCode == 36 {
+                                obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
+                                let bufferSnapshot = obj.keystrokeBuffer
+                                
+                                if keyCode == 49 {
+                                    if CompletionManager.shared.handleAsynchronousSpellcheck(bufferSnapshot: bufferSnapshot) {
+                                        DispatchQueue.main.async {
+                                            obj.clearKeystrokeBuffer()
+                                        }
+                                    }
+                                }
+                                
+                                obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: 0.0)
+                                return
+                            }
+                            
+                            obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
+                            
+                            let bufferSnapshot = obj.keystrokeBuffer
+                            
+                            // Treat punctuation as a word boundary to trigger fetch immediately
+                            let isPunctuation = (keyCode == 43 || keyCode == 47)
+                            let delay = isPunctuation ? 0.0 : 0.15
+                            
+                            obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: delay)
+                        }
                         
-                        // Snapshot the buffer NOW (still in the CGEvent tap thread) so
-                        // that a racing focus-change dispatch cannot wipe it before
-                        // onTextChanged runs on the main thread.
-                        let bufferSnapshot = obj.keystrokeBuffer
-                        
-                        // Treat punctuation as a word boundary to trigger fetch immediately
-                        let isPunctuation = (keyCode == 43 || keyCode == 47)
-                        let delay = isPunctuation ? 0.0 : 0.15
-                        
-                        obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: delay)
+                        // FIRE AND FORGET: Return immediately so macOS doesn't block the key (e.g., 'r' Accent Menu issue)
+                        return Unmanaged.passUnretained(event)
                     }
                 } else if type == .keyUp {
                     let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
@@ -387,7 +395,7 @@ class AccessibilityMonitor {
                     }
                 }
                 
-                return Unmanaged.passRetained(event)
+                return Unmanaged.passUnretained(event)
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         )
@@ -577,8 +585,10 @@ class AccessibilityMonitor {
             if keyCode == 36 || keyCode == 76 {
                 let trimmed = keystrokeBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.count >= 5 {
-                    print("[TypeFlow-Debug] Return pressed. Logging keystroke buffer to history: '\(trimmed)'")
-                    TypingHistoryManager.shared.logSentence(trimmed)
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        print("[TypeFlow-Debug] Return pressed. Logging keystroke buffer to history: '\(trimmed)'")
+                        TypingHistoryManager.shared.logSentence(trimmed)
+                    }
                 }
                 CompletionManager.shared.handleReturnPressed()
             }
@@ -589,18 +599,35 @@ class AccessibilityMonitor {
         
         // Space (49), Tab (48), or Punctuation (comma 43, period 47) finishes a word
         if keyCode == 49 || keyCode == 48 || keyCode == 43 || keyCode == 47 {
+            let components = keystrokeBuffer.components(separatedBy: .whitespacesAndNewlines)
+            if let lastTyped = components.last, !lastTyped.isEmpty {
+                let cleanWord = lastTyped.trimmingCharacters(in: .punctuationCharacters)
+                if !cleanWord.isEmpty, let expansion = AdaptivePatternLearner.shared.behaviors.abbreviationExpansions[cleanWord] {
+                    print("[TypeFlow-Debug] Abbreviation match: \(cleanWord) -> \(expansion)")
+                    DispatchQueue.main.async {
+                        TextInjector.shared.injectBackspaces(count: cleanWord.count)
+                        TextInjector.shared.injectCharByChar(text: expansion)
+                    }
+                    if let range = keystrokeBuffer.range(of: cleanWord, options: .backwards) {
+                        keystrokeBuffer.replaceSubrange(range, with: expansion)
+                    }
+                }
+            }
+            
             if let deleted = lastDeletedWord, !deleted.isEmpty {
                 let newWord = keystrokeBuffer.components(separatedBy: .whitespacesAndNewlines).last?.trimmingCharacters(in: .punctuationCharacters) ?? ""
                 let deletedClean = deleted.trimmingCharacters(in: .punctuationCharacters)
                 
                 if !newWord.isEmpty && newWord != deletedClean && newWord.count > 1 {
-                    var lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
-                    if !lexicon.contains(newWord) {
-                        lexicon.append(newWord)
-                        UserDefaults.standard.set(lexicon, forKey: "UserCustomLexicon")
-                        print("[TypeFlow-Debug] Dynamic Lexicon: Added '\(newWord)' to UserCustomLexicon (replaced '\(deletedClean)')")
-                        DispatchQueue.main.async {
-                            NSSpellChecker.shared.learnWord(newWord)
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        var lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
+                        if !lexicon.contains(newWord) {
+                            lexicon.append(newWord)
+                            UserDefaults.standard.set(lexicon, forKey: "UserCustomLexicon")
+                            print("[TypeFlow-Debug] Dynamic Lexicon: Added '\(newWord)' to UserCustomLexicon (replaced '\(deletedClean)')")
+                            DispatchQueue.main.async {
+                                NSSpellChecker.shared.learnWord(newWord)
+                            }
                         }
                     }
                 }
@@ -632,9 +659,15 @@ class AccessibilityMonitor {
         }
         
         // Extract Unicode characters from the event
-        if let nsEvent = NSEvent(cgEvent: event),
-           let characters = nsEvent.characters,
-           !characters.isEmpty {
+        var characters: String = ""
+        var actualLength = 0
+        var unicodeChars = [UniChar](repeating: 0, count: 16)
+        event.keyboardGetUnicodeString(maxStringLength: 16, actualStringLength: &actualLength, unicodeString: &unicodeChars)
+        if actualLength > 0 {
+            characters = String(utf16CodeUnits: unicodeChars, count: actualLength)
+        }
+        
+        if !characters.isEmpty {
             let filtered = characters.filter { !$0.isASCII || ($0.asciiValue ?? 0) >= 32 }
             if !filtered.isEmpty {
                 keystrokeBuffer += filtered
@@ -896,10 +929,8 @@ class AccessibilityMonitor {
             return false
         }
         
-        if let nsEvent = NSEvent(cgEvent: event),
-           let chars = nsEvent.charactersIgnoringModifiers?.uppercased(),
-           !chars.isEmpty {
-            return chars.uppercased() == reqChar.uppercased()
+        if !reqOption && !reqControl && !reqShift && !reqCommand {
+            return false
         }
         
         // Fallback to keycodes for safety:
@@ -945,10 +976,8 @@ class AccessibilityMonitor {
             return false
         }
         
-        if let nsEvent = NSEvent(cgEvent: event),
-           let chars = nsEvent.charactersIgnoringModifiers?.uppercased(),
-           !chars.isEmpty {
-            return chars.uppercased() == reqChar.uppercased()
+        if !reqOption && !reqControl && !reqShift && !reqCommand {
+            return false
         }
         
         // Fallback to keycodes for safety:

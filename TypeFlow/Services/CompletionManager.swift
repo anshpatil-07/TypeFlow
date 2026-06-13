@@ -20,10 +20,8 @@ class CompletionManager: @unchecked Sendable {
     var activeRewritePID: pid_t?
     var activeSmartReplyPID: pid_t?
     
-    var consecutiveMisses = 0
-    var backoffUntil: Date?
-    
     var isSuppressedUntilNextTyping = false
+    private var lastBufferSnapshot: String = ""
     
     var isRewrite: Bool {
         return activeRewritePID != nil || activeRewriteText != nil
@@ -178,7 +176,7 @@ class CompletionManager: @unchecked Sendable {
         return (word, delimiter, range)
     }
     
-    func handleSynchronousSpellcheck(bufferSnapshot: String) -> Bool {
+    func handleAsynchronousSpellcheck(bufferSnapshot: String) -> Bool {
         guard SettingsManager.shared.autoCorrectEnabled else { return false }
         if let completedWordInfo = getCompletedWord(from: bufferSnapshot) {
             let word = completedWordInfo.word
@@ -186,27 +184,25 @@ class CompletionManager: @unchecked Sendable {
             let delimiter = completedWordInfo.delimiter
             
             if word.count >= 4, let correction = getSpellCorrection(in: bufferSnapshot, lastWordRange: wordRange) {
-                print("[TypeFlow-Debug] Synchronous auto-correct triggered: '\(word)' -> '\(correction)'")
+                print("[TypeFlow-Debug] Asynchronous auto-correct triggered: '\(word)' -> '\(correction)'")
                 
-                debounceTimer?.invalidate()
-                debounceTimer = nil
-                currentGenerationTask?.cancel()
-                currentGenerationTask = nil
-                
-                // Use the string without the delimiter to calculate the correct delete count,
-                // because the delimiter (e.g. Space) was swallowed by the event tap and never rendered!
+                // Use the string without the delimiter to calculate the correct delete count
                 let activeLineWithoutDelimiter = String(bufferSnapshot.dropLast(delimiter.count))
                 let deleteCount = calculateDeleteCount(activeLine: activeLineWithoutDelimiter, misspelled: word)
                 
-                // Wrap synthetic event dispatches in an async block so the physical Spacebar event 
-                // finishes dropping before the synthetic keystrokes fire, preventing race conditions.
                 DispatchQueue.main.async {
-                    TextInjector.shared.injectBackspaces(count: deleteCount)
+                    self.debounceTimer?.invalidate()
+                    self.debounceTimer = nil
+                    self.currentGenerationTask?.cancel()
+                    self.currentGenerationTask = nil
+                    
+                    // We must delete the word (deleteCount) PLUS the delimiter that was just printed
+                    TextInjector.shared.injectBackspaces(count: deleteCount + delimiter.count)
                     // Inject the correction and explicitly append the trailing space via pasteboard
                     TextInjector.shared.inject(text: correction + delimiter)
+                    
+                    self.clearCompletion()
                 }
-                
-                clearCompletion()
                 
                 let correctedLine = String(bufferSnapshot.dropLast(deleteCount + delimiter.count)) + correction + delimiter
                 print("[TypeFlow-Debug] Logging auto-corrected sentence to history: '\(correctedLine)'")
@@ -220,16 +216,7 @@ class CompletionManager: @unchecked Sendable {
     func onTextChanged(bufferFallback: String = "") {
         if isRewrite || isSmartReply { return }
         print("[TypeFlow-Debug] onTextChanged called")
-        
-        // Check for rejection before clearing
-        if let current = currentCompletion, !current.isEmpty {
-            consecutiveMisses += 1
-            if consecutiveMisses >= 5 {
-                print("[TypeFlow-Debug] Flow State Backoff: 5 consecutive misses. Suspending for 2s.")
-                backoffUntil = Date().addingTimeInterval(2)
-                consecutiveMisses = 0
-            }
-        }
+
         
         if isSuppressedUntilNextTyping {
             let activeLine = bufferFallback.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -239,13 +226,46 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
+        // ── Dynamic Typing Invalidation ──────────────────────────────────────
+        // If an overlay is active, extract the newly typed character by diffing
+        // against the previous buffer snapshot. If it matches the first char of
+        // the ghost text, advance the suggestion instead of discarding it.
+        if let ghost = currentCompletion, !ghost.isEmpty, !isRewrite, !isSmartReply {
+            // Extract new characters appended since last snapshot
+            let prev = lastBufferSnapshot
+            let curr = bufferFallback
+            if curr.count == prev.count + 1 && curr.hasPrefix(prev) {
+                let newChar = String(curr.last!)
+                let ghostFirst = String(ghost.prefix(1))
+                if newChar == ghostFirst {
+                    // Match — advance the ghost text by one character
+                    let advanced = String(ghost.dropFirst())
+                    lastBufferSnapshot = curr
+                    if advanced.isEmpty {
+                        clearCompletion()
+                    } else {
+                        currentCompletion = advanced
+                        overlayWindowController?.updateText(advanced)
+                        print("[TypeFlow-Debug] DynamicInvalidation: char '\(newChar)' matched, ghost advanced to '\(advanced)'")
+                    }
+                    return
+                } else {
+                    // Mismatch — dismiss overlay and fall through to debounce a new completion
+                    print("[TypeFlow-Debug] DynamicInvalidation: char '\(newChar)' mismatched ghost '\(ghostFirst)', clearing and re-generating")
+                    currentCompletion = nil
+                    overlayWindowController?.updateText("")
+                }
+            } else {
+                // Multi-char jump or deletion — just clear
+                currentCompletion = nil
+                overlayWindowController?.updateText("")
+            }
+        }
+        lastBufferSnapshot = bufferFallback
+        
         // Clear existing completion immediately when user types
         clearCompletion()
-        
-        if let backoff = backoffUntil, backoff > Date() {
-            print("[TypeFlow-Debug] Completions suspended until \(backoff)")
-            return
-        }
+
         
         if let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier {
             if SettingsManager.shared.isAppExcluded(bundleId: bundleId) {
@@ -368,12 +388,12 @@ class CompletionManager: @unchecked Sendable {
         let now = Date()
         let keystrokeInterval = now.timeIntervalSince(lastKeystrokeTime)
         lastKeystrokeTime = now
-        let debounceInterval: TimeInterval = keystrokeInterval < 0.2 ? 0.6 : 0.4
+        let debounceInterval: TimeInterval = keystrokeInterval < 0.15 ? 0.3 : 0.18
         print("[TypeFlow-Debug] Adaptive debounce: keystroke interval \(String(format: "%.0f", keystrokeInterval * 1000))ms → using \(debounceInterval)s")
         
         NotificationCenter.default.post(name: Notification.Name("UserDidType"), object: nil)
         
-        // Debounce: 400–600ms ensures user has paused before spinning up GPU inference.
+        // Debounce: 150-300ms ensures user has paused before spinning up GPU inference.
         debounceTimer?.invalidate()
         debounceTimer = Timer.scheduledTimer(withTimeInterval: debounceInterval, repeats: false) { [weak self] _ in
             print("[TypeFlow-Debug] Debounce timer fired!")
@@ -392,22 +412,23 @@ class CompletionManager: @unchecked Sendable {
         currentGenerationTask = nil
         
         if let providedText = text {
-            self.continueGeneration(activeLine: providedText)
+            self.continueGeneration(activeLine: providedText, keystrokeBuffer: "")
         } else {
             // We MUST fetch AX text on a background thread because kAXValue polling is extremely expensive.
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self = self else { return }
                 let axText = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
                 let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
                 
                 DispatchQueue.main.async {
-                    self.continueGeneration(activeLine: finalLine)
+                    self.continueGeneration(activeLine: finalLine, keystrokeBuffer: liveBuffer)
                 }
             }
         }
     }
     
-    private func continueGeneration(activeLine: String) {
+    private func continueGeneration(activeLine: String, keystrokeBuffer: String) {
         guard !activeLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             print("[TypeFlow-Debug] Active line is empty, skipping generation.")
             return
@@ -420,12 +441,6 @@ class CompletionManager: @unchecked Sendable {
             return
         }
         // ------------------------------------
-        
-        if !LLMEngine.shared.isModelReady {
-            print("[TypeFlow-Debug] Model is not ready yet. Queuing request: '\(activeLine)'")
-            pendingCompletionRequest = activeLine
-            return
-        }
         
         let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
         let effectiveConfig = SettingsManager.shared.getEffectiveConfig(for: bundleId)
@@ -454,7 +469,13 @@ class CompletionManager: @unchecked Sendable {
         }
         activeSnippetKey = nil
         
-        print("[TypeFlow-Debug] Dispatching LLM generation for: '\(activeLine)'")
+        var fullActiveLine = activeLine
+        if !keystrokeBuffer.isEmpty && fullActiveLine.hasSuffix(keystrokeBuffer) {
+            fullActiveLine = String(fullActiveLine.dropLast(keystrokeBuffer.count))
+        }
+        fullActiveLine += keystrokeBuffer
+        
+        print("[TypeFlow-Debug] Dispatching LLM generation for: '\(fullActiveLine)'")
         
         // Explicitly cancel any inflight task before creating a new one.
         // Await its completion to prevent parallel Swift concurrency tasks that each hold
@@ -462,15 +483,28 @@ class CompletionManager: @unchecked Sendable {
         currentGenerationTask?.cancel()
         let previousTask = currentGenerationTask
         
-        currentGenerationTask = Task {
+        currentGenerationTask = Task { [weak self] in
+            guard let self = self else { return }
             // Wait for the previous cancelled task to fully wind down
             _ = await previousTask?.value
             
             // If this task was cancelled while waiting, abort early
             if Task.isCancelled { return }
             
+            let modelReady = await LLMEngine.shared.isModelReady
+            if !modelReady {
+                print("[TypeFlow-Debug] Model is not ready yet. Queuing request: '\(fullActiveLine)'")
+                await MainActor.run {
+                    self.pendingCompletionRequest = activeLine
+                }
+                return
+            }
+            
+            if Task.isCancelled { return }
+            
             let completion = await LLMEngine.shared.generateCompletion(
                 textBeforeCaret: activeLine,
+                liveBuffer: keystrokeBuffer,
                 toneProfile: effectiveConfig.toneProfile
             )
             print("[TypeFlow-Debug] Raw model output: '\(completion)'")
@@ -481,14 +515,17 @@ class CompletionManager: @unchecked Sendable {
             
             var processedCompletion = completion.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            // Strip any echoed prefix overlap between the end of activeLine and start of completion
-            let maxOverlap = min(activeLine.count, processedCompletion.count)
+            // ── Fixed Overlap Stripper ─────────────────────────────────────────
+            // Strict stride loop: find the longest EXACT-CASE suffix of fullActiveLine
+            // that is also a prefix of the raw completion (no trimming after the match
+            // so we never drop boundary characters like '_').
+            let maxOverlap = min(fullActiveLine.count, processedCompletion.count)
             var overlapLength = 0
             if maxOverlap > 0 {
-                for i in (1...maxOverlap).reversed() {
-                    let suffix = activeLine.suffix(i)
-                    let prefix = processedCompletion.prefix(i)
-                    if suffix.lowercased() == prefix.lowercased() {
+                for i in stride(from: maxOverlap, through: 1, by: -1) {
+                    let suffix = String(fullActiveLine.suffix(i))
+                    let prefix = String(processedCompletion.prefix(i))
+                    if suffix == prefix {
                         overlapLength = i
                         break
                     }
@@ -496,7 +533,6 @@ class CompletionManager: @unchecked Sendable {
             }
             if overlapLength > 0 {
                 processedCompletion = String(processedCompletion.dropFirst(overlapLength))
-                processedCompletion = processedCompletion.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             
             // Strip markdown formatting
@@ -796,14 +832,40 @@ class CompletionManager: @unchecked Sendable {
         }
         
         if let completion = currentCompletion, !completion.isEmpty {
-            consecutiveMisses = 0 // Reset on accept
             let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+            
+            // ── Word-by-Word Tab Acceptance ────────────────────────────────────
+            // Extract the next "word segment" — stop at the first space, period,
+            // underscore, left-paren, colon, or slash so the user can step through
+            // multi-word completions one token at a time.
+            let wordBreakChars: Set<Character> = [" ", ".", "_", "(", ")", ":", "/", ",", ";", "{", "}"]
+            var breakIndex = completion.endIndex
+            var foundBreak = false
+            
+            for (idx, ch) in completion.enumerated() {
+                if idx > 0 && wordBreakChars.contains(ch) {
+                    breakIndex = completion.index(completion.startIndex, offsetBy: idx)
+                    foundBreak = true
+                    break
+                }
+            }
+            
+            let wordToInsert = String(completion[..<breakIndex])
+            let remainder = foundBreak ? String(completion[breakIndex...]) : ""
+            
             TypingHistoryManager.shared.logSentence(activeLine + completion)
             
-            // Inject the text
+            // Inject the first segment only
             UsageStatsManager.shared.recordCompletionAccepted(charactersSaved: completion.count)
-            TextInjector.shared.inject(text: completion)
-            clearCompletion()
+            TextInjector.shared.inject(text: wordToInsert)
+            
+            if !remainder.isEmpty {
+                // Keep the remaining ghost text visible
+                currentCompletion = remainder
+                print("[TypeFlow-Debug] Word-by-word Tab: injected '\(wordToInsert)', remainder '\(remainder)' still shown")
+            } else {
+                clearCompletion()
+            }
             return true // We handled it
         }
         return false // Let the event pass through
@@ -827,6 +889,7 @@ class CompletionManager: @unchecked Sendable {
         activeRewriteText = nil
         activeRewritePID = nil
         activeSmartReplyPID = nil
+        lastBufferSnapshot = ""
         cancelInflightTasks()
         hideOverlay()
     }
@@ -905,23 +968,16 @@ class CompletionManager: @unchecked Sendable {
     
     func stripMarkdown(_ text: String) -> String {
         var result = text
-        // Remove bold/italic markup: **, *, __, _
-        result = result.replacingOccurrences(of: "**", with: "")
-        result = result.replacingOccurrences(of: "__", with: "")
-        result = result.replacingOccurrences(of: "*", with: "")
-        result = result.replacingOccurrences(of: "_", with: "")
-        result = result.replacingOccurrences(of: "`", with: "")
         
-        // Remove header markers like #, ##
-        result = result.replacingOccurrences(of: "#", with: "")
-        
-        // Trim leading bullet symbols or markdown list symbols: e.g. "- ", "+ ", "* "
-        let pattern = "^(\\s*[-+*]\\s+)+"
-        if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-            let range = NSRange(location: 0, length: result.utf16.count)
-            result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: "")
+        // Only strip trailing backticks the model might append
+        if result.hasSuffix("```") {
+            result = String(result.dropLast(3))
+        } else if result.hasSuffix("``") {
+            result = String(result.dropLast(2))
+        } else if result.hasSuffix("`") {
+            result = String(result.dropLast(1))
         }
         
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        return result
     }
 }

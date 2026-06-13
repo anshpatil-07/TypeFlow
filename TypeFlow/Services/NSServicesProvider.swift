@@ -70,6 +70,7 @@ import Foundation
         Task {
             expandedText = await LLMEngine.shared.generateCompletion(
                 textBeforeCaret: text,
+                liveBuffer: "",
                 toneProfile: toneProfile
             )
             semaphore.signal()

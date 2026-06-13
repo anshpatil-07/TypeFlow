@@ -1,0 +1,21 @@
+# TypeFlow Core Architecture Guidelines
+Context: This is a macOS native autocomplete engine using CGEventTap, Accessibility APIs (AX), and local MLX-based LLM inference. The following systems are load-bearing. You MUST ask for explicit permission before fundamentally refactoring or removing these patterns.
+
+1. Event Tap & Threading (The "Fire and Forget" Rule)
+- CGEventTap callbacks must remain strictly asynchronous. Return `Unmanaged.passUnretained(event)` instantly for standard typing.
+- Do not block the main thread with synchronous MLX caching, spellchecking, or Accessibility API (kAXValue) fetches.
+
+2. MLX Inference & Token Healing
+- KV Cache: If PromptBuilder executes Token Healing (detecting a partial word), LLMEngine MUST rebuild or bypass the KV Cache for that generation to prevent matrix corruption.
+- Task Cancellation: Always cancel in-flight generation tasks before dispatching a new one. 
+
+3. Text Processing & Prompting
+- Overlap Stripping: Use exact `stride` string-matching. NEVER use regex or alphanumeric filters that strip special characters like underscores (_). 
+- Code Context: Always wrap [Text to Complete] in markdown code blocks to lock the LLM into syntax-generation mode. Do not inject uncurated typo history into the prompt.
+
+4. UI & Overlay State Management
+- Main Thread Strictness: The OverlayWindowController MUST only be called on DispatchQueue.main. 
+- Tab Acceptance: Tab should extract and inject only the *next logical code word* (splitting on spaces, dots, underscores).
+
+5. Debouncing & Accessibility Fallbacks
+- Respect adaptive debounce timers. Do not implement infinite "Backoff" suspensions.
