@@ -51,8 +51,12 @@ class PromptBuilder {
         let british = SettingsManager.shared.useBritishEnglish
 
         // Stable key: only changes when settings/app/screen change, NOT when the user types
-        let screenHash = ScreenContextManager.shared.latestScreenText.hashValue
-        let stableKey = "\(context.appTitle)|\(systemInstructions.hashValue)|\(personalizationActive)|\(british)|\(screenHash)"
+        var historyHash = ""
+        for snap in UniversalContextManager.shared.contextHistory {
+            historyHash += "\(snap.appTitle)|\(snap.windowTitle ?? "nil")|\(snap.screenText.hashValue)|"
+        }
+        let currentScreen = ScreenContextManager.shared.latestScreenText
+        let stableKey = "\(historyHash)\(context.appTitle)|\(systemInstructions.hashValue)|\(personalizationActive)|\(british)|\(currentScreen.hashValue)"
 
         if frozenPrefixKey == stableKey && !frozenPrefix.isEmpty {
             // Return the frozen copy — guaranteed byte-for-byte identical
@@ -63,23 +67,57 @@ class PromptBuilder {
         var prompt = "<start_of_turn>user\n"
         prompt += "You are an inline autocomplete engine. Output ONLY the immediate trailing characters to complete the user's final word or line. Do not output chat markers, 'User:', or markdown formatting.\n\n"
         
-        let currentScreen = ScreenContextManager.shared.latestScreenText
-        prompt += "=== Screen Context ===\n\(currentScreen)\n======================\n\n"
+        let history = UniversalContextManager.shared.contextHistory
         
-        let previousScreen = ScreenContextManager.shared.previousScreenText
-        prompt += "=== Background Context ===\n\(previousScreen)\n==========================\n\n"
+        // Print exactly one previous history block to avoid duplication
+        if let snap = history.last {
+            prompt += "=== Previous Screen Context ===\n"
+            prompt += "[Application: \(snap.appTitle)"
+            if let window = snap.windowTitle {
+                prompt += " | Window: \(window)"
+            }
+            prompt += "]\n"
+            
+            var text = snap.screenText
+            if text.count > 3500 {
+                text = String(text.prefix(3500)) + "...\n[Context Truncated]"
+            }
+            
+            prompt += "\(text)\n======================\n\n"
+        }
+        
+        let isBrowser = ["zen", "safari", "chrome", "brave", "edge", "arc"].contains { context.appTitle.lowercased().contains($0) || context.appBundleId.lowercased().contains($0) }
+        
+        prompt += "=== Active Screen Context ===\n"
+        prompt += "[Application: \(context.appTitle)"
+        if isBrowser, let windowTitle = context.windowTitle {
+            prompt += " | Window: \(windowTitle)"
+        }
+        prompt += "]\n"
+        prompt += "\(currentScreen)\n======================\n\n"
         
 
         
         var finalInstructions = systemInstructions
-        finalInstructions += "\nCRITICAL INSTRUCTIONS:\n1. Output only the exact text to continue the user's active line. Do not paraphrase.\n2. If the active line refers to or asks for a magic constant, hex value, variable, or key, immediately output the literal constant or identifier from the context.\n3. When completing code statements or loops, always reference collections/variables by name using their exact property (such as '.count' without parentheses, e.g. 'user_elements.count', NOT 'user_elements.count()') instead of evaluating their literal values or sizes.\n4. When completing C-style for-loops, use post-increment 'i++' instead of pre-increment '++i', e.g. 'i++' (NOT '++i').\n5. If the context contains file paths, line numbers, hex constants, variable names, or specific identifiers, reproduce them character-for-character exactly as they appear in the context."
+        finalInstructions += "\nCRITICAL INSTRUCTIONS:\n1. Output the text to continue the user's active line naturally. You may adapt or slightly paraphrase the surrounding context to ensure grammatical continuity with the user's specific prefix, but prioritize using exact vocabulary from the context where possible.\n2. If the active line refers to or asks for a magic constant, hex value, variable, or key, immediately output the literal constant or identifier from the context.\n3. When completing code statements or loops, always reference collections/variables by name using their exact property (such as '.count' without parentheses, e.g. 'user_elements.count', NOT 'user_elements.count()') instead of evaluating their literal values or sizes.\n4. When completing C-style for-loops, use post-increment 'i++' instead of pre-increment '++i', e.g. 'i++' (NOT '++i').\n5. If the context contains file paths, line numbers, hex constants, variable names, or specific identifiers, reproduce them character-for-character exactly as they appear in the context."
         if british {
             finalInstructions += " Use British English spelling."
         }
 
         prompt += "Instructions: \(finalInstructions)\n\n"
         
-        prompt += "[Text to Complete]\n```python\n"
+        prompt += "[Text to Complete]\n"
+        
+        let appName = context.appTitle.lowercased()
+        let bundleId = context.appBundleId.lowercased()
+        let codeEditors = ["xcode", "code", "cursor", "intellij", "android studio", "sublime text", "nova", "zed", "pycharm", "webstorm"]
+        let isCodeEditor = codeEditors.contains { appName.contains($0) || bundleId.contains($0) }
+        
+        if isCodeEditor {
+            prompt += "```python\n"
+        } else {
+            // Prose mode: emit NO backticks to prevent standard sentence structure from being misparsed
+        }
 
         // Freeze and return
         frozenPrefix = prompt

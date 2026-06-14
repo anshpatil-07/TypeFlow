@@ -92,10 +92,11 @@ class TQBRunner {
             git revert HEAD resets the entire codebase back to the exact state \
             it was in before the last commit, without rewriting history.
             """
-        ScreenContextManager.shared.previousScreenText = ""
+        UniversalContextManager.shared.clearHistory()
         UniversalContextManager.shared.latestContext = CurrentContext(
             appBundleId: "com.apple.Terminal",
             appTitle: "Terminal",
+            windowTitle: nil,
             screenKeywords: ["git", "revert", "codebase", "commit", "state"],
             clipboardType: .unknown
         )
@@ -123,10 +124,11 @@ class TQBRunner {
             The test suite consists of quiz_memory.py, quiz_logic.py, and quiz_ui.py. \
             Each file covers a distinct module of the application.
             """
-        ScreenContextManager.shared.previousScreenText = ""
+        UniversalContextManager.shared.clearHistory()
         UniversalContextManager.shared.latestContext = CurrentContext(
             appBundleId: "com.apple.dt.Xcode",
             appTitle: "Xcode",
+            windowTitle: nil,
             screenKeywords: ["quiz", "memory", "python", "test", "suite"],
             clipboardType: .unknown
         )
@@ -154,10 +156,11 @@ class TQBRunner {
             [TypeFlow-Debug] LLMEngine stream crashed at 2026-06-12. Fatal error: Index out of range inside TextInjector.swift:42 during text insertion buffer flush.
             Crash analysis: The index crash originated from TextInjector.swift:42 during text insertion buffer flush.
             """
-        ScreenContextManager.shared.previousScreenText = ""
+        UniversalContextManager.shared.clearHistory()
         UniversalContextManager.shared.latestContext = CurrentContext(
             appBundleId: "com.apple.Terminal",
             appTitle: "Terminal",
+            windowTitle: nil,
             screenKeywords: ["crash", "TextInjector", "fatal", "error", "index"],
             clipboardType: .unknown
         )
@@ -182,7 +185,12 @@ class TQBRunner {
     func testCrossTabMemory() async throws {
         print("Running Test 4: Cross-Tab Memory / Fast Inverse Square Root...")
         ScreenContextManager.shared.latestScreenText = "Writing documentation for the inverse square root function."
-        ScreenContextManager.shared.previousScreenText = """
+        UniversalContextManager.shared.clearHistory()
+        UniversalContextManager.shared.updateHistory(
+            appBundleId: "com.microsoft.VSCode",
+            appTitle: "VSCode",
+            windowTitle: "fast_inverse.py",
+            screenText: """
             def fast_inverse_sqrt(number):
                 threehalfs = 1.5
                 x2 = number * 0.5
@@ -193,9 +201,11 @@ class TQBRunner {
                 y = y * (threehalfs - (x2 * y * y))
                 return y
             """
+        )
         UniversalContextManager.shared.latestContext = CurrentContext(
             appBundleId: "com.apple.dt.Xcode",
             appTitle: "Xcode",
+            windowTitle: nil,
             screenKeywords: ["inverse", "sqrt", "magic", "constant", "algorithm"],
             clipboardType: .unknown
         )
@@ -221,10 +231,11 @@ class TQBRunner {
     func testAdaptiveCodeCompletion() async throws {
         print("Running Test 5: Adaptive Code Completion (variable-aware)...")
         ScreenContextManager.shared.latestScreenText = "let user_elements = [1, 2, 3]"
-        ScreenContextManager.shared.previousScreenText = ""
+        UniversalContextManager.shared.clearHistory()
         UniversalContextManager.shared.latestContext = CurrentContext(
             appBundleId: "com.apple.dt.Xcode",
             appTitle: "Xcode",
+            windowTitle: nil,
             screenKeywords: ["user_elements", "array", "count", "loop", "elements"],
             clipboardType: .unknown
         )
@@ -287,10 +298,11 @@ class TQBRunner {
     func testBizarreContextTrap() async throws {
         print("Running Test 7: Bizarre Context Trap...")
         ScreenContextManager.shared.latestScreenText = "Archivist Log 99: The only known cure for the silicon rot affecting the TypeFlow codebase is a highly unstable compound known as ObsidianTears_v4."
-        ScreenContextManager.shared.previousScreenText = ""
+        UniversalContextManager.shared.clearHistory()
         UniversalContextManager.shared.latestContext = CurrentContext(
             appBundleId: "com.test.archivist",
             appTitle: "Archivist",
+            windowTitle: nil,
             screenKeywords: ["ObsidianTears", "silicon", "rot", "cure", "codebase"],
             clipboardType: .unknown
         )

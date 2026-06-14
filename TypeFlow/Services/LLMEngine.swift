@@ -217,10 +217,7 @@ actor LLMEngine {
                 let suffixResult = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer)
                 let suffixPrompt = suffixResult.text
                 
-                if suffixResult.requiresHealing {
-                    cacheStore.cache = nil
-                    print("[TypeFlow-Debug] LLMEngine: Bypassing base cache due to token healing boundary.")
-                }
+                // Do not flush the cache! We pass the preserved Base Cache into the MLX generate function via copy().
                 
                 if cacheStore.cache == nil || cacheStore.prefixString != dynamicPrefixPrompt {
                     print("[TypeFlow-Debug] LLMEngine: Base cache miss — rebuilding KV prefix...")
@@ -244,16 +241,9 @@ actor LLMEngine {
                     throw KVCacheError(message: "Failed to resolve base KV cache")
                 }
                 
-                var suffixTokens = modelContext.tokenizer.encode(text: suffixPrompt)
-                
-                // CRITICAL FIX: The MLX Tokenizer may automatically prepend a BOS token to every encode call.
-                // Since the prefix already has a BOS token, appending a second BOS token in the middle
-                // of the generation sequence destroys the causal mask and causes severe hallucinations (e.g., /w_pass).
-                let bosTokens = modelContext.tokenizer.encode(text: "")
-                if let bosTokenId = bosTokens.first, let firstSuffixId = suffixTokens.first, bosTokenId == firstSuffixId {
-                    suffixTokens.removeFirst()
-                    print("[TypeFlow-Debug] LLMEngine: Stripped illegal double BOS token from suffix.")
-                }
+                // By passing addSpecialTokens: false, we prevent the tokenizer from injecting a double BOS token
+                // into the sequence, which would break the causal mask and KV cache alignment for newer models like Gemma 3.
+                var suffixTokens = modelContext.tokenizer.encode(text: suffixPrompt, addSpecialTokens: false)
                 
                 guard !suffixTokens.isEmpty else {
                     print("[TypeFlow-Debug] LLMEngine: No suffix tokens to generate, returning empty string.")
