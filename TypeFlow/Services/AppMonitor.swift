@@ -36,11 +36,10 @@ class AppMonitor {
         }
         
         UniversalContextManager.shared.refreshContext()
-        ScreenContextManager.shared.performOCROnDemand()
-        
         let config = SettingsManager.shared.getEffectiveConfig(for: bundleId)
         if config.isEnabled {
             Task {
+                await ScreenContextManager.shared.performOCROnDemand()
                 await LLMEngine.shared.prewarmCache(toneProfile: config.toneProfile)
             }
         }

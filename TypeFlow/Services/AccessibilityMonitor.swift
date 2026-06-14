@@ -257,22 +257,6 @@ class AccessibilityMonitor {
                             return nil // Consume event (both keyDown and keyUp) to prevent leakage
                         }
                         
-                        // Smart Reply Shortcut 
-                        let flags = event.flags
-                        let hasCmd = flags.contains(.maskCommand)
-                        let hasShift = flags.contains(.maskShift)
-                        let hasOption = flags.contains(.maskAlternate)
-                        let hasCtrl = flags.contains(.maskControl)
-                        if keyCode == 15 && hasCmd && hasShift && !hasOption && !hasCtrl {
-                            if type == .keyDown {
-                                print("[TypeFlow] Intercepted Cmd+Shift+R (keyDown) — triggering Smart Reply")
-                                DispatchQueue.main.async {
-                                    CompletionManager.shared.triggerSmartReply()
-                                }
-                            }
-                            return nil // Consume event
-                        }
-                        
                         // Smart Reply String Match
                         if obj.matchesSmartReplyShortcut(event: event) {
                             if type == .keyDown {
@@ -357,9 +341,25 @@ class AccessibilityMonitor {
                                 let bufferSnapshot = obj.keystrokeBuffer
                                 
                                 if keyCode == 49 {
-                                    if CompletionManager.shared.handleAsynchronousSpellcheck(bufferSnapshot: bufferSnapshot) {
+                                    if let correctionData = CompletionManager.shared.handleAsynchronousSpellcheck(bufferSnapshot: bufferSnapshot) {
                                         DispatchQueue.main.async {
-                                            obj.clearKeystrokeBuffer()
+                                            let exactLength = correctionData.misspelledLength + 1 // including the delimiter space
+                                            let delta = obj.keystrokeBuffer.count - bufferSnapshot.count
+                                            
+                                            // Buffer Alignment Protection: if user deleted text during async call, abort safely
+                                            guard delta >= 0 else {
+                                                print("[TypeFlow-Debug] Async Spellcheck: Aborted due to negative delta (user backspaced)")
+                                                return
+                                            }
+                                            
+                                            let offsetFromEnd = exactLength + delta
+                                            if obj.keystrokeBuffer.count >= offsetFromEnd {
+                                                let startIndex = obj.keystrokeBuffer.index(obj.keystrokeBuffer.endIndex, offsetBy: -offsetFromEnd)
+                                                let endIndex = obj.keystrokeBuffer.index(startIndex, offsetBy: exactLength)
+                                                obj.keystrokeBuffer.replaceSubrange(startIndex..<endIndex, with: correctionData.correction)
+                                            } else {
+                                                obj.clearKeystrokeBuffer()
+                                            }
                                         }
                                     }
                                 }
@@ -378,6 +378,8 @@ class AccessibilityMonitor {
                             
                             obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: delay)
                         }
+                        
+
                         
                         // FIRE AND FORGET: Return immediately so macOS doesn't block the key (e.g., 'r' Accent Menu issue)
                         return Unmanaged.passUnretained(event)

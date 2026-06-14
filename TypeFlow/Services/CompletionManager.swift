@@ -176,8 +176,8 @@ class CompletionManager: @unchecked Sendable {
         return (word, delimiter, range)
     }
     
-    func handleAsynchronousSpellcheck(bufferSnapshot: String) -> Bool {
-        guard SettingsManager.shared.autoCorrectEnabled else { return false }
+    func handleAsynchronousSpellcheck(bufferSnapshot: String) -> (misspelledLength: Int, correction: String)? {
+        guard SettingsManager.shared.autoCorrectEnabled else { return nil }
         if let completedWordInfo = getCompletedWord(from: bufferSnapshot) {
             let word = completedWordInfo.word
             let wordRange = completedWordInfo.range
@@ -186,9 +186,8 @@ class CompletionManager: @unchecked Sendable {
             if word.count >= 4, let correction = getSpellCorrection(in: bufferSnapshot, lastWordRange: wordRange) {
                 print("[TypeFlow-Debug] Asynchronous auto-correct triggered: '\(word)' -> '\(correction)'")
                 
-                // Use the string without the delimiter to calculate the correct delete count
-                let activeLineWithoutDelimiter = String(bufferSnapshot.dropLast(delimiter.count))
-                let deleteCount = calculateDeleteCount(activeLine: activeLineWithoutDelimiter, misspelled: word)
+                // Use the exact word length for deletion count instead of range distance to end of line
+                let deleteCount = word.count
                 
                 DispatchQueue.main.async {
                     self.debounceTimer?.invalidate()
@@ -196,10 +195,23 @@ class CompletionManager: @unchecked Sendable {
                     self.currentGenerationTask?.cancel()
                     self.currentGenerationTask = nil
                     
-                    // We must delete the word (deleteCount) PLUS the delimiter that was just printed
-                    TextInjector.shared.injectBackspaces(count: deleteCount + delimiter.count)
-                    // Inject the correction and explicitly append the trailing space via pasteboard
-                    TextInjector.shared.inject(text: correction + delimiter)
+                    // Buffer Alignment Protection for Screen UI: check if user typed anything while we were calculating
+                    let currentBufferCount = self.accessibilityMonitor?.keystrokeBuffer.count ?? bufferSnapshot.count
+                    let delta = currentBufferCount - bufferSnapshot.count
+                    
+                    guard delta >= 0 else {
+                        print("[TypeFlow-Debug] SpellCheck UI: Aborting, user deleted text during async resolution.")
+                        return
+                    }
+                    
+                    // We must delete the word (deleteCount) PLUS the delimiter PLUS the newly typed chars
+                    TextInjector.shared.injectBackspaces(count: deleteCount + delimiter.count + delta)
+                    
+                    // Re-inject the new characters after the correction
+                    let newlyTyped = delta > 0 ? String(self.accessibilityMonitor?.keystrokeBuffer.suffix(delta) ?? "") : ""
+                    
+                    // Inject the correction and explicitly append the trailing space via pasteboard + newly typed
+                    TextInjector.shared.inject(text: correction + delimiter + newlyTyped)
                     
                     self.clearCompletion()
                 }
@@ -207,10 +219,10 @@ class CompletionManager: @unchecked Sendable {
                 let correctedLine = String(bufferSnapshot.dropLast(deleteCount + delimiter.count)) + correction + delimiter
                 print("[TypeFlow-Debug] Logging auto-corrected sentence to history: '\(correctedLine)'")
                 TypingHistoryManager.shared.logSentenceFromText(correctedLine)
-                return true
+                return (word.count, correction + delimiter)
             }
         }
-        return false
+        return nil
     }
     
     func onTextChanged(bufferFallback: String = "") {
@@ -418,11 +430,37 @@ class CompletionManager: @unchecked Sendable {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self = self else { return }
                 let axText = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
-                let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
                 
-                DispatchQueue.main.async {
-                    self.continueGeneration(activeLine: finalLine, keystrokeBuffer: liveBuffer)
+                let isBrowser = ["zen", "safari", "chrome", "brave", "edge", "arc", "firefox"].contains {
+                    NSWorkspace.shared.frontmostApplication?.localizedName?.lowercased().contains($0) == true ||
+                    NSWorkspace.shared.frontmostApplication?.bundleIdentifier?.lowercased().contains($0) == true
+                }
+                
+                if axText.count < 100 && isBrowser {
+                    Task {
+                        if let ocrText = await ScreenContextManager.shared.performRapidBrowserOCR() {
+                            DispatchQueue.main.async {
+                                // Append this OCR text to the === Screen Context === payload
+                                ScreenContextManager.shared.latestScreenText = ocrText
+                                let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                                let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                                self.continueGeneration(activeLine: finalLine, keystrokeBuffer: liveBuffer)
+                            }
+                        } else {
+                            DispatchQueue.main.async {
+                                let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                                let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                                self.continueGeneration(activeLine: finalLine, keystrokeBuffer: liveBuffer)
+                            }
+                        }
+                    }
+                } else {
+                    let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                    let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                    
+                    DispatchQueue.main.async {
+                        self.continueGeneration(activeLine: finalLine, keystrokeBuffer: liveBuffer)
+                    }
                 }
             }
         }
@@ -435,10 +473,13 @@ class CompletionManager: @unchecked Sendable {
         }
         
         // --- Adaptive Pattern Engine Gate ---
-        let words = activeLine.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
-        if let lastWord = words.last?.lowercased(), AdaptivePatternLearner.shared.behaviors.stopWords.contains(lastWord) {
-            print("[TypeFlow-Debug] Adaptive Engine: Active line ends with learned stop-word '\(lastWord)'. Skipping MLX.")
-            return
+        let adaptiveStopWordsEnabled = UserDefaults.standard.object(forKey: "adaptiveStopWordsEnabled") as? Bool ?? true
+        if adaptiveStopWordsEnabled {
+            let words = activeLine.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+            if let lastWord = words.last?.lowercased(), AdaptivePatternLearner.shared.behaviors.stopWords.contains(lastWord) {
+                print("[TypeFlow-Debug] Adaptive Engine: Active line ends with learned stop-word '\(lastWord)'. Skipping MLX.")
+                return
+            }
         }
         // ------------------------------------
         
