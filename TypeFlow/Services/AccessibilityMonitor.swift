@@ -1,8 +1,12 @@
 import Cocoa
 
 class AccessibilityMonitor {
-    var eventTap: CFMachPort?
-    var runLoopSource: CFRunLoopSource?
+    var observerTap: CFMachPort?
+    var observerRunLoopSource: CFRunLoopSource?
+    
+    var acceptTap: CFMachPort?
+    var acceptRunLoopSource: CFRunLoopSource?
+    
     var onCaretMoved: ((CGRect) -> Void)?
     private var retryTimer: Timer?
     var keystrokeBuffer: String = ""
@@ -212,19 +216,21 @@ class AccessibilityMonitor {
         }
     }
     
-    private var isRunning: Bool { eventTap != nil }
+    private var isRunning: Bool { observerTap != nil }
     var consumedKeyCodes: Set<Int64> = []
     
     func start() {
         let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.rightMouseDown.rawValue)
-        eventTap = CGEvent.tapCreate(
+        
+        // 1. OBSERVER TAP (listenOnly): Tracks all keys asynchronously without blocking the system.
+        observerTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
-            options: .defaultTap,
+            options: .listenOnly,
             eventsOfInterest: CGEventMask(eventMask),
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
                 if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
-                    return Unmanaged.passRetained(event)
+                    return Unmanaged.passUnretained(event)
                 }
                 
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
@@ -233,7 +239,7 @@ class AccessibilityMonitor {
                     let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
                     let obj = unmanaged.takeUnretainedValue()
                     
-                    // Clear ghost text and buffers immediately on any mouse click
+                    // Mouse clicks reset state
                     if type == .leftMouseDown || type == .rightMouseDown {
                         DispatchQueue.main.async {
                             CompletionManager.shared.cancelInflightTasks()
@@ -241,99 +247,17 @@ class AccessibilityMonitor {
                             CompletionManager.shared.clearCompletion()
                             obj.clearKeystrokeBuffer()
                         }
-                        return Unmanaged.passRetained(event)
+                        return Unmanaged.passUnretained(event)
                     }
                     
-                    if type == .keyDown || type == .keyUp {
+                    if type == .keyDown {
+                        print("[TypeFlow] Observer keyDown detected: keyCode=\(keyCode)")
                         
-                        // Rewrite Shortcut
-                        if obj.matchesRewriteShortcut(event: event) {
-                            if type == .keyDown {
-                                print("[TypeFlow] Intercepted Rewrite Shortcut (keyDown) — triggering Rewrite selection")
-                                DispatchQueue.main.async {
-                                    CompletionManager.shared.triggerRewrite()
-                                }
-                            }
-                            return nil // Consume event (both keyDown and keyUp) to prevent leakage
-                        }
-                        
-                        // Smart Reply String Match
-                        if obj.matchesSmartReplyShortcut(event: event) {
-                            if type == .keyDown {
-                                print("[TypeFlow] Intercepted Smart Reply Shortcut (keyDown) — triggering Smart Reply")
-                                DispatchQueue.main.async {
-                                    CompletionManager.shared.triggerSmartReply()
-                                }
-                            }
-                            return nil // Consume event
-                        }
-                    }
-                }
-                
-                if type == .keyDown {
-                    print("[TypeFlow] keyDown detected: keyCode=\(keyCode)")
-                    
-                    if let monitor = refcon {
-                        let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
-                        let obj = unmanaged.takeUnretainedValue()
-                        
-                        if CompletionManager.shared.isRewrite {
-                            if keyCode == 53 { // Escape
-                                print("[TypeFlow] Escape pressed during rewrite, clearing completion")
-                                DispatchQueue.main.async {
-                                    CompletionManager.shared.clearCompletion()
-                                }
-                                return nil
-                            }
-                        }
-                        
-                        // (Shortcuts moved above for both keyDown/keyUp interception)
-                    }
-                    
-                    if keyCode == 53 { // Escape
-                        if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
-                            print("[TypeFlow] Intercepted Escape in global monitor")
-                            DispatchQueue.main.async {
-                                CompletionManager.shared.clearCompletion()
-                            }
-                            return nil // Consume event
-                        }
-                    }
-                    
-                    var tabConsumed = false
-                    let isRewriteActive = CompletionManager.shared.isRewrite
-                    if (keyCode == 48 && (SettingsManager.shared.acceptShortcut == "Tab" || isRewriteActive)) ||
-                       (keyCode == 124 && SettingsManager.shared.acceptShortcut == "Right Arrow") {
-                        print("[TypeFlow] Trigger key pressed (Tab/Right) [isRewriteActive=\(isRewriteActive)]")
-                        if CompletionManager.shared.handleTabPressed() {
-                            print("[TypeFlow] Tab consumed by CompletionManager")
-                            tabConsumed = true
-                        } else {
-                            print("[TypeFlow] Tab not consumed")
-                        }
-                    }
-                    
-                    if let monitor = refcon {
-                        let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
-                        let obj = unmanaged.takeUnretainedValue()
-                        
-                        if tabConsumed {
-                            obj.clearKeystrokeBuffer()
-                            obj.consumedKeyCodes.insert(keyCode)
-                            return nil // Consume the event
-                        }
-                        
-                        if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
-                            obj.consumedKeyCodes.insert(keyCode)
-                            return nil // Ignore all other keystrokes during rewrite/smart-reply
-                        }
-                        
-                        // Capture a copy of the event to safely use on an async thread
+                        // Pass event processing to the background immediately
                         guard let asyncEvent = event.copy() else {
                             return Unmanaged.passUnretained(event)
                         }
                         
-                        // Dispatch all heavy logic (buffer updates, spellcheck, generation debounce)
                         DispatchQueue.global(qos: .userInitiated).async {
                             // Spacebar / Return Fast-Path
                             if keyCode == 49 || keyCode == 36 {
@@ -343,14 +267,10 @@ class AccessibilityMonitor {
                                 if keyCode == 49 {
                                     if let correctionData = CompletionManager.shared.handleAsynchronousSpellcheck(bufferSnapshot: bufferSnapshot) {
                                         DispatchQueue.main.async {
-                                            let exactLength = correctionData.misspelledLength + 1 // including the delimiter space
+                                            let exactLength = correctionData.misspelledLength + 1
                                             let delta = obj.keystrokeBuffer.count - bufferSnapshot.count
                                             
-                                            // Buffer Alignment Protection: if user deleted text during async call, abort safely
-                                            guard delta >= 0 else {
-                                                print("[TypeFlow-Debug] Async Spellcheck: Aborted due to negative delta (user backspaced)")
-                                                return
-                                            }
+                                            guard delta >= 0 else { return }
                                             
                                             let offsetFromEnd = exactLength + delta
                                             if obj.keystrokeBuffer.count >= offsetFromEnd {
@@ -369,30 +289,11 @@ class AccessibilityMonitor {
                             }
                             
                             obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
-                            
                             let bufferSnapshot = obj.keystrokeBuffer
-                            
-                            // Treat punctuation as a word boundary to trigger fetch immediately
                             let isPunctuation = (keyCode == 43 || keyCode == 47)
                             let delay = isPunctuation ? 0.0 : 0.15
                             
                             obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: delay)
-                        }
-                        
-
-                        
-                        // FIRE AND FORGET: Return immediately so macOS doesn't block the key (e.g., 'r' Accent Menu issue)
-                        return Unmanaged.passUnretained(event)
-                    }
-                } else if type == .keyUp {
-                    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-                    if let monitor = refcon {
-                        let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
-                        let obj = unmanaged.takeUnretainedValue()
-                        
-                        if obj.consumedKeyCodes.contains(keyCode) {
-                            obj.consumedKeyCodes.remove(keyCode)
-                            return nil // Consume keyUp to prevent leakage
                         }
                     }
                 }
@@ -402,15 +303,98 @@ class AccessibilityMonitor {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         )
         
-        if let tap = eventTap {
-            runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-            CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-            CGEvent.tapEnable(tap: tap, enable: true)
-            
-            // Also setup active app observer for frontmost application
-            if let app = NSWorkspace.shared.frontmostApplication {
-                self.setupActiveAppObserver(for: app.processIdentifier)
-            }
+        // 2. ACCEPT TAP (defaultTap): Tightly scoped tap to consume specific acceptance or trigger shortcuts.
+        acceptTap = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
+                    return Unmanaged.passRetained(event)
+                }
+                
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                
+                if let monitor = refcon {
+                    let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
+                    let obj = unmanaged.takeUnretainedValue()
+                    
+                    if type == .keyDown || type == .keyUp {
+                        // Rewrite Shortcut
+                        if obj.matchesRewriteShortcut(event: event) {
+                            if type == .keyDown {
+                                print("[TypeFlow] Intercepted Rewrite Shortcut (keyDown)")
+                                DispatchQueue.main.async { CompletionManager.shared.triggerRewrite() }
+                            }
+                            return nil
+                        }
+                        
+                        // Smart Reply Shortcut
+                        if obj.matchesSmartReplyShortcut(event: event) {
+                            if type == .keyDown {
+                                print("[TypeFlow] Intercepted Smart Reply Shortcut (keyDown)")
+                                DispatchQueue.main.async { CompletionManager.shared.triggerSmartReply() }
+                            }
+                            return nil
+                        }
+                    }
+                    
+                    if type == .keyDown {
+                        if keyCode == 53 { // Escape
+                            if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
+                                DispatchQueue.main.async { CompletionManager.shared.clearCompletion() }
+                                return nil
+                            }
+                        }
+                        
+                        var tabConsumed = false
+                        let isRewriteActive = CompletionManager.shared.isRewrite
+                        if (keyCode == 48 && (SettingsManager.shared.acceptShortcut == "Tab" || isRewriteActive)) ||
+                           (keyCode == 124 && SettingsManager.shared.acceptShortcut == "Right Arrow") {
+                            if CompletionManager.shared.handleTabPressed() {
+                                tabConsumed = true
+                            }
+                        }
+                        
+                        if tabConsumed {
+                            obj.clearKeystrokeBuffer()
+                            obj.consumedKeyCodes.insert(keyCode)
+                            return nil
+                        }
+                        
+                        if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
+                            obj.consumedKeyCodes.insert(keyCode)
+                            return nil
+                        }
+                    } else if type == .keyUp {
+                        if obj.consumedKeyCodes.contains(keyCode) {
+                            obj.consumedKeyCodes.remove(keyCode)
+                            return nil
+                        }
+                    }
+                }
+                
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        )
+        
+        // Add BOTH taps to the run loop
+        if let obsTap = observerTap {
+            observerRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, obsTap, 0)
+            CFRunLoopAddSource(CFRunLoopGetMain(), observerRunLoopSource, .commonModes)
+            CGEvent.tapEnable(tap: obsTap, enable: true)
+        }
+        
+        if let accTap = acceptTap {
+            acceptRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, accTap, 0)
+            CFRunLoopAddSource(CFRunLoopGetMain(), acceptRunLoopSource, .commonModes)
+            CGEvent.tapEnable(tap: accTap, enable: true)
+        }
+        
+        if let app = NSWorkspace.shared.frontmostApplication {
+            self.setupActiveAppObserver(for: app.processIdentifier)
         }
     }
     
@@ -438,11 +422,24 @@ class AccessibilityMonitor {
     }
     
     func stop() {
-        if let tap = eventTap {
+        if let tap = observerTap {
             CGEvent.tapEnable(tap: tap, enable: false)
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-            eventTap = nil
+            if let source = observerRunLoopSource {
+                CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            }
+            observerTap = nil
+            observerRunLoopSource = nil
         }
+        
+        if let tap = acceptTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            if let source = acceptRunLoopSource {
+                CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            }
+            acceptTap = nil
+            acceptRunLoopSource = nil
+        }
+        
         stopActiveAppObserver()
         print("[TypeFlow] Accessibility monitor stopped.")
     }

@@ -7,8 +7,7 @@ class CompletionManager: @unchecked Sendable {
     weak var accessibilityMonitor: AccessibilityMonitor?
     weak var overlayWindowController: OverlayWindowController?
     
-    private var debounceTimer: Timer?
-    private var currentGenerationTask: Task<Void, Never>?
+    private let workController = SuggestionWorkController()
     
     /// Tracks the timestamp of the most recent keystroke for adaptive debounce.
     private var lastKeystrokeTime: Date = .distantPast
@@ -190,10 +189,7 @@ class CompletionManager: @unchecked Sendable {
                 let deleteCount = word.count
                 
                 DispatchQueue.main.async {
-                    self.debounceTimer?.invalidate()
-                    self.debounceTimer = nil
-                    self.currentGenerationTask?.cancel()
-                    self.currentGenerationTask = nil
+                    self.workController.cancelAll()
                     
                     // Buffer Alignment Protection for Screen UI: check if user typed anything while we were calculating
                     let currentBufferCount = self.accessibilityMonitor?.keystrokeBuffer.count ?? bufferSnapshot.count
@@ -302,10 +298,7 @@ class CompletionManager: @unchecked Sendable {
                 print("[TypeFlow-Debug] Completed word spell correction found: '\(word)' -> '\(correction)'")
                 
                 // Cancel any pending LLM generation tasks
-                debounceTimer?.invalidate()
-                debounceTimer = nil
-                currentGenerationTask?.cancel()
-                currentGenerationTask = nil
+                workController.cancelAll()
                 
                 if SettingsManager.shared.autoCorrectEnabled {
                     print("[TypeFlow-Debug] Auto-correct is enabled. Automatically correcting '\(word)' to '\(correction)'")
@@ -363,10 +356,7 @@ class CompletionManager: @unchecked Sendable {
                     if let correction = correction {
                         print("[TypeFlow-Debug] Inline definite typo spell correction found: '\(word)' -> '\(correction)'")
                         // Cancel any pending LLM generation tasks
-                        debounceTimer?.invalidate()
-                        debounceTimer = nil
-                        currentGenerationTask?.cancel()
-                        currentGenerationTask = nil
+                        workController.cancelAll()
                         
                         activeSpellCorrection = (misspelled: word, corrected: correction)
                         
@@ -406,8 +396,7 @@ class CompletionManager: @unchecked Sendable {
         NotificationCenter.default.post(name: Notification.Name("UserDidType"), object: nil)
         
         // Debounce: 150-300ms ensures user has paused before spinning up GPU inference.
-        debounceTimer?.invalidate()
-        debounceTimer = Timer.scheduledTimer(withTimeInterval: debounceInterval, repeats: false) { [weak self] _ in
+        workController.replaceDebouncedWork(delayMilliseconds: Int(debounceInterval * 1000)) { [weak self] _ in
             print("[TypeFlow-Debug] Debounce timer fired!")
             self?.triggerGeneration()
         }
@@ -420,8 +409,7 @@ class CompletionManager: @unchecked Sendable {
         }
         
         print("[TypeFlow-Debug] triggerGeneration started. Cancelling any previous inflight task...")
-        currentGenerationTask?.cancel()
-        currentGenerationTask = nil
+        // workController manages the current work ID and will cancel its own tasks.
         
         if let providedText = text {
             self.continueGeneration(activeLine: providedText, keystrokeBuffer: "")
@@ -519,18 +507,13 @@ class CompletionManager: @unchecked Sendable {
         print("[TypeFlow-Debug] Dispatching LLM generation for: '\(fullActiveLine)'")
         
         // Explicitly cancel any inflight task before creating a new one.
-        // Await its completion to prevent parallel Swift concurrency tasks that each hold
-        // a reference to GPU memory through LLMEngine, causing GPU power state thrashing.
-        currentGenerationTask?.cancel()
-        let previousTask = currentGenerationTask
+        let workID = workController.currentWorkID
         
-        currentGenerationTask = Task { [weak self] in
+        workController.replaceGenerationWork(for: workID) { [weak self] in
             guard let self = self else { return }
-            // Wait for the previous cancelled task to fully wind down
-            _ = await previousTask?.value
             
             // If this task was cancelled while waiting, abort early
-            if Task.isCancelled { return }
+            if Task.isCancelled || !self.workController.isCurrent(workID) { return }
             
             let modelReady = await LLMEngine.shared.isModelReady
             if !modelReady {
@@ -549,39 +532,19 @@ class CompletionManager: @unchecked Sendable {
                 toneProfile: effectiveConfig.toneProfile
             )
             print("[TypeFlow-Debug] Raw model output: '\(completion)'")
-            if Task.isCancelled {
-                print("[TypeFlow-Debug] Task was cancelled, ignoring output.")
+            if Task.isCancelled || !self.workController.isCurrent(workID) {
+                print("[TypeFlow-Debug] Task was cancelled or stale work ID, ignoring output.")
                 return 
             }
             
-            var processedCompletion = completion.trimmingCharacters(in: .whitespacesAndNewlines)
-            
-            // ── Fixed Overlap Stripper ─────────────────────────────────────────
-            // Strict stride loop: find the longest EXACT-CASE suffix of fullActiveLine
-            // that is also a prefix of the raw completion (no trimming after the match
-            // so we never drop boundary characters like '_').
-            let maxOverlap = min(fullActiveLine.count, processedCompletion.count)
-            var overlapLength = 0
-            if maxOverlap > 0 {
-                for i in stride(from: maxOverlap, through: 1, by: -1) {
-                    let suffix = String(fullActiveLine.suffix(i))
-                    let prefix = String(processedCompletion.prefix(i))
-                    if suffix == prefix {
-                        overlapLength = i
-                        break
-                    }
-                }
-            }
-            if overlapLength > 0 {
-                processedCompletion = String(processedCompletion.dropFirst(overlapLength))
-            }
+            var processedCompletion = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: fullActiveLine, rawCompletion: completion)
             
             // Strip markdown formatting
             processedCompletion = self.stripMarkdown(processedCompletion)
             
-            print("[TypeFlow-Debug] Processed completion (after stripping \(overlapLength) chars overlap & markdown): '\(processedCompletion)'")
+            print("[TypeFlow-Debug] Processed completion (after stripping overlap & markdown): '\(processedCompletion)'")
             
-            if Task.isCancelled { return }
+            if Task.isCancelled || !self.workController.isCurrent(workID) { return }
             
             DispatchQueue.main.async {
                 self.currentCompletion = processedCompletion
@@ -616,10 +579,7 @@ class CompletionManager: @unchecked Sendable {
         print("[TypeFlow-Debug] CompletionManager: triggerRewrite called (mode: \(mode))")
 
         // Cancel previous tasks/timers immediately
-        debounceTimer?.invalidate()
-        debounceTimer = nil
-        currentGenerationTask?.cancel()
-        currentGenerationTask = nil
+        workController.cancelAll()
         activeSpellCorrection = nil
         activeSnippetKey = nil
 
@@ -638,7 +598,8 @@ class CompletionManager: @unchecked Sendable {
             }
 
             // Asynchronously extract selection immediately while the target app is still frontmost
-            currentGenerationTask = Task {
+            let workID = workController.currentWorkID
+            workController.replaceGenerationWork(for: workID) {
                 try? await Task.sleep(nanoseconds: 100_000_000) // Settle delay
                 
                 guard let monitor = self.accessibilityMonitor,
@@ -696,7 +657,9 @@ class CompletionManager: @unchecked Sendable {
                 temperature: 0.0, maxTokens: 300, isBuiltIn: true)
         }
 
-        currentGenerationTask = Task {
+        let workID = workController.currentWorkID
+        workController.replaceGenerationWork(for: workID) { [weak self] in
+            guard let self = self else { return }
             // Ensure selection is ready (wait up to 1 second if extraction is still running)
             var attempts = 0
             while self.activeRewriteText == nil && attempts < 10 {
@@ -737,10 +700,7 @@ class CompletionManager: @unchecked Sendable {
     func triggerSmartReply() {
         print("[TypeFlow-Debug] CompletionManager: triggerSmartReply called")
         
-        debounceTimer?.invalidate()
-        debounceTimer = nil
-        currentGenerationTask?.cancel()
-        currentGenerationTask = nil
+        workController.cancelAll()
         activeSpellCorrection = nil
         activeSnippetKey = nil
         
@@ -754,7 +714,9 @@ class CompletionManager: @unchecked Sendable {
             self.overlayWindowController?.updateText("", isLoading: true, isSmartReply: true)
         }
         
-        currentGenerationTask = Task {
+        let workID = workController.currentWorkID
+        workController.replaceGenerationWork(for: workID) { [weak self] in
+            guard let self = self else { return }
             try? await Task.sleep(nanoseconds: 100_000_000) // Settle delay
             
             let screenContext = ScreenContextManager.shared.latestScreenText
@@ -913,10 +875,7 @@ class CompletionManager: @unchecked Sendable {
     }
     
     func cancelInflightTasks() {
-        currentGenerationTask?.cancel()
-        currentGenerationTask = nil
-        debounceTimer?.invalidate()
-        debounceTimer = nil
+        workController.cancelAll()
     }
     
     func hideOverlay() {
@@ -944,10 +903,7 @@ class CompletionManager: @unchecked Sendable {
             if textAfterReturn == nil || textAfterReturn!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 print("[TypeFlow-Debug] Smart Submission Detected: Field is empty or lost focus after Return.")
                 self.isSuppressedUntilNextTyping = true
-                self.debounceTimer?.invalidate()
-                self.debounceTimer = nil
-                self.currentGenerationTask?.cancel()
-                self.currentGenerationTask = nil
+                self.workController.cancelAll()
                 self.overlayWindowController?.updateText("")
                 self.clearCompletion()
             } else {
@@ -1020,5 +976,99 @@ class CompletionManager: @unchecked Sendable {
         }
         
         return result
+    }
+}
+
+final class SuggestionWorkController: @unchecked Sendable {
+    private var debounceTask: Task<Void, Never>?
+    private var generationTask: Task<Void, Never>?
+    private var latestWorkID: UInt64 = 0
+    private let lock = NSLock()
+
+    var currentWorkID: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return latestWorkID
+    }
+
+    @discardableResult
+    func replaceDebouncedWork(
+        delayMilliseconds: Int,
+        operation: @escaping @Sendable (UInt64) async -> Void
+    ) -> UInt64 {
+        lock.lock()
+        debounceTask?.cancel()
+        generationTask?.cancel()
+        latestWorkID &+= 1
+        let workID = latestWorkID
+        lock.unlock()
+
+        let task = Task {
+            let delayNanoseconds = UInt64(delayMilliseconds) * 1_000_000
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            if Task.isCancelled || !isCurrent(workID) { return }
+            await operation(workID)
+        }
+        
+        lock.lock()
+        debounceTask = task
+        lock.unlock()
+        return workID
+    }
+
+    func replaceGenerationWork(
+        for workID: UInt64,
+        operation: @escaping @Sendable () async -> Void
+    ) {
+        lock.lock()
+        generationTask?.cancel()
+        let task = Task {
+            if Task.isCancelled || !isCurrent(workID) { return }
+            await operation()
+        }
+        generationTask = task
+        lock.unlock()
+    }
+
+    func cancelAll() {
+        lock.lock()
+        debounceTask?.cancel()
+        generationTask?.cancel()
+        debounceTask = nil
+        generationTask = nil
+        latestWorkID &+= 1
+        lock.unlock()
+    }
+
+    func isCurrent(_ workID: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return workID == latestWorkID
+    }
+}
+
+struct SuggestionInteractionState {
+    static func sliceGeneratedSuffix(activeLine: String, rawCompletion: String) -> String {
+        var processedCompletion = rawCompletion.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        let maxOverlap = min(activeLine.count, processedCompletion.count)
+        var overlapLength = 0
+        
+        if maxOverlap > 0 {
+            for i in stride(from: maxOverlap, through: 1, by: -1) {
+                let suffix = String(activeLine.suffix(i))
+                let prefix = String(processedCompletion.prefix(i))
+                if suffix == prefix {
+                    overlapLength = i
+                    break
+                }
+            }
+        }
+        
+        if overlapLength > 0 {
+            processedCompletion = String(processedCompletion.dropFirst(overlapLength))
+        }
+        
+        return processedCompletion
     }
 }
