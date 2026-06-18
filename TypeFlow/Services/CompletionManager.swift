@@ -498,11 +498,25 @@ class CompletionManager: @unchecked Sendable {
         }
         activeSnippetKey = nil
         
-        var fullActiveLine = activeLine
-        if !keystrokeBuffer.isEmpty && fullActiveLine.hasSuffix(keystrokeBuffer) {
-            fullActiveLine = String(fullActiveLine.dropLast(keystrokeBuffer.count))
+        // ── Prompt Deduplication Guard ───────────────────────────────────────
+        // When the Accessibility API successfully extracts text before the caret,
+        // it is the definitive ground truth for the current field state. We must
+        // NOT append the internal keystroke buffer to it: the AX text already
+        // contains everything the user typed. The buffer is only used as a fallback
+        // when AX extraction returns empty (e.g. sandboxed apps that block kAXValue).
+        // Grafting the buffer onto the AX string was the root cause of the echoing
+        // bug logged as: "Dispatching LLM generation for: 'the quick fox jumped the quick fox jumped'"
+        let fullActiveLine: String
+        let effectiveLiveBuffer: String
+        if !activeLine.isEmpty {
+            // AX text is available — use it exclusively, no buffer appended.
+            fullActiveLine = activeLine
+            effectiveLiveBuffer = ""
+        } else {
+            // AX unavailable — fall back to the keystroke buffer as both sources.
+            fullActiveLine = keystrokeBuffer
+            effectiveLiveBuffer = keystrokeBuffer
         }
-        fullActiveLine += keystrokeBuffer
         
         print("[TypeFlow-Debug] Dispatching LLM generation for: '\(fullActiveLine)'")
         
@@ -527,8 +541,8 @@ class CompletionManager: @unchecked Sendable {
             if Task.isCancelled { return }
             
             let completion = await LLMEngine.shared.generateCompletion(
-                textBeforeCaret: activeLine,
-                liveBuffer: keystrokeBuffer,
+                textBeforeCaret: fullActiveLine,
+                liveBuffer: effectiveLiveBuffer,
                 toneProfile: effectiveConfig.toneProfile
             )
             print("[TypeFlow-Debug] Raw model output: '\(completion)'")
