@@ -29,6 +29,8 @@
 		86AC6F9ADD1A7BD7949792B3 /* ScreenContextManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17E10BBEE87D159A245810AF /* ScreenContextManager.swift */; };
 		89A2BA13CDCAAED50495A6FF /* UsageStatsManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E97BD28D7E190489A867F6EF /* UsageStatsManager.swift */; };
 		A0A05B2E7890C9234E748576 /* MenuBarManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA244C8BC5E5A8594E318714 /* MenuBarManager.swift */; };
+		A17026632FE4134000C02A1C /* LlamaSwift in Frameworks */ = {isa = PBXBuildFile; productRef = A17026622FE4134000C02A1C /* LlamaSwift */; };
+		A17026652FE4517700C02A1C /* TypeFlowLlamaWrapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17026642FE4517700C02A1C /* TypeFlowLlamaWrapper.swift */; };
 		A64F839AFD3D4C9263F8F619 /* OverlayWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05EB25D921ECA98753720733 /* OverlayWindowController.swift */; };
 		B27F8B26304C0E7B9ABCBEAD /* MLXHuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = 9B2CAE67C4295330F24C6C95 /* MLXHuggingFace */; };
 		CD2054678B56A3613C654157 /* CompletionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABD0110E416006C8306149A5 /* CompletionManager.swift */; };
@@ -61,6 +63,7 @@
 		7DF57D4AC499EA30B70BA1DC /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		85A7FADC3F2C9C781749B83B /* AccessibilityMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityMonitor.swift; sourceTree = "<group>"; };
 		9598D6651092E8D3C2602E6F /* ModelManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelManager.swift; sourceTree = "<group>"; };
+		A17026642FE4517700C02A1C /* TypeFlowLlamaWrapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypeFlowLlamaWrapper.swift; sourceTree = "<group>"; };
 		A26769F6DFFCCCD32D18C5AA /* TypeFlow.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TypeFlow.entitlements; sourceTree = "<group>"; };
 		A730BEF86816821F7AEC3500 /* TypingHistoryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TypingHistoryManager.swift; sourceTree = "<group>"; };
 		ABD0110E416006C8306149A5 /* CompletionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompletionManager.swift; sourceTree = "<group>"; };
@@ -85,6 +88,7 @@
 				DC32341AB8E61D6CAA87EA7F /* MLXLMCommon in Frameworks */,
 				B27F8B26304C0E7B9ABCBEAD /* MLXHuggingFace in Frameworks */,
 				398BDDCB0417B528878CB458 /* Transformers in Frameworks */,
+				A17026632FE4134000C02A1C /* LlamaSwift in Frameworks */,
 				00B55E059A6A235B13A508F2 /* HuggingFace in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -115,6 +119,7 @@
 		41CB9653DB33AB1874DABBB3 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				A17026642FE4517700C02A1C /* TypeFlowLlamaWrapper.swift */,
 				85A7FADC3F2C9C781749B83B /* AccessibilityMonitor.swift */,
 				F5F8946E9A037E871848ECDF /* AdaptivePatternLearner.swift */,
 				DA7B4E9B28ADC504259DA53D /* AppMonitor.swift */,
@@ -182,6 +187,7 @@
 				9B2CAE67C4295330F24C6C95 /* MLXHuggingFace */,
 				71B6AB2A0CD03ABA8C9B7F0C /* Transformers */,
 				E72AC51CFE47092546E9A80C /* HuggingFace */,
+				A17026622FE4134000C02A1C /* LlamaSwift */,
 			);
 			productName = TypeFlow;
 			productReference = 5C5649265250B1C55B317D37 /* TypeFlow.app */;
@@ -210,6 +216,7 @@
 				6FAF5557160BA20CEC11F207 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
 				ADD5700875CCE087A7E66BAD /* XCRemoteSwiftPackageReference "swift-huggingface" */,
 				99A09CB2AE63C8386E5C8A10 /* XCRemoteSwiftPackageReference "swift-transformers" */,
+				A17026612FE4134000C02A1C /* XCRemoteSwiftPackageReference "llama" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = F6F2C6B513BB36D62DA10520 /* Products */;
@@ -250,6 +257,7 @@
 				3C7E1DAA1739A8F31D7F19C3 /* TypeFlowApp.swift in Sources */,
 				7116FB4D7C432C9038858F88 /* TypingHistoryManager.swift in Sources */,
 				11400A0FD0622073A5EAF44D /* UniversalContextManager.swift in Sources */,
+				A17026652FE4517700C02A1C /* TypeFlowLlamaWrapper.swift in Sources */,
 				89A2BA13CDCAAED50495A6FF /* UsageStatsManager.swift in Sources */,
 				DD42EE3727880BAD2944DDBD /* VocabularyExtractor.swift in Sources */,
 			);
@@ -465,6 +473,14 @@
 				minimumVersion = 0.1.0;
 			};
 		};
+		A17026612FE4134000C02A1C /* XCRemoteSwiftPackageReference "llama" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/mattt/llama.swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.9700.0;
+			};
+		};
 		ADD5700875CCE087A7E66BAD /* XCRemoteSwiftPackageReference "swift-huggingface" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/huggingface/swift-huggingface";
@@ -505,6 +521,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 6FAF5557160BA20CEC11F207 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
 			productName = MLXHuggingFace;
+		};
+		A17026622FE4134000C02A1C /* LlamaSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A17026612FE4134000C02A1C /* XCRemoteSwiftPackageReference "llama" */;
+			productName = LlamaSwift;
 		};
 		E72AC51CFE47092546E9A80C /* HuggingFace */ = {
 			isa = XCSwiftPackageProductDependency;

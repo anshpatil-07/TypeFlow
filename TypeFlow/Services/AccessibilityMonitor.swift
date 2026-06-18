@@ -15,6 +15,10 @@ class AccessibilityMonitor {
     /// Used to suppress intra-app focus-change noise (e.g. browser URL bar ↔ page).
     var activeFocusPID: pid_t = 0
     private let processingQueue = DispatchQueue(label: "com.cotyper.eventProcessing", qos: .utility)
+    // Dedicated serial queue for the CGEventTap observer callback. Isolates all
+    // event-handling work from the main run loop and the LLM pipeline queues,
+    // ensuring the event tap thread returns instantly and macOS never drops events.
+    private let tapQueue = DispatchQueue(label: "com.cotyper.tapCallback", qos: .userInteractive)
     private var contextFetchWorkItem: DispatchWorkItem?
     
     private var lastDeletedWord: String?
@@ -253,12 +257,15 @@ class AccessibilityMonitor {
                     if type == .keyDown {
                         print("[TypeFlow] Observer keyDown detected: keyCode=\(keyCode)")
                         
-                        // Pass event processing to the background immediately
+                        // Pass event processing to the background immediately.
+                        // The tap callback MUST return without blocking — copy the event
+                        // and hand it off to the dedicated serial tapQueue so the CGEvent
+                        // tap thread is never waiting on locks, AX IPC, or LLM state.
                         guard let asyncEvent = event.copy() else {
                             return Unmanaged.passUnretained(event)
                         }
                         
-                        DispatchQueue.global(qos: .userInitiated).async {
+                        obj.tapQueue.async {
                             // Spacebar / Return Fast-Path
                             if keyCode == 49 || keyCode == 36 {
                                 obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
@@ -637,8 +644,14 @@ class AccessibilityMonitor {
         // Delete / Backspace (51)
         if keyCode == 51 {
             if !isBackspacing {
-                let text = getTextBeforeCaret() ?? ""
-                lastDeletedWord = text.components(separatedBy: .whitespacesAndNewlines).last
+                // ── Non-Blocking Backspace: do NOT call getTextBeforeCaret() here. ──
+                // getTextBeforeCaret() is a synchronous AX IPC call. Calling it from
+                // inside the tapQueue (event processing path) blocks the event tap
+                // thread, causing macOS to drop subsequent key events (the 'R' key
+                // hijack bug). Instead, capture the last word directly from the
+                // keystroke buffer, which is always available with zero latency.
+                let bufferWords = keystrokeBuffer.components(separatedBy: .whitespacesAndNewlines)
+                lastDeletedWord = bufferWords.last
                 isBackspacing = true
             }
             if !keystrokeBuffer.isEmpty {

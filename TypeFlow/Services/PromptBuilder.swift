@@ -1,21 +1,35 @@
 import Foundation
 import Cocoa
 
+/// Renders prompts for TypeFlow's llama.cpp inference pipeline.
+///
+/// Prompt format: ChatML (Gemma 4 / OpenHermes / Qwen family).
+/// The model is wrapped in a strict instruct template so it acts as an
+/// autocompleter rather than a document continuer. This prevents the native
+/// echoing behaviour seen when feeding raw text to a base model.
+///
+/// Structure per request:
+///   <|im_start|>system
+///   [screen context lines + tone/spelling conditioning]
+///   <|im_end|>
+///   <|im_start|>user
+///   [textBeforeCaret — the live field text]
+///   <|im_end|>
+///   <|im_start|>assistant
+///   (model generates the inline continuation here)
+///
+/// The frozen-prefix cache covers the system turn, which is stable across
+/// keystrokes within the same context window. Only the user turn (typed text)
+/// changes per keystroke, keeping the llama KV-prefix reuse intact.
 class PromptBuilder {
     static let shared = PromptBuilder()
-    
-    // ── Frozen prefix cache ────────────────────────────────────────────────────
-    // The system prefix (everything up to and including <start_of_turn>model\n)
-    // MUST be byte-for-byte identical across every keystroke within the same
-    // sentence so the MLX KV cache achieves the maximum LCP match and avoids
-    // constant full-prefix re-evaluations.
-    //
-    // We freeze it after the first call and only invalidate when:
-    //   • the active application changes  (appTitle changes)
-    //   • the active line becomes empty   (new sentence started)
-    //   • tone / personalization settings change
+
+    // MARK: - Frozen prefix cache
+    // The static preface (screen context + conditioning lines) must be byte-for-byte identical
+    // across keystrokes to maximise llama KV-prefix reuse. We freeze it after the first build
+    // and invalidate only when the screen context, tone, or personalization settings change.
     private var frozenPrefix: String = ""
-    private var frozenPrefixKey: String = ""   // app|tone|personalization|british
+    private var frozenPrefixKey: String = ""
 
     private init() {
         let lexicon = UserDefaults.standard.stringArray(forKey: "UserCustomLexicon") ?? []
@@ -23,162 +37,155 @@ class PromptBuilder {
             NSSpellChecker.shared.learnWord(word)
         }
     }
-    
+
+    // MARK: - Public API
+
+    /// Builds the full prompt passed to the LLM for inline completion.
+    ///
+    /// Structure (Cotabby base-model pattern):
+    ///   [optional preface lines — tone, persona, screen context]
+    ///   [blank line]
+    ///   [caret prefix — trimmed to word boundary]
+    ///
+    /// The preface is character-budgeted so large screen captures never crowd out the live text.
     func buildPrompt(textBeforeCaret: String, liveBuffer: String, systemInstructions: String) -> String {
-        let prefix = buildPromptPrefix(systemInstructions: systemInstructions)
-        let suffixResult = buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer)
-        return prefix + suffixResult.text
+        let systemTurn = buildPromptPrefix(systemInstructions: systemInstructions)
+        let userText   = buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer).text
+        // Assemble the full ChatML prompt.
+        // The assistant turn is left open (no <|im_end|>) so the model generates
+        // the inline continuation directly without any wrapper token overhead.
+        return systemTurn + "<|im_start|>user\n" + userText + "<|im_end|>\n<|im_start|>assistant\n"
     }
-    
-    /// Builds the static portion of the prompt that does NOT change with the current text.
-    /// This is what we prefill into the KV cache — it only changes when tone or
-    /// personalization settings change, not when the user types a new sentence.
+
+    /// Returns the frozen ChatML system turn for prewarm prefill.
     func buildStaticPrefix(systemInstructions: String) -> String {
         return buildPromptPrefix(systemInstructions: systemInstructions)
     }
-    
-    /// Call this whenever the active app changes or the buffer is cleared so the
-    /// frozen prefix will be regenerated on the next keystroke.
+
+    /// Call this when the active app or screen context changes so the frozen prefix
+    /// is regenerated on the next keystroke.
     func invalidateFrozenPrefix() {
         frozenPrefix = ""
         frozenPrefixKey = ""
         print("[TypeFlow-Debug] PromptBuilder: Frozen prefix invalidated.")
     }
-    
-    func buildPromptPrefix(systemInstructions: String) -> String {
-        let context = UniversalContextManager.shared.latestContext
-        let personalizationActive = SettingsManager.shared.personalizationEnabled
-        let british = SettingsManager.shared.useBritishEnglish
 
-        // Stable key: only changes when settings/app/screen change, NOT when the user types
+    // MARK: - Prefix builder — ChatML system turn (static, cacheable)
+    //
+    // Returns the full <|im_start|>system ... <|im_end|>\n block.
+    // This is byte-for-byte stable across keystrokes within the same context
+    // window, enabling llama KV-prefix reuse for all but the typed suffix.
+
+    func buildPromptPrefix(systemInstructions: String) -> String {
+        let british = SettingsManager.shared.useBritishEnglish
+        let currentScreen = ScreenContextManager.shared.latestScreenText
+        let context = UniversalContextManager.shared.latestContext
+
+        // Stable cache key — invalidate when screen context, tone, spelling, or app changes.
         var historyHash = ""
         for snap in UniversalContextManager.shared.contextHistory {
             historyHash += "\(snap.appTitle)|\(snap.windowTitle ?? "nil")|\(snap.screenText.hashValue)|"
         }
-        let currentScreen = ScreenContextManager.shared.latestScreenText
-        let stableKey = "\(historyHash)\(context.appTitle)|\(systemInstructions.hashValue)|\(personalizationActive)|\(british)|\(currentScreen.hashValue)"
+        let stableKey = "\(historyHash)\(currentScreen.hashValue)|\(systemInstructions.hashValue)|\(british)|\(context.appBundleId)"
 
         if frozenPrefixKey == stableKey && !frozenPrefix.isEmpty {
-            // Return the frozen copy — guaranteed byte-for-byte identical
             return frozenPrefix
         }
 
-        // ── Build fresh prefix ─────────────────────────────────────────────────
-        var prompt = "<start_of_turn>user\n"
-        prompt += "You are an inline autocomplete engine. Output ONLY the immediate trailing characters to complete the user's final word or line. Do not output chat markers, 'User:', or markdown formatting.\n\n"
-        
+        // ── System turn content ───────────────────────────────────────────────
+        // Build the lines that go inside the system role. We keep them short
+        // and factual — the model treats these as privileged instructions that
+        // shape its output without being echoed back.
+        var systemLines: [String] = []
+
+        // Core autocomplete directive — always present.
+        systemLines.append("You are a real-time inline ghost-text autocompleter. Output ONLY the immediate inline continuation of the user's text. Never repeat or echo any part of the text provided by the user. Do not include markdown formatting, explanations, or any preamble.")
+
+        // Tone / style line
+        let isCode = isCodeEditor(bundleId: context.appBundleId, title: context.appTitle)
+        if let style = makeStyleLine(systemInstructions: systemInstructions, british: british, isCode: isCode) {
+            systemLines.append(style)
+        }
+
+        // Previous window screen context (dual-window: rolling history snapshot)
         let history = UniversalContextManager.shared.contextHistory
-        
-        // Print exactly one previous history block to avoid duplication
-        if let snap = history.last {
-            prompt += "=== Previous Screen Context ===\n"
-            prompt += "[Application: \(snap.appTitle)"
-            if let window = snap.windowTitle {
-                prompt += " | Window: \(window)"
-            }
-            prompt += "]\n"
-            
+        if let snap = history.last, !snap.screenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             var text = snap.screenText
-            if text.count > 3500 {
-                text = String(text.prefix(3500)) + "...\n[Context Truncated]"
-            }
-            
-            prompt += "\(text)\n======================\n\n"
-        }
-        
-        let isBrowser = ["zen", "safari", "chrome", "brave", "edge", "arc"].contains { context.appTitle.lowercased().contains($0) || context.appBundleId.lowercased().contains($0) }
-        
-        prompt += "=== Active Screen Context ===\n"
-        prompt += "[Application: \(context.appTitle)"
-        if isBrowser, let windowTitle = context.windowTitle {
-            prompt += " | Window: \(windowTitle)"
-        }
-        prompt += "]\n"
-        prompt += "\(currentScreen)\n======================\n\n"
-        
-
-        
-        var finalInstructions = systemInstructions
-        finalInstructions += "\nCRITICAL INSTRUCTIONS:\n1. Output the text to continue the user's active line naturally. You may adapt or slightly paraphrase the surrounding context to ensure grammatical continuity with the user's specific prefix, but prioritize using exact vocabulary from the context where possible.\n2. If the active line refers to or asks for a magic constant, hex value, variable, or key, immediately output the literal constant or identifier from the context.\n3. When completing code statements or loops, always reference collections/variables by name using their exact property (such as '.count' without parentheses, e.g. 'user_elements.count', NOT 'user_elements.count()') instead of evaluating their literal values or sizes.\n4. When completing C-style for-loops, use post-increment 'i++' instead of pre-increment '++i', e.g. 'i++' (NOT '++i').\n5. If the context contains file paths, line numbers, hex constants, variable names, or specific identifiers, reproduce them character-for-character exactly as they appear in the context."
-        if british {
-            finalInstructions += " Use British English spelling."
+            if text.count > 800 { text = String(text.prefix(800)) }
+            systemLines.append("Nearby on screen: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
 
-        prompt += "Instructions: \(finalInstructions)\n\n"
-        
-        prompt += "[Text to Complete]\n"
-        
-        let appName = context.appTitle.lowercased()
-        let bundleId = context.appBundleId.lowercased()
-        let codeEditors = ["xcode", "code", "cursor", "intellij", "android studio", "sublime text", "nova", "zed", "pycharm", "webstorm"]
-        let isCodeEditor = codeEditors.contains { appName.contains($0) || bundleId.contains($0) }
-        
-        if isCodeEditor {
-            prompt += "```python\n"
-        } else {
-            // Prose mode: emit NO backticks to prevent standard sentence structure from being misparsed
+        // Current window screen context (live OCR snapshot)
+        let trimmedScreen = currentScreen.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedScreen.isEmpty {
+            var screen = trimmedScreen
+            if screen.count > 800 { screen = String(screen.prefix(800)) }
+            systemLines.append("Nearby on screen: \(screen)")
         }
 
-        // Freeze and return
-        frozenPrefix = prompt
+        // Clipboard context
+        let recentClip = ClipboardMonitor.shared.recentItems.last ?? ""
+        let trimmedClip = recentClip.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedClip.isEmpty {
+            let clipped = trimmedClip.count > 300 ? String(trimmedClip.prefix(300)) : trimmedClip
+            systemLines.append("On the clipboard: \(clipped)")
+        }
+
+        // Assemble: wrap in ChatML system turn.
+        let systemContent = systemLines.joined(separator: "\n")
+        let systemTurn = "<|im_start|>system\n" + systemContent + "<|im_end|>\n"
+
+        frozenPrefix = systemTurn
         frozenPrefixKey = stableKey
-        print("[TypeFlow-Debug] PromptBuilder: Prefix frozen (\(prompt.count) chars, key=\(stableKey.prefix(40))).")
-        return prompt
+        print("[TypeFlow-Debug] PromptBuilder: System turn frozen (\(systemTurn.count) chars).")
+        return systemTurn
     }
-    
-    func hasClipboardTrigger(textBeforeCaret: String) -> Bool {
-        let clipboardTriggers = AdaptivePatternLearner.shared.behaviors.clipboardTriggers
-        let lowercasedText = textBeforeCaret.lowercased()
-        return clipboardTriggers.contains { lowercasedText.hasSuffix($0) }
-    }
+
+    // MARK: - Suffix builder — user turn content (live text, per-keystroke)
+    //
+    // Returns only the raw text that goes inside <|im_start|>user … <|im_end|>.
+    // buildPrompt() wraps this in the correct ChatML user+assistant tokens.
 
     func buildPromptSuffix(textBeforeCaret: String, liveBuffer: String) -> (text: String, requiresHealing: Bool) {
         let lines = textBeforeCaret.components(separatedBy: .newlines)
+        // Include up to 4 preceding lines for paragraph-level context
         let previousLines = lines.dropLast().suffix(4).joined(separator: "\n")
         let activeLine = lines.last ?? ""
-        
+
         var suffix = ""
         if !previousLines.isEmpty {
             suffix += previousLines + "\n"
         }
-        
+
+        // Inline clipboard injection on trigger keyword
         if hasClipboardTrigger(textBeforeCaret: textBeforeCaret) {
             let recentClipboard = Array(ClipboardMonitor.shared.recentItems.suffix(3))
             if !recentClipboard.isEmpty {
-                let formattedClipboard = recentClipboard.enumerated()
-                    .map { "\($0.offset + 1). \($0.element)" }
-                    .joined(separator: "\n")
-                suffix += "\nPaste the single most relevant clipboard item or the formatted list exactly as-is:\n" + formattedClipboard + "\n"
+                suffix += "\n" + recentClipboard.joined(separator: "\n") + "\n"
             }
         }
-        
-        // Close the user's turn and start the model's turn
-        suffix += "<end_of_turn>\n<start_of_turn>model\n"
-        
+
         var finalActiveLine = activeLine
         if !liveBuffer.isEmpty && finalActiveLine.hasSuffix(liveBuffer) {
             finalActiveLine = String(finalActiveLine.dropLast(liveBuffer.count))
         }
         finalActiveLine += liveBuffer
-        
-        // Strip trailing whitespace so the model's generation stream begins at the exact
-        // last non-space character, preventing premature <end_of_turn> closure.
-        // We MUST preserve leading whitespace so the model maintains indentation context!
+
+        // Trim trailing whitespace so generation begins at a clean word boundary.
         while finalActiveLine.hasSuffix(" ") || finalActiveLine.hasSuffix("\t") {
             finalActiveLine.removeLast()
         }
-        
+
         // ── Token Healing ──────────────────────────────────────────────────────
-        // If the line ends in a dangling partial word (no trailing word-boundary
-        // character after the last boundary), inject a [PARTIAL:] hint so the
-        // model knows it MUST continue from that exact character sequence and
-        // cannot skip ahead or re-emit the leading letters as a new token.
-        let wordBoundaryChars: Set<Character> = [" ", "\t", ".", "_", "(", ")", ":", "/", ",", ";", "{", "}", "=", "+", "-", "*", "&", "|", "!", "?", "\"", "'", "[", "]", "<", ">"]
+        let wordBoundaryChars: Set<Character> = [
+            " ", "\t", ".", "_", "(", ")", ":", "/", ",", ";",
+            "{", "}", "=", "+", "-", "*", "&", "|", "!", "?",
+            "\"", "'", "[", "]", "<", ">"
+        ]
         let hasTrailingBoundary = finalActiveLine.last.map { wordBoundaryChars.contains($0) } ?? true
-        
+
         var requiresHealing = false
         if !hasTrailingBoundary && !finalActiveLine.isEmpty {
-            // Find the dangling partial: everything after the last word-boundary char
             var partialStart = finalActiveLine.endIndex
             var idx = finalActiveLine.index(before: finalActiveLine.endIndex)
             while idx >= finalActiveLine.startIndex {
@@ -195,26 +202,84 @@ class PromptBuilder {
             let partialWord = String(finalActiveLine[partialStart...])
             if !partialWord.isEmpty {
                 requiresHealing = true
-                print("[TypeFlow-Debug] PromptBuilder: Token healing — partial word '\(partialWord)' detected at end of active line.")
+                print("[TypeFlow-Debug] PromptBuilder: Token healing — partial word '\(partialWord)' at end of active line.")
             }
         }
-        
+
         suffix += finalActiveLine
-        
         return (text: suffix, requiresHealing: requiresHealing)
     }
-    
+
+    // MARK: - Rewrite prompt (instruction-following not needed for base models, but kept for future)
+
     func buildRewritePrompt(selectedText: String, systemInstructions: String, toneName: String) -> String {
-        var prompt = ""
-        prompt += "You are a writing assistant. Rewrite the following text to improve clarity, flow, and vocabulary while matching a \(toneName) tone.\n"
-        var finalInstructions = systemInstructions
-        if SettingsManager.shared.useBritishEnglish {
-            finalInstructions += " Always use British English spelling (e.g., colour, prioritise)."
+        let british = SettingsManager.shared.useBritishEnglish
+        var styleRules: [String] = []
+        if !toneName.isEmpty && toneName.lowercased() != "neutral" {
+            styleRules.append("Rewrite in a \(toneName) tone.")
         }
-        prompt += "Instructions: \(finalInstructions)\n"
-        prompt += "Do not write any intro, notes, explanations, or quotes. Output ONLY the rewritten text.\n\n"
-        prompt += "[Text to Rewrite]:\n\(selectedText)\n\n"
-        prompt += "<completion>"
-        return prompt
+        if british {
+            styleRules.append("Use British English spelling.")
+        }
+        let styleNote = styleRules.isEmpty ? "" : (styleRules.joined(separator: " ") + "\n")
+        // Rewrite uses a minimal ChatML instruct format
+        return "<|im_start|>system\n" +
+               "You are a text rewriting assistant. " + styleNote +
+               "Output ONLY the rewritten text. No explanations, no preamble.\n" +
+               "<|im_end|>\n" +
+               "<|im_start|>user\n" +
+               selectedText + "\n" +
+               "<|im_end|>\n" +
+               "<|im_start|>assistant\n"
+    }
+
+    // MARK: - Private helpers
+
+    /// Distills the ToneProfile's systemInstructions into a short style note
+    /// suitable for inclusion inside the ChatML system turn.
+    /// For code editors the style is prefixed with `//` so it reads as a comment
+    /// inside any code block the model might complete.
+    private func makeStyleLine(systemInstructions: String, british: Bool, isCode: Bool = false) -> String? {
+        var rules: [String] = []
+
+        let trimmed = systemInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let stripped = trimmed
+                .replacingOccurrences(of: "Complete the text", with: "", options: .caseInsensitive)
+                .replacingOccurrences(of: "Output only the next few words.", with: "", options: .caseInsensitive)
+                .replacingOccurrences(of: "No explanation.", with: "", options: .caseInsensitive)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "^[iI]n a\\s+", with: "", options: .regularExpression)
+                .replacingOccurrences(of: "^[iI]n an?\\s+", with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !stripped.isEmpty { rules.append(stripped) }
+        }
+
+        if british { rules.append("Use British English spelling.") }
+
+        guard !rules.isEmpty else { return nil }
+        let line = "Writing style: \(rules.joined(separator: " "))"
+        return isCode ? "// \(line)" : line
+    }
+
+    // MARK: - Clipboard trigger helper (shared between prefix and suffix)
+
+    func hasClipboardTrigger(textBeforeCaret: String) -> Bool {
+        let clipboardTriggers = AdaptivePatternLearner.shared.behaviors.clipboardTriggers
+        return clipboardTriggers.contains { textBeforeCaret.lowercased().hasSuffix($0) }
+    }
+
+    // MARK: - Code editor detection
+
+    private func isCodeEditor(bundleId: String, title: String) -> Bool {
+        let lowerTitle  = title.lowercased()
+        let lowerBundle = bundleId.lowercased()
+        let codeEditors = ["xcode", "vscode", "visual studio", "cursor", "intellij",
+                           "pycharm", "webstorm", "android studio", "sublime",
+                           "textmate", "nova", "bbedit", "zed", "iterm", "terminal",
+                           "ghostty", "warp"]
+        return codeEditors.contains {
+            lowerTitle.contains($0) || lowerBundle.contains($0.replacingOccurrences(of: " ", with: ""))
+        }
     }
 }
