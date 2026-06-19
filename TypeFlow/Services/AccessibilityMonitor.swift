@@ -450,13 +450,21 @@ class AccessibilityMonitor {
                     }
                     
                     if type == .keyDown {
-                        if isAbbreviationTrigger {
+                        // Abbreviation trigger: only swallow the actual delimiter keyCodes
+                        // (Space=49, Tab=48, Comma=43, Period=47). Any other keyCode means
+                        // the flag was set erroneously — clear it and let the event through.
+                        let isDelimiterKey = keyCode == 49 || keyCode == 48 || keyCode == 43 || keyCode == 47
+                        if isAbbreviationTrigger && isDelimiterKey {
                             obj.consumedKeyCodes.insert(keyCode)
                             return nil
+                        } else if isAbbreviationTrigger {
+                            // Stale flag from a race — clear it and fall through
+                            obj.isExpandingAbbreviation = false
                         }
                         
                         if keyCode == 53 { // Escape
                             if isRewriteActive || isSmartReplyActive {
+                                obj.consumedKeyCodes.removeAll() // clear any stale consumed keyCodes
                                 DispatchQueue.main.async { CompletionManager.shared.clearCompletion() }
                                 return nil
                             }
@@ -486,7 +494,11 @@ class AccessibilityMonitor {
                             return nil
                         }
                         
-                        if isRewriteActive || isSmartReplyActive {
+                        // During rewrite/smart-reply ONLY swallow the specific acceptance/
+                        // shortcut keys (Tab=48, Right Arrow=124, Escape=53) — NOT normal
+                        // alphanumeric typing, which must reach the host application.
+                        let isAcceptanceKey = keyCode == 48 || keyCode == 124 || keyCode == 53
+                        if (isRewriteActive || isSmartReplyActive) && isAcceptanceKey {
                             obj.consumedKeyCodes.insert(keyCode)
                             return nil
                         }
