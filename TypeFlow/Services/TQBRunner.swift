@@ -75,8 +75,7 @@ class TQBRunner {
     private func generateAndWait(prompt: String, maxTokens: Int = 20) async throws -> String {
         return await LLMEngine.shared.generateCompletion(
             textBeforeCaret: prompt,
-            liveBuffer: "",
-            toneProfile: SettingsManager.shared.getToneProfile(by: "Neutral") ?? ToneProfile(id: "", name: "", systemInstructions: "", temperature: 0.1, maxTokens: maxTokens, isBuiltIn: true)
+            liveBuffer: ""
         )
     }
     

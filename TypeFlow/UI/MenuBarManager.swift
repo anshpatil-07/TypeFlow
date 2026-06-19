@@ -2,15 +2,17 @@ import Cocoa
 import SwiftUI
 import ServiceManagement
 
-class MenuBarManager {
+class MenuBarManager: NSObject, NSMenuDelegate {
     var statusItem: NSStatusItem!
     
-    init() {
+    override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "text.bubble.fill", accessibilityDescription: "TypeFlow")
         }
+        
+        super.init()
         
         setupMenu()
         
@@ -27,12 +29,44 @@ class MenuBarManager {
     
     func setupMenu() {
         let menu = NSMenu()
+        menu.delegate = self
         
         let statusItem = NSMenuItem(title: "TypeFlow is active", action: nil, keyEquivalent: "")
         statusItem.isEnabled = false
         menu.addItem(statusItem)
         
         menu.addItem(NSMenuItem.separator())
+        
+        // ── Feature toggles ──────────────────────────────────────────────────
+        let autocompleteItem = NSMenuItem(
+            title: "Enable Autocomplete",
+            action: #selector(toggleAutocomplete),
+            keyEquivalent: ""
+        )
+        autocompleteItem.tag = 101
+        autocompleteItem.state = UserDefaults.standard.bool(forKey: "enableAutocomplete") ? .on : .off
+        menu.addItem(autocompleteItem)
+        
+        let autoCorrectItem = NSMenuItem(
+            title: "Enable Auto-Correct",
+            action: #selector(toggleAutoCorrect),
+            keyEquivalent: ""
+        )
+        autoCorrectItem.tag = 102
+        autoCorrectItem.state = UserDefaults.standard.bool(forKey: "autoCorrectEnabled") ? .on : .off
+        menu.addItem(autoCorrectItem)
+        
+        let learningItem = NSMenuItem(
+            title: "Enable Adaptive Learning",
+            action: #selector(toggleAdaptiveLearning),
+            keyEquivalent: ""
+        )
+        learningItem.tag = 103
+        learningItem.state = UserDefaults.standard.bool(forKey: "personalizationEnabled") ? .on : .off
+        menu.addItem(learningItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        // ────────────────────────────────────────────────────────────────────
         
         menu.addItem(NSMenuItem(title: "Dashboard...", action: #selector(openDashboard), keyEquivalent: "d"))
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
@@ -45,9 +79,37 @@ class MenuBarManager {
         menu.items.forEach { $0.target = self }
         
         self.statusItem.menu = menu
-        
-        // Handle launch at login registration
-        // try? SMAppService.mainApp.register()
+    }
+    
+    // Refresh checkmarks each time the menu opens so they reflect live state.
+    func menuWillOpen(_ menu: NSMenu) {
+        if let item = menu.item(withTag: 101) {
+            item.state = UserDefaults.standard.bool(forKey: "enableAutocomplete") ? .on : .off
+        }
+        if let item = menu.item(withTag: 102) {
+            item.state = UserDefaults.standard.bool(forKey: "autoCorrectEnabled") ? .on : .off
+        }
+        if let item = menu.item(withTag: 103) {
+            item.state = UserDefaults.standard.bool(forKey: "personalizationEnabled") ? .on : .off
+        }
+    }
+    
+    @objc func toggleAutocomplete(_ sender: NSMenuItem) {
+        let current = UserDefaults.standard.bool(forKey: "enableAutocomplete")
+        UserDefaults.standard.set(!current, forKey: "enableAutocomplete")
+        sender.state = !current ? .on : .off
+    }
+    
+    @objc func toggleAutoCorrect(_ sender: NSMenuItem) {
+        let current = UserDefaults.standard.bool(forKey: "autoCorrectEnabled")
+        UserDefaults.standard.set(!current, forKey: "autoCorrectEnabled")
+        sender.state = !current ? .on : .off
+    }
+    
+    @objc func toggleAdaptiveLearning(_ sender: NSMenuItem) {
+        let current = UserDefaults.standard.bool(forKey: "personalizationEnabled")
+        UserDefaults.standard.set(!current, forKey: "personalizationEnabled")
+        sender.state = !current ? .on : .off
     }
     
     var settingsWindow: NSWindow?
@@ -92,7 +154,7 @@ class SettingsTabViewController: NSTabViewController {
         addTab(title: "General", icon: "gear", view: GeneralSettingsView())
         addTab(title: "Shortcuts", icon: "keyboard", view: ShortcutsSettingsView())
         // addTab(title: "Models", icon: "cpu", view: ModelsSettingsView())
-        addTab(title: "Tones", icon: "person.text.rectangle", view: TonesSettingsView())
+        addTab(title: "Generation", icon: "person.text.rectangle", view: GenerationSettingsView())
         addTab(title: "Snippets", icon: "text.badge.plus", view: SnippetsSettingsView())
         addTab(title: "Apps", icon: "app.badge", view: AppOverridesSettingsView())
         addTab(title: "Behaviors", icon: "brain.head.profile", view: LearnedBehaviorsView())

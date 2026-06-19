@@ -26,13 +26,22 @@ class AppMonitor {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
               let bundleId = app.bundleIdentifier else { return }
         
+        if bundleId == Bundle.main.bundleIdentifier {
+            print("[TypeFlow-Debug] AppMonitor: Ignoring activation of TypeFlow itself.")
+            return
+        }
+        
         print("[TypeFlow-Debug] AppMonitor: Activated app '\(bundleId)'")
         
         DispatchQueue.main.async {
-            CompletionManager.shared.cancelInflightTasks()
-            CompletionManager.shared.hideOverlay()
-            CompletionManager.shared.clearCompletion()
-            CompletionManager.shared.accessibilityMonitor?.clearKeystrokeBuffer()
+            if !CompletionManager.shared.isRewrite && !CompletionManager.shared.isSmartReply {
+                CompletionManager.shared.cancelInflightTasks()
+                CompletionManager.shared.hideOverlay()
+                CompletionManager.shared.clearCompletion()
+                CompletionManager.shared.accessibilityMonitor?.clearKeystrokeBuffer()
+            } else {
+                print("[TypeFlow-Debug] AppMonitor: Ignoring context shift cancellation because Rewrite/SmartReply is active.")
+            }
         }
         
         UniversalContextManager.shared.refreshContext()
@@ -40,7 +49,7 @@ class AppMonitor {
         if config.isEnabled {
             Task {
                 await ScreenContextManager.shared.performOCROnDemand()
-                await LLMEngine.shared.prewarmCache(toneProfile: config.toneProfile)
+                await LLMEngine.shared.prewarmCache()
             }
         }
         

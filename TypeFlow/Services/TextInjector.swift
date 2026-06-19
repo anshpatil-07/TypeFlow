@@ -19,7 +19,6 @@ class TextInjector {
     // activation is unnecessary and only creates race conditions.
     func inject(text: String, targetApp: NSRunningApplication? = nil) {
         isInjecting = true
-        defer { isInjecting = false }
         
         let pasteboard = NSPasteboard.general
         
@@ -38,27 +37,27 @@ class TextInjector {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         
-        // 3. Wait for TypeFlow UI to fully disappear and host window to settle
-        Thread.sleep(forTimeInterval: 0.15)
-        
-        // 4. Post Cmd+V — use nil source so macOS assigns the current session state
-        let vKeyCode: CGKeyCode = 9  // V key
-        guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: vKeyCode, keyDown: true),
-              let keyUp   = CGEvent(keyboardEventSource: nil, virtualKey: vKeyCode, keyDown: false) else {
-            restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
-            return
+        // 3. Wrap the Cmd+V CGEvent simulation in a DispatchQueue.main.asyncAfter block
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            let vKeyCode: CGKeyCode = 9  // V key
+            guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: vKeyCode, keyDown: true),
+                  let keyUp   = CGEvent(keyboardEventSource: nil, virtualKey: vKeyCode, keyDown: false) else {
+                self.restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
+                self.isInjecting = false
+                return
+            }
+            
+            keyDown.flags = .maskCommand
+            keyUp.flags   = .maskCommand
+            keyDown.post(tap: .cgSessionEventTap)
+            keyUp.post(tap: .cgSessionEventTap)
+            
+            // 4. Inside that delayed block, add another asyncAfter before restoring
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                self.restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
+                self.isInjecting = false
+            }
         }
-        keyDown.flags = .maskCommand
-        keyUp.flags   = .maskCommand
-        keyDown.post(tap: .cgSessionEventTap)
-        keyUp.post(tap: .cgSessionEventTap)
-        
-        // 5. Wait for the host to finish servicing Cmd+V, then restore original clipboard.
-        // 50ms was too short — Chromium and other apps service paste asynchronously and can
-        // take 100–200ms. Restoring before they service it causes them to paste the OLD clipboard
-        // contents instead of our completion. 300ms matches Cotabby's pasteboardRestoreDelay.
-        Thread.sleep(forTimeInterval: 0.3)
-        restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
     }
     
     private func restoreClipboard(pasteboard: NSPasteboard, savedItems: [NSPasteboardItem]?) {
