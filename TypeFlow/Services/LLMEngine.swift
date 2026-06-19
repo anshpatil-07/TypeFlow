@@ -86,24 +86,6 @@ actor LLMEngine {
             
             var trimmedResult = output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             
-
-            
-            // Clean echo: strip any prefix of the output that overlaps with the tail
-            // of the input text (handles the rare case where the model still repeats
-            // a word boundary despite the ChatML instruct wrapper).
-            let echoedContext = String(textBeforeCaret.suffix(120)).trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            if !echoedContext.isEmpty {
-                let maxOv = min(echoedContext.count, trimmedResult.count)
-                for i in stride(from: maxOv, through: 1, by: -1) {
-                    let suffix = String(echoedContext.suffix(i))
-                    let prefix = String(trimmedResult.prefix(i))
-                    if suffix == prefix {
-                        trimmedResult = String(trimmedResult.dropFirst(i))
-                        break
-                    }
-                }
-            }
-            
             if !trimmedResult.isEmpty && textBeforeCaret.hasSuffix(" ") && !trimmedResult.hasPrefix(" ") {
                 trimmedResult = " " + trimmedResult
             }
@@ -153,15 +135,16 @@ actor LLMEngine {
         guard await runtime.isModelReady else { return [] }
         if Task.isCancelled { return [] }
         
+        // Smart reply uses a base model conditioning format.
+        // The model continues from the "Reply options:" label naturally.
         let prompt = """
-        <start_of_turn>user
-        You are a context-aware smart reply assistant. Based on the conversation context provided below, generate exactly 3 short, distinct reply options (e.g. Professional, Casual, Concise) that the user could send in response.
-        Output the 3 options separated EXACTLY by the delimiter '|||' and nothing else. No formatting, no prefixes.
-        
-        Context:
+        Context of the conversation:
         \(contextText)
-        <end_of_turn>
-        <start_of_turn>model
+
+        Generate exactly 3 short reply options (Professional, Casual, Concise).
+        Output the 3 options separated EXACTLY by the delimiter '|||' and nothing else.
+
+        Reply options: 
         """
         
         do {

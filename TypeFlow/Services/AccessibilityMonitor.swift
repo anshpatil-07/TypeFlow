@@ -227,8 +227,13 @@ class AccessibilityMonitor {
         let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.rightMouseDown.rawValue)
         
         // 1. OBSERVER TAP (listenOnly): Tracks all keys asynchronously without blocking the system.
+        // Uses .cgSessionEventTap (not .cghidEventTap) to stay within the session-level event chain.
+        // A .cghidEventTap at .headInsertEventTap runs before macOS's long-press detector, so even
+        // a listenOnly tap there creates enough timing jitter to trigger the accent menu on 'R'.
+        // .cgSessionEventTap runs AFTER the HID server has already committed the long-press timeout,
+        // so listenOnly-at-session-head is safe for the keyboard at any typing speed.
         observerTap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
+            tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .listenOnly,
             eventsOfInterest: CGEventMask(eventMask),
@@ -242,6 +247,10 @@ class AccessibilityMonitor {
                 if let monitor = refcon {
                     let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
                     let obj = unmanaged.takeUnretainedValue()
+                    
+                    if type == .keyDown && keyCode == 48 && CompletionManager.shared.isOverlayVisible {
+                        return Unmanaged.passUnretained(event)
+                    }
                     
                     // Mouse clicks reset state
                     if type == .leftMouseDown || type == .rightMouseDown {
@@ -310,10 +319,14 @@ class AccessibilityMonitor {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         )
         
-        // 2. ACCEPT TAP (defaultTap): Tightly scoped tap to consume specific acceptance or trigger shortcuts.
+        // 2. ACCEPT TAP (defaultTap): Tightly scoped tap to consume acceptance keys and shortcuts.
+        // Tail-appended so it runs AFTER the listenOnly observer has already classified the event.
+        // Using .tailAppendEventTap means all other apps see the event first; we only intervene
+        // when CompletionManager has a visible completion or a rewrite/smart-reply is active.
+        // This is identical to Cotabby's InputMonitor two-tap architecture (PR #328 invariant).
         acceptTap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
-            place: .headInsertEventTap,
+            tap: .cgSessionEventTap,
+            place: .tailAppendEventTap,
             options: .defaultTap,
             eventsOfInterest: CGEventMask(eventMask),
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
@@ -368,18 +381,25 @@ class AccessibilityMonitor {
                             }
                         }
                         
-                        var tabConsumed = false
+                        if keyCode == 48 && CompletionManager.shared.isOverlayVisible {
+                            _ = CompletionManager.shared.handleTabPressed()
+                            obj.clearKeystrokeBuffer()
+                            obj.consumedKeyCodes.insert(keyCode)
+                            return nil
+                        }
+                        
+                        var shortcutConsumed = false
                         if (keyCode == 48 && (SettingsManager.shared.acceptShortcut == "Tab" || isRewriteActive)) ||
                            (keyCode == 124 && SettingsManager.shared.acceptShortcut == "Right Arrow") {
                             // Only intercept if there is a real completion visible
                             if hasCompletion || isRewriteActive {
                                 if CompletionManager.shared.handleTabPressed() {
-                                    tabConsumed = true
+                                    shortcutConsumed = true
                                 }
                             }
                         }
                         
-                        if tabConsumed {
+                        if shortcutConsumed {
                             obj.clearKeystrokeBuffer()
                             obj.consumedKeyCodes.insert(keyCode)
                             return nil

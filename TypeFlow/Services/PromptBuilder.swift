@@ -3,28 +3,26 @@ import Cocoa
 
 /// Renders prompts for TypeFlow's llama.cpp inference pipeline.
 ///
-/// Prompt format: Gemma Instruct
-/// The model is wrapped in a strict instruct template so it acts as an
-/// autocompleter rather than a document continuer.
+/// Prompt format: Base Model (Cotabby BaseCompletionPromptRenderer architecture)
+/// Base models have no instruction-following channel and will echo "Task:" scaffolding
+/// verbatim into ghost text. This renderer treats the model as a pure text continuer.
 ///
-/// Structure per request (Assistant Prefill Trick):
-///   <start_of_turn>user
-///   [screen context lines + tone/spelling conditioning]
-///   <end_of_turn>
-///   <start_of_turn>model
-///   [textBeforeCaret — the live field text]
-///   (model natively generates the inline continuation here)
+/// Structure per request (5-block layout):
+///   [1] Writing style / tone conditioning   ← stable, cached, KV-reused
+///   [2] Dual-window rolling history ("Nearby on screen: …")
+///   [3] Live OCR & clipboard context
+///   \n\n                                    ← blank-line separator (no label the model can copy)
+///   [4] Trimmed typing prefix              ← per-keystroke suffix (only this changes the KV state)
 ///
-/// The frozen-prefix cache covers the user turn and the start of the model
-/// turn, which is stable across keystrokes. Only the dynamic user typing
-/// is evaluated per keystroke, maximizing KV-prefix reuse.
+/// The preface (blocks 1–3) is frozen per context window via `frozenPrefix`; only block 4
+/// changes on each keystroke, giving the LLM maximum KV prefix reuse.
 class PromptBuilder {
     static let shared = PromptBuilder()
 
     // MARK: - Frozen prefix cache
-    // The static preface (screen context + conditioning lines) must be byte-for-byte identical
-    // across keystrokes to maximise llama KV-prefix reuse. We freeze it after the first build
-    // and invalidate only when the screen context, tone, or personalization settings change.
+    // The static preface must be byte-for-byte identical across keystrokes to maximise
+    // llama KV-prefix reuse. We freeze it after the first build and invalidate only when
+    // the screen context, tone, clipboard, or personalisation settings change.
     private var frozenPrefix: String = ""
     private var frozenPrefixKey: String = ""
 
@@ -44,7 +42,7 @@ class PromptBuilder {
         return prefix + suffix
     }
 
-    /// Returns the frozen system turn for prewarm prefill.
+    /// Returns the frozen conditioning preface for prewarm prefill.
     func buildStaticPrefix(systemInstructions: String) -> String {
         return buildPromptPrefix(systemInstructions: systemInstructions)
     }
@@ -57,59 +55,90 @@ class PromptBuilder {
         print("[TypeFlow-Debug] PromptBuilder: Frozen prefix invalidated.")
     }
 
-    // MARK: - Prefix builder — Gemma user turn (static, cacheable)
+    // MARK: - Prefix builder — base model conditioning preface (static, cacheable)
     //
-    // Returns the full <start_of_turn>user ... <end_of_turn>\n<start_of_turn>model\n block.
-    // This is byte-for-byte stable across keystrokes within the same context
-    // window, enabling llama KV-prefix reuse for all but the dynamic typed suffix.
+    // Returns the conditioning block: style lines + dual-window screen context + clipboard,
+    // followed by \n\n. This entire block is stable across keystrokes within the same
+    // context window, enabling llama KV-prefix reuse for all but the typed suffix.
+    //
+    // There are NO <start_of_turn> / <end_of_turn> / instruct wrappers here. Base models
+    // treat those as literal document text and will echo them, causing hallucination.
 
     func buildPromptPrefix(systemInstructions: String) -> String {
         let british = SettingsManager.shared.useBritishEnglish
-        let currentScreen = ScreenContextManager.shared.latestScreenText
         let context = UniversalContextManager.shared.latestContext
+        let currentScreen = ScreenContextManager.shared.latestScreenText
+        let recentClip = ClipboardMonitor.shared.recentItems.last ?? ""
 
-        // Stable cache key — invalidate when tone, spelling, or app changes.
+        // Stable cache key — invalidate when tone, spelling, app, screen text, or clipboard changes.
         var historyHash = ""
         for snap in UniversalContextManager.shared.contextHistory {
             historyHash += "\(snap.appTitle)|\(snap.windowTitle ?? "nil")|"
         }
-        let stableKey = "\(historyHash)\(systemInstructions.hashValue)|\(british)|\(context.appBundleId)"
+        let screenHash = String(currentScreen.prefix(200))
+        let clipHash   = String(recentClip.prefix(100))
+        let stableKey  = "\(historyHash)\(systemInstructions.hashValue)|\(british)|\(context.appBundleId)|\(screenHash)|\(clipHash)"
 
         if frozenPrefixKey == stableKey && !frozenPrefix.isEmpty {
             return frozenPrefix
         }
 
-        // ── System turn content ───────────────────────────────────────────────
-        // Build the lines that go inside the user role. We keep them short
-        // and factual — the model treats these as privileged instructions that
-        // shape its output without being echoed back.
-        var systemLines: [String] = []
+        // ── Block 1: Style / persona conditioning ─────────────────────────────
+        // "Writing style: <rules>." – base model conditions on this description;
+        // it does not obey commands, so imperative phrasing is intentionally absent.
+        var prefaceLines: [String] = []
 
-        // Core autocomplete directive — always present.
-        systemLines.append("You are a real-time inline ghost-text autocompleter. Output ONLY the immediate inline continuation of the user's text. Never repeat or echo any part of the text provided by the user. Do not include markdown formatting, explanations, or any preamble.")
-
-        // Tone / style line
         let isCode = isCodeEditor(bundleId: context.appBundleId, title: context.appTitle)
         if let style = makeStyleLine(systemInstructions: systemInstructions, british: british, isCode: isCode) {
-            systemLines.append(style)
+            prefaceLines.append(style)
         }
 
-        // Assemble: wrap in Gemma Instruct format.
-        // We put the instructions inside the user turn, and immediately start the model turn
-        // so the subsequent userText is evaluated as the model's own prefill.
-        let systemContent = systemLines.joined(separator: "\n")
-        let prefixTurn = "<start_of_turn>user\n" + systemContent + "\n<end_of_turn>\n<start_of_turn>model\n"
+        // ── Block 2: Dual-window rolling history (previous window screen text) ──
+        let history = UniversalContextManager.shared.contextHistory
+        if let snap = history.last, !snap.screenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            var text = snap.screenText
+            if text.count > 800 { text = String(text.prefix(800)) }
+            prefaceLines.append("Nearby on screen: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
 
-        frozenPrefix = prefixTurn
+        // ── Block 3: Live OCR snapshot ────────────────────────────────────────
+        let trimmedScreen = currentScreen.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedScreen.isEmpty {
+            var screen = trimmedScreen
+            if screen.count > 800 { screen = String(screen.prefix(800)) }
+            prefaceLines.append("Nearby on screen: \(screen)")
+        }
+
+        // ── Block 4: Clipboard context ────────────────────────────────────────
+        let trimmedClip = recentClip.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedClip.isEmpty {
+            let clipped = trimmedClip.count > 300 ? String(trimmedClip.prefix(300)) : trimmedClip
+            prefaceLines.append("On the clipboard: \(clipped)")
+        }
+
+        // ── Final preface: joined with \n, then \n\n boundary before the live prefix ──
+        // The blank-line separator isolates the conditioning context from the live text
+        // without a label the model could copy — exactly as in Cotabby's renderer.
+        let built: String
+        if prefaceLines.isEmpty {
+            // No context: the suffix will be handed to the model bare. We still emit an
+            // empty string so the suffix is appended directly (no leading separator).
+            built = ""
+        } else {
+            built = prefaceLines.joined(separator: "\n") + "\n\n"
+        }
+
+        frozenPrefix = built
         frozenPrefixKey = stableKey
-        print("[TypeFlow-Debug] PromptBuilder: System turn frozen (\(prefixTurn.count) chars).")
-        return prefixTurn
+        print("[TypeFlow-Debug] PromptBuilder: Conditioning preface frozen (\(built.count) chars, \(prefaceLines.count) blocks).")
+        return built
     }
 
-    // MARK: - Suffix builder — user turn content (live text, per-keystroke)
+    // MARK: - Suffix builder — live typing prefix (per-keystroke)
     //
-    // Returns only the raw text that goes inside <|im_start|>user … <|im_end|>.
-    // buildPrompt() wraps this in the correct ChatML user+assistant tokens.
+    // Returns the raw text that goes at the very end of the prompt, after \n\n.
+    // Trailing whitespace is trimmed so generation begins at a clean word boundary,
+    // matching BaseCompletionPromptRenderer.trimmingTrailingWhitespace().
 
     func buildPromptSuffix(textBeforeCaret: String, liveBuffer: String) -> (text: String, requiresHealing: Bool) {
         let lines = textBeforeCaret.components(separatedBy: .newlines)
@@ -121,35 +150,6 @@ class PromptBuilder {
         if !previousLines.isEmpty {
             suffix += previousLines + "\n"
         }
-        
-        // ── Dynamic Context appended AFTER the static user typing prefix ──
-        
-        // Previous window screen context (dual-window: rolling history snapshot)
-        let history = UniversalContextManager.shared.contextHistory
-        if let snap = history.last, !snap.screenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            var text = snap.screenText
-            if text.count > 800 { text = String(text.prefix(800)) }
-            suffix += "\nNearby on screen: \(text.trimmingCharacters(in: .whitespacesAndNewlines))\n"
-        }
-
-        // Current window screen context (live OCR snapshot)
-        let currentScreen = ScreenContextManager.shared.latestScreenText
-        let trimmedScreen = currentScreen.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedScreen.isEmpty {
-            var screen = trimmedScreen
-            if screen.count > 800 { screen = String(screen.prefix(800)) }
-            suffix += "\nNearby on screen: \(screen)\n"
-        }
-
-        // Clipboard context
-        let recentClip = ClipboardMonitor.shared.recentItems.last ?? ""
-        let trimmedClip = recentClip.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedClip.isEmpty {
-            let clipped = trimmedClip.count > 300 ? String(trimmedClip.prefix(300)) : trimmedClip
-            suffix += "\nOn the clipboard: \(clipped)\n"
-        }
-        
-        suffix += "\n"
 
         // Inline clipboard injection on trigger keyword
         if hasClipboardTrigger(textBeforeCaret: textBeforeCaret) {
@@ -166,6 +166,7 @@ class PromptBuilder {
         finalActiveLine += liveBuffer
 
         // Trim trailing whitespace so generation begins at a clean word boundary.
+        // This is the BaseCompletionPromptRenderer.trimmingTrailingWhitespace() equivalent.
         while finalActiveLine.hasSuffix(" ") || finalActiveLine.hasSuffix("\t") {
             finalActiveLine.removeLast()
         }
@@ -205,6 +206,7 @@ class PromptBuilder {
     }
 
     // MARK: - Rewrite prompt
+    // Rewrite uses a minimal base-model instruction format (no Gemma instruct tokens).
 
     func buildRewritePrompt(selectedText: String, systemInstructions: String, toneName: String) -> String {
         let british = SettingsManager.shared.useBritishEnglish
@@ -215,22 +217,25 @@ class PromptBuilder {
         if british {
             styleRules.append("Use British English spelling.")
         }
-        let styleNote = styleRules.isEmpty ? "" : (styleRules.joined(separator: " ") + "\n")
-        
-        // Rewrite uses a minimal Gemma Instruct format
-        return "<start_of_turn>user\n" +
-               "You are a text rewriting assistant. " + styleNote +
-               "Output ONLY the rewritten text. No explanations, no preamble.\n\n" +
-               "Text to rewrite:\n" +
-               selectedText + "\n<end_of_turn>\n<start_of_turn>model\n"
+        if !systemInstructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            styleRules.append(systemInstructions.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        // Base model rewrite: conditioning preface + blank line + text block.
+        // No instruct wrappers; the model continues from "Rewritten:" as a natural label.
+        var lines: [String] = []
+        lines.append("Rewrite the following text exactly once. Output only the rewritten text.")
+        if !styleRules.isEmpty {
+            lines.append("Writing style: \(styleRules.joined(separator: " "))")
+        }
+        let preface = lines.joined(separator: "\n")
+        return preface + "\n\nOriginal: \(selectedText)\n\nRewritten: "
     }
 
     // MARK: - Private helpers
 
     /// Distills the ToneProfile's systemInstructions into a short style note
-    /// suitable for inclusion inside the ChatML system turn.
-    /// For code editors the style is prefixed with `//` so it reads as a comment
-    /// inside any code block the model might complete.
+    /// suitable for inclusion in the base-model conditioning preface.
     private func makeStyleLine(systemInstructions: String, british: Bool, isCode: Bool = false) -> String? {
         var rules: [String] = []
 
@@ -254,7 +259,7 @@ class PromptBuilder {
         return isCode ? "// \(line)" : line
     }
 
-    // MARK: - Clipboard trigger helper (shared between prefix and suffix)
+    // MARK: - Clipboard trigger helper
 
     func hasClipboardTrigger(textBeforeCaret: String) -> Bool {
         let clipboardTriggers = AdaptivePatternLearner.shared.behaviors.clipboardTriggers

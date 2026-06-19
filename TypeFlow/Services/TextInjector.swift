@@ -53,8 +53,11 @@ class TextInjector {
         keyDown.post(tap: .cgSessionEventTap)
         keyUp.post(tap: .cgSessionEventTap)
         
-        // 5. Brief pause then restore original clipboard
-        Thread.sleep(forTimeInterval: 0.05)
+        // 5. Wait for the host to finish servicing Cmd+V, then restore original clipboard.
+        // 50ms was too short — Chromium and other apps service paste asynchronously and can
+        // take 100–200ms. Restoring before they service it causes them to paste the OLD clipboard
+        // contents instead of our completion. 300ms matches Cotabby's pasteboardRestoreDelay.
+        Thread.sleep(forTimeInterval: 0.3)
         restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
     }
     
