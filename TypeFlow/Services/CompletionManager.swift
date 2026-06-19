@@ -390,7 +390,7 @@ class CompletionManager: @unchecked Sendable {
         let now = Date()
         let keystrokeInterval = now.timeIntervalSince(lastKeystrokeTime)
         lastKeystrokeTime = now
-        let debounceInterval: TimeInterval = keystrokeInterval < 0.15 ? 0.3 : 0.18
+        let debounceInterval: TimeInterval = 0.6
         print("[TypeFlow-Debug] Adaptive debounce: keystroke interval \(String(format: "%.0f", keystrokeInterval * 1000))ms → using \(debounceInterval)s")
         
         NotificationCenter.default.post(name: Notification.Name("UserDidType"), object: nil)
