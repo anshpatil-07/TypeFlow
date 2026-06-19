@@ -275,6 +275,53 @@ class AccessibilityMonitor {
                         }
                         
                         obj.tapQueue.async {
+                            if keyCode == 51 || keyCode == 36 {
+                                print("[TypeFlow-Debug] Backspace/Return key detected: clearing and cancelling.")
+                                DispatchQueue.main.async {
+                                    CompletionManager.shared.clearCompletion()
+                                }
+                            }
+                            
+                            // Check matchesPrefix first for all keys, including Space (keyCode 49) and Punctuation
+                            var matchesPrefix = false
+                            var typedCharString = ""
+                            if let ghost = CompletionManager.shared.currentCompletion, !ghost.isEmpty {
+                                var actualLength = 0
+                                var unicodeChars = [UniChar](repeating: 0, count: 16)
+                                asyncEvent.keyboardGetUnicodeString(maxStringLength: 16, actualStringLength: &actualLength, unicodeString: &unicodeChars)
+                                if actualLength > 0 {
+                                    let typedChar = String(utf16CodeUnits: unicodeChars, count: actualLength)
+                                    if !typedChar.isEmpty {
+                                        typedCharString = typedChar
+                                        let ghostFirst = String(ghost.prefix(1))
+                                        if typedChar == ghostFirst {
+                                            matchesPrefix = true
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if matchesPrefix {
+                                obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
+                                let advanced = String(CompletionManager.shared.currentCompletion?.dropFirst() ?? "")
+                                if advanced.isEmpty {
+                                    DispatchQueue.main.async {
+                                        CompletionManager.shared.clearCompletion()
+                                    }
+                                } else {
+                                    CompletionManager.shared.currentCompletion = advanced
+                                    DispatchQueue.main.async {
+                                        let font = NSFont.systemFont(ofSize: 13, weight: .regular)
+                                        let attrs = [NSAttributedString.Key.font: font]
+                                        let shiftPx = (typedCharString as NSString).size(withAttributes: attrs).width
+                                        CompletionManager.shared.overlayWindowController?.shiftOverlayX(by: shiftPx)
+                                        CompletionManager.shared.overlayWindowController?.updateGhostText(advanced)
+                                    }
+                                    print("[TypeFlow-Debug] AccessibilityMonitor matching: eaten '\(typedCharString)', shifted and updated to '\(advanced)'")
+                                }
+                                return // Match processed!
+                            }
+                            
                             // Spacebar / Return Fast-Path
                             if keyCode == 49 || keyCode == 36 {
                                 obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
@@ -307,8 +354,15 @@ class AccessibilityMonitor {
                             obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
                             let bufferSnapshot = obj.keystrokeBuffer
                             let isPunctuation = (keyCode == 43 || keyCode == 47)
-                            let delay = isPunctuation ? 0.0 : 0.15
                             
+                            if CompletionManager.shared.currentCompletion != nil {
+                                print("[TypeFlow-Debug] AccessibilityMonitor diverging: hiding overlay but NOT cancelling LLM task")
+                                CompletionManager.shared.currentCompletion = nil
+                                DispatchQueue.main.async {
+                                    CompletionManager.shared.overlayWindowController?.updateText("")
+                                }
+                            }
+                            let delay = isPunctuation ? 0.0 : 0.15
                             obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: delay)
                         }
                     }
