@@ -318,10 +318,23 @@ class AccessibilityMonitor {
             eventsOfInterest: CGEventMask(eventMask),
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
                 if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
-                    return Unmanaged.passRetained(event)
+                    return Unmanaged.passUnretained(event)
                 }
                 
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                let flags = event.flags
+                let hasCompletion = CompletionManager.shared.currentCompletion != nil && !CompletionManager.shared.currentCompletion!.isEmpty
+                let isRewriteActive = CompletionManager.shared.isRewrite
+                let isSmartReplyActive = CompletionManager.shared.isSmartReply
+                
+                // Fast path bypass for normal typing (Fixes 'R' Key Accent Menu Hijack)
+                // Escape (53), Tab (48), Right Arrow (124) are potential shortcuts.
+                let isPotentialShortcut = keyCode == 53 || keyCode == 48 || keyCode == 124 ||
+                                          !flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty
+                                          
+                if !hasCompletion && !isRewriteActive && !isSmartReplyActive && !isPotentialShortcut {
+                    return Unmanaged.passUnretained(event)
+                }
                 
                 if let monitor = refcon {
                     let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
@@ -349,18 +362,20 @@ class AccessibilityMonitor {
                     
                     if type == .keyDown {
                         if keyCode == 53 { // Escape
-                            if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
+                            if isRewriteActive || isSmartReplyActive {
                                 DispatchQueue.main.async { CompletionManager.shared.clearCompletion() }
                                 return nil
                             }
                         }
                         
                         var tabConsumed = false
-                        let isRewriteActive = CompletionManager.shared.isRewrite
                         if (keyCode == 48 && (SettingsManager.shared.acceptShortcut == "Tab" || isRewriteActive)) ||
                            (keyCode == 124 && SettingsManager.shared.acceptShortcut == "Right Arrow") {
-                            if CompletionManager.shared.handleTabPressed() {
-                                tabConsumed = true
+                            // Only intercept if there is a real completion visible
+                            if hasCompletion || isRewriteActive {
+                                if CompletionManager.shared.handleTabPressed() {
+                                    tabConsumed = true
+                                }
                             }
                         }
                         
@@ -370,7 +385,7 @@ class AccessibilityMonitor {
                             return nil
                         }
                         
-                        if CompletionManager.shared.isRewrite || CompletionManager.shared.isSmartReply {
+                        if isRewriteActive || isSmartReplyActive {
                             obj.consumedKeyCodes.insert(keyCode)
                             return nil
                         }

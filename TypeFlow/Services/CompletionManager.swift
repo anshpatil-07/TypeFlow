@@ -403,20 +403,21 @@ class CompletionManager: @unchecked Sendable {
     }
     
     private func triggerGeneration(with text: String? = nil) {
-        if isSuppressedUntilNextTyping {
-            print("[TypeFlow-Debug] triggerGeneration aborted due to isSuppressedUntilNextTyping.")
-            return
-        }
-        
-        print("[TypeFlow-Debug] triggerGeneration started. Cancelling any previous inflight task...")
-        // workController manages the current work ID and will cancel its own tasks.
-        
-        if let providedText = text {
-            self.continueGeneration(activeLine: providedText, keystrokeBuffer: "")
-        } else {
-            // We MUST fetch AX text on a background thread because kAXValue polling is extremely expensive.
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let self = self else { return }
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            guard let self = self else { return }
+            
+            if self.isSuppressedUntilNextTyping {
+                print("[TypeFlow-Debug] triggerGeneration aborted due to isSuppressedUntilNextTyping.")
+                return
+            }
+            
+            print("[TypeFlow-Debug] triggerGeneration started. Cancelling any previous inflight task...")
+            // workController manages the current work ID and will cancel its own tasks.
+            
+            if let providedText = text {
+                self.continueGeneration(activeLine: providedText, keystrokeBuffer: "")
+            } else {
+                // We MUST fetch AX text on a background thread because kAXValue polling is extremely expensive.
                 let axText = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
                 
                 let isBrowser = ["zen", "safari", "chrome", "brave", "edge", "arc", "firefox"].contains {
