@@ -3,11 +3,8 @@ import SwiftUI
 struct LearnedBehaviorsView: View {
     @State private var behaviors = AdaptivePatternLearner.shared.behaviors
     @State private var newClipboardTrigger: String = ""
-    @State private var newStopWord: String = ""
     @State private var newAbbreviationShort: String = ""
     @State private var newAbbreviationExpanded: String = ""
-    
-    @AppStorage("adaptiveStopWordsEnabled") private var adaptiveStopWordsEnabled = true
     
     var body: some View {
         ScrollView {
@@ -22,91 +19,43 @@ struct LearnedBehaviorsView: View {
                 
                 Divider()
                 
-                HStack(spacing: 20) {
-                    VStack(alignment: .leading) {
-                        Text("Clipboard Triggers")
-                            .font(.headline)
-                        Text("Phrases that trigger a smart paste.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        
-                        HStack {
-                            TextField("New trigger...", text: $newClipboardTrigger)
-                                .textFieldStyle(RoundedBorderTextFieldStyle())
-                            Button(action: {
-                                if !newClipboardTrigger.isEmpty {
-                                    AdaptivePatternLearner.shared.addClipboardTrigger(trigger: newClipboardTrigger)
-                                    newClipboardTrigger = ""
-                                    refresh()
-                                }
-                            }) { Image(systemName: "plus") }
-                        }
-                        
-                        List {
-                            ForEach(behaviors.clipboardTriggers, id: \.self) { trigger in
-                                HStack {
-                                    Text(trigger)
-                                    Spacer()
-                                    Button(action: {
-                                        AdaptivePatternLearner.shared.deleteBehavior(trigger: trigger)
-                                        refresh()
-                                    }) {
-                                        Image(systemName: "trash")
-                                            .foregroundColor(.red)
-                                    }
-                                    .buttonStyle(PlainButtonStyle())
-                                }
+                VStack(alignment: .leading) {
+                    Text("Clipboard Triggers")
+                        .font(.headline)
+                    Text("Phrases that trigger a smart paste.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    HStack {
+                        TextField("New trigger...", text: $newClipboardTrigger)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                        Button(action: {
+                            if !newClipboardTrigger.isEmpty {
+                                AdaptivePatternLearner.shared.addClipboardTrigger(trigger: newClipboardTrigger)
+                                newClipboardTrigger = ""
+                                refresh()
                             }
-                        }
-                        .frame(height: 150)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3), lineWidth: 1))
+                        }) { Image(systemName: "plus") }
                     }
                     
-                    VStack(alignment: .leading) {
-                        HStack {
-                            Text("Learned Stop-Words")
-                                .font(.headline)
-                            Spacer()
-                            Toggle("Enable Adaptive Stop-Words", isOn: $adaptiveStopWordsEnabled)
-                                .toggleStyle(.switch)
-                                .scaleEffect(0.8)
-                        }
-                        
-                        Text("Words that suppress autocomplete.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        
-                        HStack {
-                            TextField("New stop-word...", text: $newStopWord)
-                                .textFieldStyle(RoundedBorderTextFieldStyle())
-                            Button(action: {
-                                if !newStopWord.isEmpty {
-                                    AdaptivePatternLearner.shared.addStopWord(word: newStopWord)
-                                    newStopWord = ""
+                    List {
+                        ForEach(behaviors.clipboardTriggers, id: \.self) { trigger in
+                            HStack {
+                                Text(trigger)
+                                Spacer()
+                                Button(action: {
+                                    AdaptivePatternLearner.shared.deleteBehavior(trigger: trigger)
                                     refresh()
+                                }) {
+                                    Image(systemName: "trash")
+                                        .foregroundColor(.red)
                                 }
-                            }) { Image(systemName: "plus") }
-                        }
-                        
-                        List {
-                            ForEach(behaviors.stopWords, id: \.self) { word in
-                                HStack {
-                                    Text(word)
-                                    Spacer()
-                                    Button(action: {
-                                        AdaptivePatternLearner.shared.deleteStopWord(word: word)
-                                        refresh()
-                                    }) {
-                                        Image(systemName: "trash")
-                                            .foregroundColor(.red)
-                                    }
-                                    .buttonStyle(PlainButtonStyle())
-                                }
+                                .buttonStyle(PlainButtonStyle())
                             }
                         }
-                        .frame(height: 150)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3), lineWidth: 1))
                     }
+                    .frame(height: 150)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3), lineWidth: 1))
                 }
                 
                 Divider()

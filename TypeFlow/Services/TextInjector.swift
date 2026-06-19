@@ -92,6 +92,7 @@ class TextInjector {
                 keyUpEvent.flags = [] // Clear all modifiers
                 keyUpEvent.post(tap: .cgSessionEventTap)
             }
+            usleep(5000)
         }
     }
     
@@ -134,6 +135,11 @@ class TextInjector {
                 keyUpEvent.flags = [] // Clear all modifiers
                 keyUpEvent.post(tap: .cgSessionEventTap)
             }
+            usleep(5000)
+        }
+        
+        if count > 0 {
+            usleep(10000)
         }
     }
 }

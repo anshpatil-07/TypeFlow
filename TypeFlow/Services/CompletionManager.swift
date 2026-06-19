@@ -140,6 +140,10 @@ class CompletionManager: @unchecked Sendable {
     
     private func calculateDeleteCount(activeLine: String, misspelled: String) -> Int {
         if let range = activeLine.range(of: misspelled, options: [.backwards, .caseInsensitive]) {
+            // Ensure bounds check when misspelled word is at index 0
+            if range.lowerBound == activeLine.startIndex {
+                return activeLine.utf16.distance(from: range.lowerBound, to: activeLine.endIndex)
+            }
             return activeLine.utf16.distance(from: range.lowerBound, to: activeLine.endIndex)
         }
         return misspelled.count
@@ -212,7 +216,8 @@ class CompletionManager: @unchecked Sendable {
                     let newlyTyped = delta > 0 ? String(self.accessibilityMonitor?.keystrokeBuffer.suffix(delta) ?? "") : ""
                     
                     // Inject the correction and explicitly append the trailing space via pasteboard + newly typed
-                    TextInjector.shared.inject(text: correction + delimiter + newlyTyped)
+                    let trailingSpace = (delimiter == " ") ? " " : ""
+                    TextInjector.shared.injectCharByChar(text: correction + delimiter + trailingSpace + newlyTyped)
                     
                     self.clearCompletion()
                 }
@@ -325,13 +330,16 @@ class CompletionManager: @unchecked Sendable {
                 if SettingsManager.shared.autoCorrectEnabled {
                     print("[TypeFlow-Debug] Auto-correct is enabled. Automatically correcting '\(word)' to '\(correction)'")
                     let deleteCount = calculateDeleteCount(activeLine: activeLine, misspelled: word)
-                    TextInjector.shared.injectBackspaces(count: deleteCount)
-                    TextInjector.shared.inject(text: correction + delimiter)
-                    clearCompletion()
-                    
                     let correctedLine = String(activeLine.dropLast(deleteCount)) + correction + delimiter
                     print("[TypeFlow-Debug] Logging auto-corrected sentence to history: '\(correctedLine)'")
                     TypingHistoryManager.shared.logSentenceFromText(correctedLine)
+                    
+                    DispatchQueue.main.async {
+                        TextInjector.shared.injectBackspaces(count: deleteCount)
+                        let trailingSpace = (delimiter == " ") ? " " : ""
+                        TextInjector.shared.injectCharByChar(text: correction + delimiter + trailingSpace)
+                        self.clearCompletion()
+                    }
                     return
                 } else {
                     // Show it as orange ghost text suggestion
@@ -480,17 +488,6 @@ class CompletionManager: @unchecked Sendable {
             print("[TypeFlow-Debug] Active line is empty, skipping generation.")
             return
         }
-        
-        // --- Adaptive Pattern Engine Gate ---
-        let adaptiveStopWordsEnabled = UserDefaults.standard.object(forKey: "adaptiveStopWordsEnabled") as? Bool ?? true
-        if adaptiveStopWordsEnabled {
-            let words = activeLine.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
-            if let lastWord = words.last?.lowercased(), AdaptivePatternLearner.shared.behaviors.stopWords.contains(lastWord) {
-                print("[TypeFlow-Debug] Adaptive Engine: Active line ends with learned stop-word '\(lastWord)'. Skipping MLX.")
-                return
-            }
-        }
-        // ------------------------------------
         
         let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
         let effectiveConfig = SettingsManager.shared.getEffectiveConfig(for: bundleId)

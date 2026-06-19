@@ -222,6 +222,7 @@ class AccessibilityMonitor {
     
     private var isRunning: Bool { observerTap != nil }
     var consumedKeyCodes: Set<Int64> = []
+    var isExpandingAbbreviation = false
     
     func start() {
         let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.rightMouseDown.rawValue)
@@ -398,6 +399,19 @@ class AccessibilityMonitor {
                 
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 let flags = event.flags
+                
+                var isAbbreviationTrigger = false
+                if let monitor = refcon {
+                    let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
+                    let obj = unmanaged.takeUnretainedValue()
+                    if type == .keyDown {
+                        if obj.isExpandingAbbreviation {
+                            isAbbreviationTrigger = true
+                            obj.isExpandingAbbreviation = false
+                        }
+                    }
+                }
+                
                 let hasCompletion = CompletionManager.shared.currentCompletion != nil && !CompletionManager.shared.currentCompletion!.isEmpty
                 let isRewriteActive = CompletionManager.shared.isRewrite
                 let isSmartReplyActive = CompletionManager.shared.isSmartReply
@@ -407,7 +421,7 @@ class AccessibilityMonitor {
                 let isPotentialShortcut = keyCode == 53 || keyCode == 48 || keyCode == 124 ||
                                           !flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty
                                           
-                if !hasCompletion && !isRewriteActive && !isSmartReplyActive && !isPotentialShortcut {
+                if !hasCompletion && !isRewriteActive && !isSmartReplyActive && !isPotentialShortcut && !isAbbreviationTrigger {
                     return Unmanaged.passUnretained(event)
                 }
                 
@@ -436,6 +450,11 @@ class AccessibilityMonitor {
                     }
                     
                     if type == .keyDown {
+                        if isAbbreviationTrigger {
+                            obj.consumedKeyCodes.insert(keyCode)
+                            return nil
+                        }
+                        
                         if keyCode == 53 { // Escape
                             if isRewriteActive || isSmartReplyActive {
                                 DispatchQueue.main.async { CompletionManager.shared.clearCompletion() }
@@ -707,9 +726,22 @@ class AccessibilityMonitor {
                 let cleanWord = lastTyped.trimmingCharacters(in: .punctuationCharacters)
                 if !cleanWord.isEmpty, let expansion = AdaptivePatternLearner.shared.behaviors.abbreviationExpansions[cleanWord] {
                     print("[TypeFlow-Debug] Abbreviation match: \(cleanWord) -> \(expansion)")
+                    
+                    // deleteCount = abbreviation + 1 to also erase the trigger character
+                    // (the Space/Tab/punctuation that macOS rendered before this callback fired)
+                    let deleteCount = cleanWord.count + 1
+                    
+                    var delimiterStr = ""
+                    if keyCode == 49 { delimiterStr = " " }
+                    else if keyCode == 48 { delimiterStr = "\t" }
+                    else if keyCode == 43 { delimiterStr = "," }
+                    else if keyCode == 47 { delimiterStr = "." }
+                    
+                    self.isExpandingAbbreviation = true
+                    
                     DispatchQueue.main.async {
-                        TextInjector.shared.injectBackspaces(count: cleanWord.count)
-                        TextInjector.shared.injectCharByChar(text: expansion)
+                        TextInjector.shared.injectBackspaces(count: deleteCount)
+                        TextInjector.shared.injectCharByChar(text: expansion + delimiterStr)
                     }
                     if let range = keystrokeBuffer.range(of: cleanWord, options: .backwards) {
                         keystrokeBuffer.replaceSubrange(range, with: expansion)

@@ -91,7 +91,7 @@ class SettingsTabViewController: NSTabViewController {
         
         addTab(title: "General", icon: "gear", view: GeneralSettingsView())
         addTab(title: "Shortcuts", icon: "keyboard", view: ShortcutsSettingsView())
-        addTab(title: "Models", icon: "cpu", view: ModelsSettingsView())
+        // addTab(title: "Models", icon: "cpu", view: ModelsSettingsView())
         addTab(title: "Tones", icon: "person.text.rectangle", view: TonesSettingsView())
         addTab(title: "Snippets", icon: "text.badge.plus", view: SnippetsSettingsView())
         addTab(title: "Apps", icon: "app.badge", view: AppOverridesSettingsView())
