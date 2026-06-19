@@ -106,19 +106,16 @@ class HotkeyRecorderNSView: NSView {
 
 struct GeneralSettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
+    @AppStorage("autoCorrectEnabled") private var autoCorrectEnabled = true
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             
             Text("Preferences")
                 .font(.headline)
             
-            Picker("Completion Tone:", selection: $settings.tone) {
-                ForEach(settings.getTones()) { tone in
-                    Text(tone.name).tag(tone.id)
-                }
-            }
-            .pickerStyle(MenuPickerStyle())
-
+            Toggle("Enable Auto-Correct", isOn: $autoCorrectEnabled)
+            
             Toggle("Use British English spelling", isOn: $settings.useBritishEnglish)
             
             Spacer()

@@ -47,15 +47,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         autocompleteItem.state = UserDefaults.standard.bool(forKey: "enableAutocomplete") ? .on : .off
         menu.addItem(autocompleteItem)
         
-        let autoCorrectItem = NSMenuItem(
-            title: "Enable Auto-Correct",
-            action: #selector(toggleAutoCorrect),
-            keyEquivalent: ""
-        )
-        autoCorrectItem.tag = 102
-        autoCorrectItem.state = UserDefaults.standard.bool(forKey: "autoCorrectEnabled") ? .on : .off
-        menu.addItem(autoCorrectItem)
-        
+
         let learningItem = NSMenuItem(
             title: "Enable Adaptive Learning",
             action: #selector(toggleAdaptiveLearning),
@@ -86,9 +78,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         if let item = menu.item(withTag: 101) {
             item.state = UserDefaults.standard.bool(forKey: "enableAutocomplete") ? .on : .off
         }
-        if let item = menu.item(withTag: 102) {
-            item.state = UserDefaults.standard.bool(forKey: "autoCorrectEnabled") ? .on : .off
-        }
+
         if let item = menu.item(withTag: 103) {
             item.state = UserDefaults.standard.bool(forKey: "personalizationEnabled") ? .on : .off
         }
@@ -100,12 +90,7 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         sender.state = !current ? .on : .off
     }
     
-    @objc func toggleAutoCorrect(_ sender: NSMenuItem) {
-        let current = UserDefaults.standard.bool(forKey: "autoCorrectEnabled")
-        UserDefaults.standard.set(!current, forKey: "autoCorrectEnabled")
-        sender.state = !current ? .on : .off
-    }
-    
+
     @objc func toggleAdaptiveLearning(_ sender: NSMenuItem) {
         let current = UserDefaults.standard.bool(forKey: "personalizationEnabled")
         UserDefaults.standard.set(!current, forKey: "personalizationEnabled")
