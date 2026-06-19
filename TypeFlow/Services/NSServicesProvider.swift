@@ -9,9 +9,8 @@ import Foundation
 ///   - "Expand with TypeFlow"   → expandText(_:userData:error:)
 @objc class TypeFlowServicesProvider: NSObject {
 
-    private func currentToneProfile() -> ToneProfile {
-        let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
-        return SettingsManager.shared.getEffectiveConfig(for: bundleId).toneProfile
+    private func currentToneProfile() -> Void {
+        // Obsolete function, retained temporarily to prevent diff issues
     }
 
     /// Called by macOS when the user selects "Rewrite with TypeFlow" from the Services menu.
@@ -26,7 +25,7 @@ import Foundation
             return
         }
 
-        let toneProfile = currentToneProfile()
+        // ToneProfile removed
 
         // NSServices handlers run on a background thread; block until LLM finishes.
         let semaphore = DispatchSemaphore(value: 0)
@@ -34,8 +33,7 @@ import Foundation
 
         Task {
             rewrittenText = await LLMEngine.shared.generateRewrite(
-                selectedText: text,
-                toneProfile: toneProfile
+                selectedText: text
             )
             semaphore.signal()
         }
@@ -63,15 +61,14 @@ import Foundation
             return
         }
 
-        let toneProfile = currentToneProfile()
+        // ToneProfile removed
         let semaphore = DispatchSemaphore(value: 0)
         var expandedText = ""
 
         Task {
             expandedText = await LLMEngine.shared.generateCompletion(
                 textBeforeCaret: text,
-                liveBuffer: "",
-                toneProfile: toneProfile
+                liveBuffer: ""
             )
             semaphore.signal()
         }

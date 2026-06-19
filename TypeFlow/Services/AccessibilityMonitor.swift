@@ -137,9 +137,11 @@ class AccessibilityMonitor {
                 // Intra-app focus jitter (same PID)
                 print("[TypeFlow-Debug] AXObserver: intra-app focus change (PID \(newPID)), clearing overlay & buffer")
                 DispatchQueue.main.async {
-                    CompletionManager.shared.cancelInflightTasks()
-                    CompletionManager.shared.hideOverlay()
-                    CompletionManager.shared.clearCompletion()
+                    if !CompletionManager.shared.isRewrite && !CompletionManager.shared.isSmartReply {
+                        CompletionManager.shared.cancelInflightTasks()
+                        CompletionManager.shared.hideOverlay()
+                        CompletionManager.shared.clearCompletion()
+                    }
                     obj.clearKeystrokeBuffer()
                 }
             }
@@ -256,9 +258,11 @@ class AccessibilityMonitor {
                     // Mouse clicks reset state
                     if type == .leftMouseDown || type == .rightMouseDown {
                         DispatchQueue.main.async {
-                            CompletionManager.shared.cancelInflightTasks()
-                            CompletionManager.shared.hideOverlay()
-                            CompletionManager.shared.clearCompletion()
+                            if !CompletionManager.shared.isRewrite && !CompletionManager.shared.isSmartReply {
+                                CompletionManager.shared.cancelInflightTasks()
+                                CompletionManager.shared.hideOverlay()
+                                CompletionManager.shared.clearCompletion()
+                            }
                             obj.clearKeystrokeBuffer()
                         }
                         return Unmanaged.passUnretained(event)
@@ -279,7 +283,9 @@ class AccessibilityMonitor {
                             if keyCode == 51 || keyCode == 36 {
                                 print("[TypeFlow-Debug] Backspace/Return key detected: clearing and cancelling.")
                                 DispatchQueue.main.async {
-                                    CompletionManager.shared.clearCompletion()
+                                    if !CompletionManager.shared.isRewrite && !CompletionManager.shared.isSmartReply {
+                                        CompletionManager.shared.clearCompletion()
+                                    }
                                 }
                             }
                             

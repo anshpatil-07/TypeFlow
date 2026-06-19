@@ -21,7 +21,9 @@ class CompletionManager: @unchecked Sendable {
     private var activeSnippetKey: String?
     var activeRewriteText: String?
     var activeRewritePID: pid_t?
+    var activeRewriteApp: NSRunningApplication?
     var activeSmartReplyPID: pid_t?
+    private var rewriteTask: Task<Void, Never>?
     
     var isSuppressedUntilNextTyping = false
     private var lastBufferSnapshot: String = ""
@@ -431,6 +433,10 @@ class CompletionManager: @unchecked Sendable {
     }
     
     private func triggerGeneration(with text: String? = nil) {
+        guard SettingsManager.shared.enableAutocomplete else {
+            print("[TypeFlow-Debug] triggerGeneration: Autocomplete disabled, skipping.")
+            return
+        }
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             guard let self = self else { return }
             
@@ -564,7 +570,6 @@ class CompletionManager: @unchecked Sendable {
             let completion = await LLMEngine.shared.generateCompletion(
                 textBeforeCaret: fullActiveLine,
                 liveBuffer: effectiveLiveBuffer,
-                toneProfile: effectiveConfig.toneProfile,
                 onStream: { [weak self] partialText in
                     guard let self = self else { return }
                     guard self.workController.isCurrent(workID) else { return }
@@ -711,12 +716,14 @@ class CompletionManager: @unchecked Sendable {
 
         // Cancel previous tasks/timers immediately
         workController.cancelAll()
+        rewriteTask?.cancel()
         activeSpellCorrection = nil
         activeSnippetKey = nil
 
         if mode == .selectMode {
             // Start of rewrite session: track original PID and clear previous text
             self.activeRewritePID = self.accessibilityMonitor?.activeFocusPID
+            self.activeRewriteApp = NSWorkspace.shared.frontmostApplication
             self.activeRewriteText = nil
             self.currentCompletion = nil
             
@@ -729,8 +736,8 @@ class CompletionManager: @unchecked Sendable {
             }
 
             // Asynchronously extract selection immediately while the target app is still frontmost
-            let workID = workController.currentWorkID
-            workController.replaceGenerationWork(for: workID) {
+            self.rewriteTask?.cancel()
+            self.rewriteTask = Task {
                 try? await Task.sleep(nanoseconds: 100_000_000) // Settle delay
                 
                 guard let monitor = self.accessibilityMonitor,
@@ -764,32 +771,13 @@ class CompletionManager: @unchecked Sendable {
         }
 
         let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
-        let effectiveConfig = SettingsManager.shared.getEffectiveConfig(for: bundleId)
-        let toneProfile: ToneProfile
-        switch mode {
-        case .selectMode:
+        
+        if mode == .selectMode {
             return // unreachable
-        case .currentTone:
-            toneProfile = effectiveConfig.toneProfile
-        case .professional:
-            toneProfile = ToneProfile(
-                id: "rewrite-professional", name: "Professional",
-                systemInstructions: "Rewrite the text in a clear, professional, and formal tone. Preserve the original meaning exactly. Output ONLY the rewritten text with no commentary.",
-                temperature: 0.1, maxTokens: 300, isBuiltIn: true)
-        case .shorter:
-            toneProfile = ToneProfile(
-                id: "rewrite-shorter", name: "Shorter",
-                systemInstructions: "Rewrite the text to be significantly shorter and more concise without losing the core meaning. Cut unnecessary words and phrases. Output ONLY the rewritten text.",
-                temperature: 0.1, maxTokens: 200, isBuiltIn: true)
-        case .fixGrammar:
-            toneProfile = ToneProfile(
-                id: "rewrite-grammar", name: "Fix Grammar",
-                systemInstructions: "Fix all spelling mistakes, grammar errors, and punctuation in the text. Do NOT change the meaning, style, or vocabulary beyond necessary corrections. Output ONLY the corrected text.",
-                temperature: 0.0, maxTokens: 300, isBuiltIn: true)
         }
 
-        let workID = workController.currentWorkID
-        workController.replaceGenerationWork(for: workID) { [weak self] in
+        self.rewriteTask?.cancel()
+        self.rewriteTask = Task { [weak self] in
             guard let self = self else { return }
             // Ensure selection is ready (wait up to 1 second if extraction is still running)
             var attempts = 0
@@ -805,8 +793,8 @@ class CompletionManager: @unchecked Sendable {
                 return
             }
 
-            print("[TypeFlow-Debug] Rewriting selection with mode '\(toneProfile.name)'")
-            let rewritten = await LLMEngine.shared.generateRewrite(selectedText: selection, toneProfile: toneProfile)
+            print("[TypeFlow-Debug] Rewriting selection")
+            let rewritten = await LLMEngine.shared.generateRewrite(selectedText: selection)
 
             if Task.isCancelled {
                 print("[TypeFlow-Debug] Rewrite generation cancelled")
@@ -906,7 +894,7 @@ class CompletionManager: @unchecked Sendable {
             if let completion = currentCompletion, !completion.isEmpty {
                 print("[TypeFlow-Debug] Accepting rewrite: replacing selection with '\(completion)'")
                 
-                let targetApp = activeRewritePID.flatMap { NSRunningApplication(processIdentifier: $0) }
+                let targetApp = activeRewriteApp
                 
                 // 1. Hide the overlay first so host app regains focus
                 overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false, isSmartReply: false, smartReplyOptions: [])
@@ -914,14 +902,16 @@ class CompletionManager: @unchecked Sendable {
                 // 2. Clear keystroke buffer
                 accessibilityMonitor?.clearKeystrokeBuffer()
                 
-                // 3. Introduce a delay and inject text asynchronously
+                // 3. Forcibly reactivate target app
+                targetApp?.activate(options: .activateIgnoringOtherApps)
+                
+                // 4. Delay and inject text asynchronously
                 let completionToInject = completion
-                Task {
-                    try? await Task.sleep(nanoseconds: 50_000_000) // 50ms delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     TextInjector.shared.inject(text: completionToInject, targetApp: targetApp)
                 }
                 
-                // 4. Clear completion state
+                // 5. Clear completion state
                 clearCompletion()
             } else {
                 print("[TypeFlow-Debug] Tab pressed during rewrite but completion not ready, ignoring.")
@@ -1025,6 +1015,7 @@ class CompletionManager: @unchecked Sendable {
     
     func cancelInflightTasks() {
         workController.cancelAll()
+        rewriteTask?.cancel()
     }
     
     func hideOverlay() {
@@ -1037,6 +1028,7 @@ class CompletionManager: @unchecked Sendable {
         activeSnippetKey = nil
         activeRewriteText = nil
         activeRewritePID = nil
+        activeRewriteApp = nil
         activeSmartReplyPID = nil
         lastBufferSnapshot = ""
         cancelInflightTasks()

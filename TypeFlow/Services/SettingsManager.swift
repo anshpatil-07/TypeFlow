@@ -12,6 +12,7 @@ class SettingsManager: ObservableObject {
     @AppStorage("excludedApps") var excludedApps: String = "com.agilebits.onepassword7,com.apple.keychainaccess"
     @AppStorage("autoCorrectEnabled") var autoCorrectEnabled: Bool = false
     @AppStorage("personalizationEnabled") var personalizationEnabled: Bool = false
+    @AppStorage("enableAutocomplete") var enableAutocomplete: Bool = true
     @AppStorage("useBritishEnglish") var useBritishEnglish: Bool = false
     
     @AppStorage("tone") var tone: String = "Neutral"

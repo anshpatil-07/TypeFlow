@@ -52,8 +52,8 @@ actor LLMEngine {
         return true // TypeFlowLlamaWrapper uses mmap and strictly bounded n_ctx, zero ARC bloat
     }
     
-    func prewarmCache(toneProfile: ToneProfile) async {
-        print("[TypeFlow-Debug] LLMEngine: Pre-warming cache for tone \(toneProfile.name)")
+    func prewarmCache() async {
+        print("[TypeFlow-Debug] LLMEngine: Pre-warming cache")
         await loadModelIfNeeded()
         resetInactivityTimer()
     }
@@ -61,10 +61,9 @@ actor LLMEngine {
     func generateCompletion(
         textBeforeCaret: String,
         liveBuffer: String,
-        toneProfile: ToneProfile,
         onStream: (@Sendable (String) -> Void)? = nil
     ) async -> String {
-        print("[TypeFlow-Debug] LLMEngine: generateCompletion called with tone \(toneProfile.name)")
+        print("[TypeFlow-Debug] LLMEngine: generateCompletion called")
         
         await loadModelIfNeeded()
         resetInactivityTimer()
@@ -78,15 +77,20 @@ actor LLMEngine {
             return ""
         }
         
+        let hardcodedInstructions = "Complete the text. Output only the next few words. No explanation."
+        let temperature = Float(UserDefaults.standard.double(forKey: "globalTemperature"))
+        var maxTokens = UserDefaults.standard.integer(forKey: "globalMaxLength")
+        if maxTokens == 0 { maxTokens = 20 }
+        
         let suffixResult = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer)
-        let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(systemInstructions: toneProfile.systemInstructions)
+        let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(systemInstructions: hardcodedInstructions)
         let fullPrompt = dynamicPrefixPrompt + suffixResult.text
         
         do {
             let output = try await runtime.generate(
                 prompt: fullPrompt,
-                maxTokens: toneProfile.maxTokens,
-                temperature: Float(toneProfile.temperature),
+                maxTokens: maxTokens,
+                temperature: temperature == 0.0 ? 0.2 : temperature,
                 onPartialRawText: { partialText in
                     onStream?(partialText)
                 }
@@ -105,7 +109,7 @@ actor LLMEngine {
         }
     }
 
-    func generateRewrite(selectedText: String, toneProfile: ToneProfile) async -> String {
+    func generateRewrite(selectedText: String) async -> String {
         print("[TypeFlow-Debug] LLMEngine: generateRewrite called")
         
         await loadModelIfNeeded()
@@ -114,10 +118,13 @@ actor LLMEngine {
         guard await runtime.isModelReady else { return "" }
         if Task.isCancelled { return "" }
         
+        let hardcodedInstructions = "Rewrite the text professionally."
+        let temperature = Float(UserDefaults.standard.double(forKey: "globalTemperature"))
+        
         let prompt = PromptBuilder.shared.buildRewritePrompt(
             selectedText: selectedText,
-            systemInstructions: toneProfile.systemInstructions,
-            toneName: toneProfile.name
+            systemInstructions: hardcodedInstructions,
+            toneName: "Professional"
         )
         
         do {
@@ -125,7 +132,7 @@ actor LLMEngine {
             let output = try await runtime.generate(
                 prompt: prompt,
                 maxTokens: maxTokens,
-                temperature: Float(toneProfile.temperature)
+                temperature: temperature == 0.0 ? 0.2 : temperature
             )
             return output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
         } catch {

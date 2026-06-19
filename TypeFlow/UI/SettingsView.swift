@@ -108,16 +108,16 @@ struct GeneralSettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
+            
+            Text("Preferences")
+                .font(.headline)
+            
             Picker("Completion Tone:", selection: $settings.tone) {
                 ForEach(settings.getTones()) { tone in
                     Text(tone.name).tag(tone.id)
                 }
             }
             .pickerStyle(MenuPickerStyle())
-
-            Toggle("Auto-correct misspelled words as you type", isOn: $settings.autoCorrectEnabled)
-
-            Toggle("Enable personalization (Typing History)", isOn: $settings.personalizationEnabled)
 
             Toggle("Use British English spelling", isOn: $settings.useBritishEnglish)
             
@@ -377,177 +377,50 @@ struct ModelsSettingsView: View {
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tones Tab View
+// Generation Tab View
 // ─────────────────────────────────────────────────────────────────────────────
-struct TonesSettingsView: View {
-    @ObservedObject var settings = SettingsManager.shared
-    @State private var selectedToneId: String = "Neutral"
+struct GenerationSettingsView: View {
+    @AppStorage("globalTemperature") private var globalTemperature: Double = 0.2
+    @AppStorage("globalMaxLength") private var globalMaxLength: Double = 20.0
     
     var body: some View {
-        NavigationSplitView {
-            // Sidebar List of Tone Profiles
-            VStack(spacing: 0) {
-                List(selection: $selectedToneId) {
-                    Section(header: Text("Built-in")) {
-                        ForEach(SettingsManager.builtInTones) { tone in
-                            Text(tone.name).tag(tone.id)
-                        }
-                    }
-                    Section(header: Text("Custom")) {
-                        ForEach(settings.getCustomTones()) { tone in
-                            Text(tone.name).tag(tone.id)
-                        }
-                    }
-                }
-                .listStyle(SidebarListStyle())
-                
-                HStack {
-                    Button(action: addCustomTone) {
-                        Image(systemName: "plus")
-                    }
-                    .buttonStyle(BorderedButtonStyle())
-                    
-                    Button(action: deleteSelectedCustomTone) {
-                        Image(systemName: "minus")
-                    }
-                    .buttonStyle(BorderedButtonStyle())
-                    .disabled(isBuiltIn(selectedToneId))
-                    
+        VStack(alignment: .leading, spacing: 32) {
+            
+            Text("Generation Settings")
+                .font(.title2)
+                .bold()
+                .padding(.bottom, 8)
+            
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Text("Temperature: \(String(format: "%.1f", globalTemperature))")
+                        .font(.headline)
+                    Image(systemName: "info.circle")
+                        .foregroundColor(.secondary)
+                        .help("Controls the creativity and randomness of the generated text. Lower values are more predictable, higher values are more creative.")
                     Spacer()
-                    
-                    Button("Duplicate") {
-                        duplicateTone()
-                    }
-                    .buttonStyle(BorderedButtonStyle())
-                }
-                .padding(8)
-            }
-            .navigationSplitViewColumnWidth(min: 150, ideal: 200)
-        } detail: {
-            // Editor Panel on Right
-            if let tone = getTone(by: selectedToneId) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(tone.isBuiltIn ? "Built-in Tone Profile (Read-only)" : "Custom Tone Profile")
+                    Text(temperatureLabel(globalTemperature))
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    
-                    if tone.isBuiltIn {
-                        Text(tone.name)
-                            .font(.title2)
-                            .bold()
-                            .padding(.bottom, 4)
-                    } else {
-                        TextField("Name", text: nameBinding(for: tone.id))
-                            .font(.title2)
-                            .textFieldStyle(RoundedBorderTextFieldStyle())
-                            .padding(.bottom, 4)
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Instructions:")
-                            .font(.subheadline)
-                            .bold()
-                        TextEditor(text: instructionsBinding(for: tone.id))
-                            .frame(height: 100)
-                            .cornerRadius(4)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.gray.opacity(0.3)))
-                            .disabled(tone.isBuiltIn)
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Temperature: \(String(format: "%.1f", tone.temperature))")
-                                .font(.subheadline)
-                                .bold()
-                            Spacer()
-                            Text(temperatureLabel(tone.temperature))
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        Slider(value: temperatureBinding(for: tone.id), in: 0.0...1.0, step: 0.1)
-                            .disabled(tone.isBuiltIn)
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Max Length (tokens): \(tone.maxTokens)")
-                            .font(.subheadline)
-                            .bold()
-                        Slider(value: maxTokensBinding(for: tone.id), in: 5...50, step: 1)
-                            .disabled(tone.isBuiltIn)
-                    }
-                    
-                    Spacer()
                 }
-                .padding(40)
-                .frame(minWidth: 350, maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                VStack {
-                    Text("Select a tone to edit or view details.")
+                Slider(value: $globalTemperature, in: 0.0...1.0, step: 0.1)
+            }
+            
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Text("Max Length (tokens): \(Int(globalMaxLength))")
+                        .font(.headline)
+                    Image(systemName: "info.circle")
                         .foregroundColor(.secondary)
+                        .help("Limits the maximum number of tokens (words/pieces of words) the AI can generate in a single response.")
                 }
-                .frame(minWidth: 350, maxWidth: .infinity, maxHeight: .infinity)
+                Slider(value: $globalMaxLength, in: 5...50, step: 1)
             }
+            
+            Spacer()
         }
-    }
-    
-    private func isBuiltIn(_ id: String) -> Bool {
-        return SettingsManager.builtInTones.contains(where: { $0.id == id })
-    }
-    
-    private func getTone(by id: String) -> ToneProfile? {
-        return settings.getToneProfile(by: id)
-    }
-    
-    private func nameBinding(for id: String) -> Binding<String> {
-        Binding(
-            get: { getTone(by: id)?.name ?? "" },
-            set: { newValue in
-                var customs = settings.getCustomTones()
-                if let index = customs.firstIndex(where: { $0.id == id }) {
-                    customs[index].name = newValue
-                    settings.saveCustomTones(customs)
-                }
-            }
-        )
-    }
-    
-    private func instructionsBinding(for id: String) -> Binding<String> {
-        Binding(
-            get: { getTone(by: id)?.systemInstructions ?? "" },
-            set: { newValue in
-                var customs = settings.getCustomTones()
-                if let index = customs.firstIndex(where: { $0.id == id }) {
-                    customs[index].systemInstructions = newValue
-                    settings.saveCustomTones(customs)
-                }
-            }
-        )
-    }
-    
-    private func temperatureBinding(for id: String) -> Binding<Double> {
-        Binding(
-            get: { getTone(by: id)?.temperature ?? 0.2 },
-            set: { newValue in
-                var customs = settings.getCustomTones()
-                if let index = customs.firstIndex(where: { $0.id == id }) {
-                    customs[index].temperature = newValue
-                    settings.saveCustomTones(customs)
-                }
-            }
-        )
-    }
-    
-    private func maxTokensBinding(for id: String) -> Binding<Double> {
-        Binding(
-            get: { Double(getTone(by: id)?.maxTokens ?? 20) },
-            set: { newValue in
-                var customs = settings.getCustomTones()
-                if let index = customs.firstIndex(where: { $0.id == id }) {
-                    customs[index].maxTokens = Int(newValue)
-                    settings.saveCustomTones(customs)
-                }
-            }
-        )
+        .padding(40)
+        .frame(minWidth: 500, minHeight: 400)
     }
     
     private func temperatureLabel(_ temp: Double) -> String {
@@ -555,46 +428,6 @@ struct TonesSettingsView: View {
         if temp < 0.5 { return "Balanced" }
         if temp < 0.8 { return "Creative" }
         return "Very Creative"
-    }
-    
-    private func addCustomTone() {
-        let newId = UUID().uuidString
-        let newTone = ToneProfile(
-            id: newId,
-            name: "Custom Tone",
-            systemInstructions: "Complete the text.",
-            temperature: 0.2,
-            maxTokens: 20,
-            isBuiltIn: false
-        )
-        var customs = settings.getCustomTones()
-        customs.append(newTone)
-        settings.saveCustomTones(customs)
-        selectedToneId = newId
-    }
-    
-    private func deleteSelectedCustomTone() {
-        var customs = settings.getCustomTones()
-        customs.removeAll(where: { $0.id == selectedToneId })
-        settings.saveCustomTones(customs)
-        selectedToneId = "Neutral"
-    }
-    
-    private func duplicateTone() {
-        guard let baseTone = getTone(by: selectedToneId) else { return }
-        let newId = UUID().uuidString
-        let newTone = ToneProfile(
-            id: newId,
-            name: "\(baseTone.name) Copy",
-            systemInstructions: baseTone.systemInstructions,
-            temperature: baseTone.temperature,
-            maxTokens: baseTone.maxTokens,
-            isBuiltIn: false
-        )
-        var customs = settings.getCustomTones()
-        customs.append(newTone)
-        settings.saveCustomTones(customs)
-        selectedToneId = newId
     }
 }
 
