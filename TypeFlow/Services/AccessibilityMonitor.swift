@@ -347,6 +347,14 @@ class AccessibilityMonitor {
                                     }
                                 }
                                 
+                                if let oldText = CompletionManager.shared.currentCompletion {
+                                    print("[TypeFlow-Debug] AccessibilityMonitor diverging on Space/Return: dimming overlay")
+                                    CompletionManager.shared.currentCompletion = nil
+                                    DispatchQueue.main.async {
+                                        CompletionManager.shared.overlayWindowController?.updateGhostText(oldText, isStale: true)
+                                    }
+                                }
+                                
                                 obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: 0.0)
                                 return
                             }
@@ -355,11 +363,11 @@ class AccessibilityMonitor {
                             let bufferSnapshot = obj.keystrokeBuffer
                             let isPunctuation = (keyCode == 43 || keyCode == 47)
                             
-                            if CompletionManager.shared.currentCompletion != nil {
-                                print("[TypeFlow-Debug] AccessibilityMonitor diverging: hiding overlay but NOT cancelling LLM task")
+                            if let oldText = CompletionManager.shared.currentCompletion {
+                                print("[TypeFlow-Debug] AccessibilityMonitor diverging: dimming overlay")
                                 CompletionManager.shared.currentCompletion = nil
                                 DispatchQueue.main.async {
-                                    CompletionManager.shared.overlayWindowController?.updateText("")
+                                    CompletionManager.shared.overlayWindowController?.updateGhostText(oldText, isStale: true)
                                 }
                             }
                             let delay = isPunctuation ? 0.0 : 0.15

@@ -277,24 +277,24 @@ class CompletionManager: @unchecked Sendable {
                     }
                     return
                 } else {
-                    // Mismatch — instantly hide overlay and cancel any pending debounce work,
+                    // Mismatch — mark as stale and cancel any pending debounce work,
                     // then fall through so a new completion is generated immediately.
-                    print("[TypeFlow-Debug] DynamicInvalidation: char '\(newChar)' mismatched ghost '\(ghostFirst)', clearing instantly")
+                    print("[TypeFlow-Debug] DynamicInvalidation: char '\(newChar)' mismatched ghost '\(ghostFirst)', dimming instantly")
                     currentCompletion = nil
                     workController.cancelAll()
-                    overlayWindowController?.updateText("")
+                    overlayWindowController?.updateGhostText(ghost, isStale: true)
                 }
             } else {
-                // Multi-char jump or deletion — just clear
+                // Multi-char jump or deletion — mark as stale
                 currentCompletion = nil
                 workController.cancelAll()
-                overlayWindowController?.updateText("")
+                overlayWindowController?.updateGhostText(ghost, isStale: true)
             }
         }
         lastBufferSnapshot = bufferFallback
         
-        // Clear existing completion immediately when user types
-        clearCompletion()
+        // Clear existing completion state immediately when user types, but leave UI visible
+        clearCompletion(hideUI: false)
 
         
         if let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier {
@@ -1034,7 +1034,7 @@ class CompletionManager: @unchecked Sendable {
         overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false, isSmartReply: false, smartReplyOptions: [])
     }
 
-    func clearCompletion() {
+    func clearCompletion(hideUI: Bool = true) {
         currentCompletion = nil
         activeSpellCorrection = nil
         activeSnippetKey = nil
@@ -1043,7 +1043,9 @@ class CompletionManager: @unchecked Sendable {
         activeSmartReplyPID = nil
         lastBufferSnapshot = ""
         cancelInflightTasks()
-        hideOverlay()
+        if hideUI {
+            hideOverlay()
+        }
     }
 
     func handleReturnPressed() {

@@ -1015,7 +1015,7 @@ class OverlayWindowController: NSWindowController {
         overlayWindow.setFrameOrigin(f.origin)
     }
 
-    func updateGhostText(_ newText: String) {
+    func updateGhostText(_ newText: String, isStale: Bool = false) {
         completionModel.text = newText
         
         guard !newText.isEmpty else {
@@ -1041,7 +1041,7 @@ class OverlayWindowController: NSWindowController {
                 fieldColor: fieldGhostColor(from: geom.resolvedFieldStyle),
                 customColor: nil,
                 keycapLabel: nil,
-                opacity: 0.75,
+                opacity: isStale ? 0.35 : 0.75,
                 isCorrection: geom.isCorrection
             )
             
