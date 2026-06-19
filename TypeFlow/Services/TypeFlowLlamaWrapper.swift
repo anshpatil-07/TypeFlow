@@ -178,6 +178,7 @@ actor TypeFlowLlamaWrapper {
         
         var generatedText = ""
         var n_cur: Int32 = n_tokens
+        var hasEmittedValidText = false
         
         // 4. Setup Sampler
         let sparams = llama_sampler_chain_default_params()
@@ -198,7 +199,17 @@ actor TypeFlowLlamaWrapper {
             }
             
             // Sample
-            let new_token_id = llama_sampler_sample(smpl, ctx, -1)
+            var new_token_id = llama_sampler_sample(smpl, ctx, -1)
+            
+            // Prevent Premature EOS
+            while llama_vocab_is_eog(vocab, new_token_id) && !hasEmittedValidText {
+                if let logits = llama_get_logits_ith(ctx, -1) {
+                    logits[Int(new_token_id)] = -Float.greatestFiniteMagnitude
+                    new_token_id = llama_sampler_sample(smpl, ctx, -1)
+                } else {
+                    break
+                }
+            }
             
             if llama_vocab_is_eog(vocab, new_token_id) {
                 break
@@ -215,7 +226,17 @@ actor TypeFlowLlamaWrapper {
                 pieceBuffer[Int(bytesWritten)] = 0
                 if let pieceString = String(validatingUTF8: pieceBuffer) {
                     generatedText += pieceString
-                    if generatedText.contains("\n") {
+                    
+                    if !hasEmittedValidText {
+                        while generatedText.hasPrefix("\n") || generatedText.hasPrefix("\r") {
+                            generatedText.removeFirst()
+                        }
+                        if generatedText.rangeOfCharacter(from: .alphanumerics) != nil {
+                            hasEmittedValidText = true
+                        }
+                    }
+                    
+                    if hasEmittedValidText && generatedText.contains("\n") {
                         if let newlineRange = generatedText.range(of: "\n") {
                             generatedText = String(generatedText[..<newlineRange.lowerBound])
                         }
