@@ -86,19 +86,7 @@ actor LLMEngine {
             
             var trimmedResult = output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             
-            // ── Swift-level stop-sequence truncation ───────────────────────────────
-            // The model is not given native stop tokens via the C-API to avoid
-            // breaking C-interop. Instead we truncate at the first newline or control
-            // tag opening bracket ('<') here in Swift. Inline ghost-text completions
-            // are always single-line; anything after a \n, \r, or control tag is a
-            // hallucination and must be discarded immediately.
-            let stopChars = CharacterSet.newlines.union(CharacterSet(charactersIn: "<"))
-            if let stopRange = trimmedResult.rangeOfCharacter(from: stopChars) {
-                let truncated = String(trimmedResult[..<stopRange.lowerBound])
-                    .trimmingCharacters(in: .whitespaces)
-                print("[TypeFlow-Debug] LLMEngine: Truncated at stop sequence. Kept: '\(truncated)'")
-                trimmedResult = truncated
-            }
+
             
             // Clean echo: strip any prefix of the output that overlaps with the tail
             // of the input text (handles the rare case where the model still repeats
@@ -166,13 +154,14 @@ actor LLMEngine {
         if Task.isCancelled { return [] }
         
         let prompt = """
+        <start_of_turn>user
         You are a context-aware smart reply assistant. Based on the conversation context provided below, generate exactly 3 short, distinct reply options (e.g. Professional, Casual, Concise) that the user could send in response.
         Output the 3 options separated EXACTLY by the delimiter '|||' and nothing else. No formatting, no prefixes.
         
         Context:
         \(contextText)
-        
-        Replies:
+        <end_of_turn>
+        <start_of_turn>model
         """
         
         do {
@@ -200,7 +189,7 @@ actor LLMEngine {
             let modelId = SettingsManager.shared.activeModelId
             print("[TypeFlow-Debug] LLMEngine: Loading model: \(modelId)")
             
-            let ggufPath = "\(NSHomeDirectory())/Documents/gemma-4-E2B.Q4_K_M.gguf"
+            let ggufPath = "\(NSHomeDirectory())/Documents/gemma-4-E2B-i1-Q4_K_M.gguf"
             
             try await runtime.loadModel(path: ggufPath)
             print("[TypeFlow-Debug] LLMEngine: Model loaded successfully.")

@@ -12,6 +12,8 @@ actor TypeFlowLlamaWrapper {
     private var ctx: OpaquePointer?
     private var isLoaded = false
     private var abortInFlight = false
+    private var previousPromptTokens: [llama_token] = []
+    private var currentCachePosition: Int32 = 0
     
     var isModelReady: Bool { isLoaded }
     
@@ -40,9 +42,9 @@ actor TypeFlowLlamaWrapper {
         }
         
         var cparams = llama_context_default_params()
-cparams.n_ctx = 8192      // Double the context window to give plenty of room
-cparams.n_batch = 2048    // Cap the batch size
-cparams.n_ubatch = 512    // Keep micro-batching standard for Apple Silicon
+        cparams.n_ctx = 4096      // Hardcoded bounding limit to prevent KV cache overflow
+        cparams.n_batch = 2048    // Ensure prefill batch capacity can handle 550+ tokens
+        cparams.n_ubatch = 512    // Match physical batch size for Apple Silicon
         
         ctx = llama_new_context_with_model(model, cparams)
         guard let ctx = ctx else {
@@ -95,6 +97,8 @@ cparams.n_ubatch = 512    // Keep micro-batching standard for Apple Silicon
 
         // Discard all warmup KV state before the first real request.
         llama_memory_clear(llama_get_memory(ctx), false)
+        self.previousPromptTokens = []
+        self.currentCachePosition = 0
     }
     
     func unloadModel() {
@@ -107,6 +111,8 @@ cparams.n_ubatch = 512    // Keep micro-batching standard for Apple Silicon
             self.model = nil
         }
         isLoaded = false
+        previousPromptTokens = []
+        currentCachePosition = 0
         print("[TypeFlow-Debug] LlamaWrapper: Model unloaded from memory.")
     }
     
@@ -128,7 +134,7 @@ cparams.n_ubatch = 512    // Keep micro-batching standard for Apple Silicon
             llama_set_abort_callback(ctx, abortCallback, ptr)
         }
         
-        // 2. Tokenize Prompt
+        // 1.5 Tokenize Prompt & Smart Sequence Matching
         var tokens = [llama_token](repeating: 0, count: Int(llama_n_ctx(ctx)))
         var n_tokens: Int32 = 0
         let promptCount = Int32(prompt.utf8.count)
@@ -141,12 +147,33 @@ cparams.n_ubatch = 512    // Keep micro-batching standard for Apple Silicon
             throw NSError(domain: "TypeFlowLlamaWrapper", code: 4, userInfo: [NSLocalizedDescriptionKey: "Tokenization failed. Prompt too long?"])
         }
         n_tokens = tokenizeResult
+        let newPromptTokens = Array(tokens.prefix(Int(n_tokens)))
         
-        // 3. Initial Prompt Decode
-        var batch = llama_batch_get_one(&tokens, n_tokens)
+        // Find how many tokens match our previously evaluated prompt state
+        var matchingLength = 0
+        for i in 0..<min(previousPromptTokens.count, newPromptTokens.count) {
+            if previousPromptTokens[i] == newPromptTokens[i] {
+                matchingLength += 1
+            } else {
+                break
+            }
+        }
         
-        if llama_decode(ctx, batch) != 0 {
-            throw NSError(domain: "TypeFlowLlamaWrapper", code: 5, userInfo: [NSLocalizedDescriptionKey: "llama_decode failed on prompt prefill"])
+        // Only clear tokens that changed! Do not clear everything.
+        // We drop from `matchingLength` to the end, removing any trailing sequence or generated tokens
+        llama_memory_seq_rm(llama_get_memory(ctx), 0, Int32(matchingLength), -1)
+        
+        self.previousPromptTokens = newPromptTokens
+        self.currentCachePosition = Int32(matchingLength)
+        
+        // 3. Initial Prompt Decode (only the un-cached remainder)
+        if matchingLength < newPromptTokens.count {
+            var remainderTokens = Array(newPromptTokens[matchingLength...])
+            let batch = llama_batch_get_one(&remainderTokens, Int32(remainderTokens.count))
+            
+            if llama_decode(ctx, batch) != 0 {
+                throw NSError(domain: "TypeFlowLlamaWrapper", code: 5, userInfo: [NSLocalizedDescriptionKey: "llama_decode failed on prompt prefill"])
+            }
         }
         
         var generatedText = ""
@@ -166,8 +193,7 @@ cparams.n_ubatch = 512    // Keep micro-batching standard for Apple Silicon
         for _ in 0..<maxTokens {
             // Hardware Cancellation: Check Swift concurrency state
             if Task.isCancelled {
-                print("[TypeFlow-Debug] LlamaWrapper: Task.isCancelled detected. Firing native abort flag.")
-                abortInFlight = true 
+                // DO NOT call llama_kv_cache_seq_rm here! Just exit the thread execution.
                 break
             }
             
@@ -193,13 +219,26 @@ cparams.n_ubatch = 512    // Keep micro-batching standard for Apple Silicon
                 }
             }
             
+            // Explicit string-based stop sequences (fallback for when llama_vocab_is_eog fails)
+            if let stopIdx = generatedText.range(of: "<end_of_turn>")?.lowerBound {
+                generatedText = String(generatedText[..<stopIdx])
+                break
+            }
+            if let stopIdx = generatedText.range(of: "<start_of_turn>")?.lowerBound {
+                generatedText = String(generatedText[..<stopIdx])
+                break
+            }
+            
             // Push token to batch
             var tokenArr = [new_token_id]
-            batch = llama_batch_get_one(&tokenArr, 1)
+            let batch = llama_batch_get_one(&tokenArr, 1)
             
             if llama_decode(ctx, batch) != 0 {
                 break
             }
+            
+            // Append generated tokens to our prefix array so subsequent calls can match them if needed
+            self.previousPromptTokens.append(new_token_id)
             
             n_cur += 1
         }

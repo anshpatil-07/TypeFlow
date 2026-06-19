@@ -3,24 +3,21 @@ import Cocoa
 
 /// Renders prompts for TypeFlow's llama.cpp inference pipeline.
 ///
-/// Prompt format: ChatML (Gemma 4 / OpenHermes / Qwen family).
+/// Prompt format: Gemma Instruct
 /// The model is wrapped in a strict instruct template so it acts as an
-/// autocompleter rather than a document continuer. This prevents the native
-/// echoing behaviour seen when feeding raw text to a base model.
+/// autocompleter rather than a document continuer.
 ///
-/// Structure per request:
-///   <|im_start|>system
+/// Structure per request (Assistant Prefill Trick):
+///   <start_of_turn>user
 ///   [screen context lines + tone/spelling conditioning]
-///   <|im_end|>
-///   <|im_start|>user
+///   <end_of_turn>
+///   <start_of_turn>model
 ///   [textBeforeCaret — the live field text]
-///   <|im_end|>
-///   <|im_start|>assistant
-///   (model generates the inline continuation here)
+///   (model natively generates the inline continuation here)
 ///
-/// The frozen-prefix cache covers the system turn, which is stable across
-/// keystrokes within the same context window. Only the user turn (typed text)
-/// changes per keystroke, keeping the llama KV-prefix reuse intact.
+/// The frozen-prefix cache covers the user turn and the start of the model
+/// turn, which is stable across keystrokes. Only the dynamic user typing
+/// is evaluated per keystroke, maximizing KV-prefix reuse.
 class PromptBuilder {
     static let shared = PromptBuilder()
 
@@ -41,23 +38,13 @@ class PromptBuilder {
     // MARK: - Public API
 
     /// Builds the full prompt passed to the LLM for inline completion.
-    ///
-    /// Structure (Cotabby base-model pattern):
-    ///   [optional preface lines — tone, persona, screen context]
-    ///   [blank line]
-    ///   [caret prefix — trimmed to word boundary]
-    ///
-    /// The preface is character-budgeted so large screen captures never crowd out the live text.
     func buildPrompt(textBeforeCaret: String, liveBuffer: String, systemInstructions: String) -> String {
-        let systemTurn = buildPromptPrefix(systemInstructions: systemInstructions)
-        let userText   = buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer).text
-        // Assemble the full ChatML prompt.
-        // The assistant turn is left open (no <|im_end|>) so the model generates
-        // the inline continuation directly without any wrapper token overhead.
-        return systemTurn + "<|im_start|>user\n" + userText + "<|im_end|>\n<|im_start|>assistant\n"
+        let prefix = buildPromptPrefix(systemInstructions: systemInstructions)
+        let suffix = buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer).text
+        return prefix + suffix
     }
 
-    /// Returns the frozen ChatML system turn for prewarm prefill.
+    /// Returns the frozen system turn for prewarm prefill.
     func buildStaticPrefix(systemInstructions: String) -> String {
         return buildPromptPrefix(systemInstructions: systemInstructions)
     }
@@ -70,30 +57,30 @@ class PromptBuilder {
         print("[TypeFlow-Debug] PromptBuilder: Frozen prefix invalidated.")
     }
 
-    // MARK: - Prefix builder — ChatML system turn (static, cacheable)
+    // MARK: - Prefix builder — Gemma user turn (static, cacheable)
     //
-    // Returns the full <|im_start|>system ... <|im_end|>\n block.
+    // Returns the full <start_of_turn>user ... <end_of_turn>\n<start_of_turn>model\n block.
     // This is byte-for-byte stable across keystrokes within the same context
-    // window, enabling llama KV-prefix reuse for all but the typed suffix.
+    // window, enabling llama KV-prefix reuse for all but the dynamic typed suffix.
 
     func buildPromptPrefix(systemInstructions: String) -> String {
         let british = SettingsManager.shared.useBritishEnglish
         let currentScreen = ScreenContextManager.shared.latestScreenText
         let context = UniversalContextManager.shared.latestContext
 
-        // Stable cache key — invalidate when screen context, tone, spelling, or app changes.
+        // Stable cache key — invalidate when tone, spelling, or app changes.
         var historyHash = ""
         for snap in UniversalContextManager.shared.contextHistory {
-            historyHash += "\(snap.appTitle)|\(snap.windowTitle ?? "nil")|\(snap.screenText.hashValue)|"
+            historyHash += "\(snap.appTitle)|\(snap.windowTitle ?? "nil")|"
         }
-        let stableKey = "\(historyHash)\(currentScreen.hashValue)|\(systemInstructions.hashValue)|\(british)|\(context.appBundleId)"
+        let stableKey = "\(historyHash)\(systemInstructions.hashValue)|\(british)|\(context.appBundleId)"
 
         if frozenPrefixKey == stableKey && !frozenPrefix.isEmpty {
             return frozenPrefix
         }
 
         // ── System turn content ───────────────────────────────────────────────
-        // Build the lines that go inside the system role. We keep them short
+        // Build the lines that go inside the user role. We keep them short
         // and factual — the model treats these as privileged instructions that
         // shape its output without being echoed back.
         var systemLines: [String] = []
@@ -107,38 +94,16 @@ class PromptBuilder {
             systemLines.append(style)
         }
 
-        // Previous window screen context (dual-window: rolling history snapshot)
-        let history = UniversalContextManager.shared.contextHistory
-        if let snap = history.last, !snap.screenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            var text = snap.screenText
-            if text.count > 800 { text = String(text.prefix(800)) }
-            systemLines.append("Nearby on screen: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
-
-        // Current window screen context (live OCR snapshot)
-        let trimmedScreen = currentScreen.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedScreen.isEmpty {
-            var screen = trimmedScreen
-            if screen.count > 800 { screen = String(screen.prefix(800)) }
-            systemLines.append("Nearby on screen: \(screen)")
-        }
-
-        // Clipboard context
-        let recentClip = ClipboardMonitor.shared.recentItems.last ?? ""
-        let trimmedClip = recentClip.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedClip.isEmpty {
-            let clipped = trimmedClip.count > 300 ? String(trimmedClip.prefix(300)) : trimmedClip
-            systemLines.append("On the clipboard: \(clipped)")
-        }
-
-        // Assemble: wrap in ChatML system turn.
+        // Assemble: wrap in Gemma Instruct format.
+        // We put the instructions inside the user turn, and immediately start the model turn
+        // so the subsequent userText is evaluated as the model's own prefill.
         let systemContent = systemLines.joined(separator: "\n")
-        let systemTurn = "<|im_start|>system\n" + systemContent + "<|im_end|>\n"
+        let prefixTurn = "<start_of_turn>user\n" + systemContent + "\n<end_of_turn>\n<start_of_turn>model\n"
 
-        frozenPrefix = systemTurn
+        frozenPrefix = prefixTurn
         frozenPrefixKey = stableKey
-        print("[TypeFlow-Debug] PromptBuilder: System turn frozen (\(systemTurn.count) chars).")
-        return systemTurn
+        print("[TypeFlow-Debug] PromptBuilder: System turn frozen (\(prefixTurn.count) chars).")
+        return prefixTurn
     }
 
     // MARK: - Suffix builder — user turn content (live text, per-keystroke)
@@ -156,6 +121,35 @@ class PromptBuilder {
         if !previousLines.isEmpty {
             suffix += previousLines + "\n"
         }
+        
+        // ── Dynamic Context appended AFTER the static user typing prefix ──
+        
+        // Previous window screen context (dual-window: rolling history snapshot)
+        let history = UniversalContextManager.shared.contextHistory
+        if let snap = history.last, !snap.screenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            var text = snap.screenText
+            if text.count > 800 { text = String(text.prefix(800)) }
+            suffix += "\nNearby on screen: \(text.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+        }
+
+        // Current window screen context (live OCR snapshot)
+        let currentScreen = ScreenContextManager.shared.latestScreenText
+        let trimmedScreen = currentScreen.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedScreen.isEmpty {
+            var screen = trimmedScreen
+            if screen.count > 800 { screen = String(screen.prefix(800)) }
+            suffix += "\nNearby on screen: \(screen)\n"
+        }
+
+        // Clipboard context
+        let recentClip = ClipboardMonitor.shared.recentItems.last ?? ""
+        let trimmedClip = recentClip.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedClip.isEmpty {
+            let clipped = trimmedClip.count > 300 ? String(trimmedClip.prefix(300)) : trimmedClip
+            suffix += "\nOn the clipboard: \(clipped)\n"
+        }
+        
+        suffix += "\n"
 
         // Inline clipboard injection on trigger keyword
         if hasClipboardTrigger(textBeforeCaret: textBeforeCaret) {
@@ -210,7 +204,7 @@ class PromptBuilder {
         return (text: suffix, requiresHealing: requiresHealing)
     }
 
-    // MARK: - Rewrite prompt (instruction-following not needed for base models, but kept for future)
+    // MARK: - Rewrite prompt
 
     func buildRewritePrompt(selectedText: String, systemInstructions: String, toneName: String) -> String {
         let british = SettingsManager.shared.useBritishEnglish
@@ -222,15 +216,13 @@ class PromptBuilder {
             styleRules.append("Use British English spelling.")
         }
         let styleNote = styleRules.isEmpty ? "" : (styleRules.joined(separator: " ") + "\n")
-        // Rewrite uses a minimal ChatML instruct format
-        return "<|im_start|>system\n" +
+        
+        // Rewrite uses a minimal Gemma Instruct format
+        return "<start_of_turn>user\n" +
                "You are a text rewriting assistant. " + styleNote +
-               "Output ONLY the rewritten text. No explanations, no preamble.\n" +
-               "<|im_end|>\n" +
-               "<|im_start|>user\n" +
-               selectedText + "\n" +
-               "<|im_end|>\n" +
-               "<|im_start|>assistant\n"
+               "Output ONLY the rewritten text. No explanations, no preamble.\n\n" +
+               "Text to rewrite:\n" +
+               selectedText + "\n<end_of_turn>\n<start_of_turn>model\n"
     }
 
     // MARK: - Private helpers
