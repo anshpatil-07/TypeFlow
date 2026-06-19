@@ -120,7 +120,7 @@ actor TypeFlowLlamaWrapper {
         prompt: String,
         maxTokens: Int,
         temperature: Float,
-        onPartialRawText: ((String) -> Void)? = nil
+        onPartialRawText: (@Sendable (String) -> Void)? = nil
     ) throws -> String {
         guard isLoaded, let model = model, let ctx = ctx else {
             throw NSError(domain: "TypeFlowLlamaWrapper", code: 3, userInfo: [NSLocalizedDescriptionKey: "Model not loaded"])
@@ -215,6 +215,13 @@ actor TypeFlowLlamaWrapper {
                 pieceBuffer[Int(bytesWritten)] = 0
                 if let pieceString = String(validatingUTF8: pieceBuffer) {
                     generatedText += pieceString
+                    if generatedText.contains("\n") {
+                        if let newlineRange = generatedText.range(of: "\n") {
+                            generatedText = String(generatedText[..<newlineRange.lowerBound])
+                        }
+                        onPartialRawText?(generatedText)
+                        break
+                    }
                     onPartialRawText?(generatedText)
                 }
             }

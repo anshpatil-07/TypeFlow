@@ -25,6 +25,7 @@ class CompletionManager: @unchecked Sendable {
     
     var isSuppressedUntilNextTyping = false
     private var lastBufferSnapshot: String = ""
+    private var generationStartCaretText: String = ""
     
     var isRewrite: Bool {
         return activeRewritePID != nil || activeRewriteText != nil
@@ -228,7 +229,16 @@ class CompletionManager: @unchecked Sendable {
     func onTextChanged(bufferFallback: String = "") {
         if isRewrite || isSmartReply { return }
         print("[TypeFlow-Debug] onTextChanged called")
-
+        
+        if currentCompletion != nil && !currentCompletion!.isEmpty {
+            print("[TypeFlow-Debug] onTextChanged: ignoring clear command because an active completion is present.")
+            return
+        }
+        
+        if workController.isGenerationRunning {
+            print("[TypeFlow-Debug] onTextChanged: ignoring because a background generation is actively running.")
+            return
+        }
         
         if isSuppressedUntilNextTyping {
             let activeLine = bufferFallback.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -250,26 +260,34 @@ class CompletionManager: @unchecked Sendable {
                 let newChar = String(curr.last!)
                 let ghostFirst = String(ghost.prefix(1))
                 if newChar == ghostFirst {
-                    // Match — advance the ghost text by one character
+                    // Match — advance the ghost text by one character using optimistic UI shift
                     let advanced = String(ghost.dropFirst())
                     lastBufferSnapshot = curr
                     if advanced.isEmpty {
                         clearCompletion()
                     } else {
                         currentCompletion = advanced
-                        overlayWindowController?.updateText(advanced)
-                        print("[TypeFlow-Debug] DynamicInvalidation: char '\(newChar)' matched, ghost advanced to '\(advanced)'")
+                        // Estimate single-char pixel width and slide the window right instantly
+                        let font = NSFont.systemFont(ofSize: 13, weight: .regular)
+                        let attrs = [NSAttributedString.Key.font: font]
+                        let shiftPx = (newChar as NSString).size(withAttributes: attrs).width
+                        overlayWindowController?.shiftOverlayX(by: shiftPx)
+                        overlayWindowController?.updateGhostText(advanced)
+                        print("[TypeFlow-Debug] DynamicInvalidation: char '\(newChar)' matched, shifted \(String(format: "%.1f", shiftPx))px, ghost advanced to '\(advanced)'")
                     }
                     return
                 } else {
-                    // Mismatch — dismiss overlay and fall through to debounce a new completion
-                    print("[TypeFlow-Debug] DynamicInvalidation: char '\(newChar)' mismatched ghost '\(ghostFirst)', clearing and re-generating")
+                    // Mismatch — instantly hide overlay and cancel any pending debounce work,
+                    // then fall through so a new completion is generated immediately.
+                    print("[TypeFlow-Debug] DynamicInvalidation: char '\(newChar)' mismatched ghost '\(ghostFirst)', clearing instantly")
                     currentCompletion = nil
+                    workController.cancelAll()
                     overlayWindowController?.updateText("")
                 }
             } else {
                 // Multi-char jump or deletion — just clear
                 currentCompletion = nil
+                workController.cancelAll()
                 overlayWindowController?.updateText("")
             }
         }
@@ -521,13 +539,16 @@ class CompletionManager: @unchecked Sendable {
             effectiveLiveBuffer = keystrokeBuffer
         }
         
-        print("[TypeFlow-Debug] Dispatching LLM generation for: '\(fullActiveLine)'")
+        self.generationStartCaretText = fullActiveLine
         
         // Explicitly cancel any inflight task before creating a new one.
         let workID = workController.currentWorkID
         
         workController.replaceGenerationWork(for: workID) { [weak self] in
             guard let self = self else { return }
+            defer {
+                self.workController.setGenerationFinished()
+            }
             
             // If this task was cancelled while waiting, abort early
             if Task.isCancelled || !self.workController.isCurrent(workID) { return }
@@ -546,7 +567,73 @@ class CompletionManager: @unchecked Sendable {
             let completion = await LLMEngine.shared.generateCompletion(
                 textBeforeCaret: fullActiveLine,
                 liveBuffer: effectiveLiveBuffer,
-                toneProfile: effectiveConfig.toneProfile
+                toneProfile: effectiveConfig.toneProfile,
+                onStream: { [weak self] partialText in
+                    guard let self = self else { return }
+                    guard self.workController.isCurrent(workID) else { return }
+                    
+                    let currentAX = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
+                    let currentLine = !currentAX.isEmpty ? currentAX : (self.accessibilityMonitor?.keystrokeBuffer ?? "")
+                    
+                    let startText = self.generationStartCaretText
+                    var typedSinceStart = ""
+                    if currentLine.hasPrefix(startText) {
+                        typedSinceStart = String(currentLine.dropFirst(startText.count))
+                    }
+                    
+                    var processed = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: partialText)
+                    processed = self.stripMarkdown(processed)
+                    
+                    if !processed.hasPrefix(typedSinceStart) && !typedSinceStart.hasPrefix(processed) {
+                        print("[TypeFlow-Debug] Contradiction detected! processed: '\(processed)', typedSinceStart: '\(typedSinceStart)'. Cancelling task.")
+                        self.workController.cancelAll()
+                        DispatchQueue.main.async {
+                            self.overlayWindowController?.updateText("")
+                            self.onTextChanged(bufferFallback: currentLine)
+                        }
+                        return
+                    }
+                    
+                    let remainder: String
+                    if processed.hasPrefix(typedSinceStart) {
+                        remainder = String(processed.dropFirst(typedSinceStart.count))
+                    } else {
+                        remainder = ""
+                    }
+                    
+                    if remainder.contains("\n") {
+                        if let newlineRange = remainder.range(of: "\n") {
+                            let truncated = String(remainder[..<newlineRange.lowerBound])
+                            self.workController.cancelAll()
+                            DispatchQueue.main.async {
+                                self.currentCompletion = truncated
+                                if !truncated.isEmpty {
+                                    if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
+                                        self.overlayWindowController?.moveOverlay(to: rect)
+                                    }
+                                    self.overlayWindowController?.updateText(truncated)
+                                } else {
+                                    self.overlayWindowController?.updateText("")
+                                }
+                            }
+                            return
+                        }
+                    }
+                    
+                    guard self.workController.isCurrent(workID) else { return }
+                    
+                    DispatchQueue.main.async {
+                        self.currentCompletion = remainder
+                        if !remainder.isEmpty {
+                            if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
+                                self.overlayWindowController?.moveOverlay(to: rect)
+                            }
+                            self.overlayWindowController?.updateText(remainder)
+                        } else {
+                            self.overlayWindowController?.updateText("")
+                        }
+                    }
+                }
             )
             print("[TypeFlow-Debug] Raw model output: '\(completion)'")
             if Task.isCancelled || !self.workController.isCurrent(workID) {
@@ -554,18 +641,48 @@ class CompletionManager: @unchecked Sendable {
                 return 
             }
             
-            var processedCompletion = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: fullActiveLine, rawCompletion: completion)
+            let currentAX = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
+            let currentLine = !currentAX.isEmpty ? currentAX : (self.accessibilityMonitor?.keystrokeBuffer ?? "")
             
-            // Strip markdown formatting
+            let startText = self.generationStartCaretText
+            var typedSinceStart = ""
+            if currentLine.hasPrefix(startText) {
+                typedSinceStart = String(currentLine.dropFirst(startText.count))
+            }
+            
+            var processedCompletion = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: completion)
             processedCompletion = self.stripMarkdown(processedCompletion)
             
-            print("[TypeFlow-Debug] Processed completion (after stripping overlap & markdown): '\(processedCompletion)'")
+            if !processedCompletion.hasPrefix(typedSinceStart) && !typedSinceStart.hasPrefix(processedCompletion) {
+                self.workController.cancelAll()
+                DispatchQueue.main.async {
+                    self.overlayWindowController?.updateText("")
+                    self.onTextChanged(bufferFallback: currentLine)
+                }
+                return
+            }
+            
+            let remainder: String
+            if processedCompletion.hasPrefix(typedSinceStart) {
+                remainder = String(processedCompletion.dropFirst(typedSinceStart.count))
+            } else {
+                remainder = ""
+            }
+            
+            var finalRemainder = remainder
+            if finalRemainder.contains("\n") {
+                if let newlineRange = finalRemainder.range(of: "\n") {
+                    finalRemainder = String(finalRemainder[..<newlineRange.lowerBound])
+                }
+            }
+            
+            print("[TypeFlow-Debug] Processed completion (after stripping overlap & markdown): '\(finalRemainder)'")
             
             if Task.isCancelled || !self.workController.isCurrent(workID) { return }
             
             DispatchQueue.main.async {
-                self.currentCompletion = processedCompletion
-                if !processedCompletion.isEmpty {
+                self.currentCompletion = finalRemainder
+                if !finalRemainder.isEmpty {
                     UsageStatsManager.shared.recordCompletionShown()
                     if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
                         print("[TypeFlow-Debug] Telling overlay to move to caret rect: \(rect)")
@@ -573,8 +690,8 @@ class CompletionManager: @unchecked Sendable {
                     } else {
                         print("[TypeFlow-Debug] Caret rect was nil, NOT moving overlay!")
                     }
-                    print("[TypeFlow-Debug] Telling overlay to update text to: '\(processedCompletion)'")
-                    self.overlayWindowController?.updateText(processedCompletion)
+                    print("[TypeFlow-Debug] Telling overlay to update text to: '\(finalRemainder)'")
+                    self.overlayWindowController?.updateText(finalRemainder)
                 } else {
                     print("[TypeFlow-Debug] Processed completion was empty, hiding overlay.")
                     self.overlayWindowController?.updateText("")
@@ -855,38 +972,52 @@ class CompletionManager: @unchecked Sendable {
             let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
             
             // ── Word-by-Word Tab Acceptance ────────────────────────────────────
-            // Extract the next "word segment" — stop at the first space, period,
-            // underscore, left-paren, colon, or slash so the user can step through
-            // multi-word completions one token at a time.
-            let wordBreakChars: Set<Character> = [" ", ".", "_", "(", ")", ":", "/", ",", ";", "{", "}"]
-            var breakIndex = completion.endIndex
-            var foundBreak = false
+            // Break at spaces, punctuation AND newlines. If the completion *starts*
+            // with \n, accept only the newline so the user steps through line by line.
+            let wordBreakChars: Set<Character> = [" ", ".", "_", "(", ")", ":", "/", ",", ";", "{", "}", "\n"]
             
-            for (idx, ch) in completion.enumerated() {
-                if idx > 0 && wordBreakChars.contains(ch) {
-                    breakIndex = completion.index(completion.startIndex, offsetBy: idx)
-                    foundBreak = true
-                    break
+            let wordToInsert: String
+            let remainder: String
+            
+            if completion.hasPrefix("\n") {
+                // Leading newline — accept just the newline, keep the rest
+                wordToInsert = "\n"
+                let after = String(completion.dropFirst())
+                remainder = after
+            } else {
+                var breakIndex = completion.endIndex
+                var foundBreak = false
+                for (idx, ch) in completion.enumerated() {
+                    if idx > 0 && wordBreakChars.contains(ch) {
+                        breakIndex = completion.index(completion.startIndex, offsetBy: idx)
+                        foundBreak = true
+                        break
+                    }
                 }
+                wordToInsert = String(completion[..<breakIndex])
+                remainder = foundBreak ? String(completion[breakIndex...]) : ""
             }
-            
-            let wordToInsert = String(completion[..<breakIndex])
-            let remainder = foundBreak ? String(completion[breakIndex...]) : ""
             
             TypingHistoryManager.shared.logSentence(activeLine + completion)
             
             // Inject the first segment only.
             // CRITICAL: Use injectCharByChar (direct Unicode synthetic keystroke) NOT inject() here.
-            // inject() uses clipboard + Cmd+V which has a race condition: the 50ms restore fires
-            // before the host app processes the paste, injecting the OLD clipboard contents instead.
-            // injectCharByChar posts virtualKey=0 with the Unicode payload directly — no clipboard touch.
             UsageStatsManager.shared.recordCompletionAccepted(charactersSaved: completion.count)
             TextInjector.shared.injectCharByChar(text: wordToInsert)
             
             if !remainder.isEmpty {
-                // Keep the remaining ghost text visible
+                // Optimistic UI: instantly advance the overlay X by the pixel width of the
+                // accepted word so it tracks the caret without waiting for an AX round-trip.
+                let font = NSFont.systemFont(ofSize: 13, weight: .regular)
+                let attrs = [NSAttributedString.Key.font: font]
+                let shiftPx = (wordToInsert as NSString).size(withAttributes: attrs).width
                 currentCompletion = remainder
-                print("[TypeFlow-Debug] Word-by-word Tab: injected '\(wordToInsert)', remainder '\(remainder)' still shown")
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    self.overlayWindowController?.shiftOverlayX(by: shiftPx)
+                    self.overlayWindowController?.updateGhostText(remainder)
+                }
+                print("[TypeFlow-Debug] Word-by-word Tab: injected '\(wordToInsert)', shifted \(String(format: "%.1f", shiftPx))px, remainder '\(remainder)' still shown")
             } else {
                 clearCompletion()
             }
@@ -1003,6 +1134,7 @@ class CompletionManager: @unchecked Sendable {
 final class SuggestionWorkController: @unchecked Sendable {
     private var debounceTask: Task<Void, Never>?
     private var generationTask: Task<Void, Never>?
+    private var isGenTaskActive = false
     private var latestWorkID: UInt64 = 0
     private let lock = NSLock()
 
@@ -1012,6 +1144,18 @@ final class SuggestionWorkController: @unchecked Sendable {
         return latestWorkID
     }
 
+    var isGenerationRunning: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isGenTaskActive
+    }
+
+    func setGenerationFinished() {
+        lock.lock()
+        isGenTaskActive = false
+        lock.unlock()
+    }
+
     @discardableResult
     func replaceDebouncedWork(
         delayMilliseconds: Int,
@@ -1019,7 +1163,7 @@ final class SuggestionWorkController: @unchecked Sendable {
     ) -> UInt64 {
         lock.lock()
         debounceTask?.cancel()
-        generationTask?.cancel()
+        // Do NOT cancel generationTask here to allow continuous background generation.
         latestWorkID &+= 1
         let workID = latestWorkID
         lock.unlock()
@@ -1043,7 +1187,13 @@ final class SuggestionWorkController: @unchecked Sendable {
     ) {
         lock.lock()
         generationTask?.cancel()
+        isGenTaskActive = true
         let task = Task {
+            defer {
+                lock.lock()
+                self.isGenTaskActive = false
+                lock.unlock()
+            }
             if Task.isCancelled || !isCurrent(workID) { return }
             await operation()
         }
@@ -1057,6 +1207,7 @@ final class SuggestionWorkController: @unchecked Sendable {
         generationTask?.cancel()
         debounceTask = nil
         generationTask = nil
+        isGenTaskActive = false
         latestWorkID &+= 1
         lock.unlock()
     }

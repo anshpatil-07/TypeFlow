@@ -46,15 +46,13 @@ struct SmartReplyOptionsView: View {
     }
 }
 
-// ─── Rewrite Mode Selector Bar ────────────────────────────────────────────────
-// Shown as soon as the hotkey fires, before LLM responds.
 struct RewriteModeBarView: View {
     var body: some View {
         HStack(spacing: 6) {
             Text("Rewrite as:")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.secondary)
-
+ 
             RewriteModeButton(label: "✦ Professional", color: Color(hue: 0.62, saturation: 0.7, brightness: 0.85)) {
                 CompletionManager.shared.triggerRewrite(mode: .professional)
             }
@@ -101,7 +99,6 @@ struct RewriteModeButton: View {
     }
 }
 
-// ─── Normal Ghost-Text Overlay ────────────────────────────────────────────────
 struct CompletionOverlayView: View {
     @ObservedObject var model: CompletionModel
 
@@ -128,7 +125,6 @@ struct CompletionOverlayView: View {
                     .font(.system(size: 13, weight: .regular))
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 } else if model.isRewrite {
-                    // Show mode selector while waiting for selection to arrive
                     RewriteModeBarView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 }
@@ -175,7 +171,6 @@ struct CompletionOverlayView: View {
     }
 }
 
-// ─── Custom Window Subclass ──────────────────────────────────────────────────
 class OverlayWindow: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -188,7 +183,7 @@ class OverlayWindow: NSPanel {
                 DispatchQueue.main.async {
                     _ = CompletionManager.shared.handleTabPressed()
                 }
-                return true // swallow
+                return true
             }
         }
         if keyCode == 53 { // Escape
@@ -197,7 +192,7 @@ class OverlayWindow: NSPanel {
                 DispatchQueue.main.async {
                     CompletionManager.shared.clearCompletion()
                 }
-                return true // swallow
+                return true
             }
         }
         return super.performKeyEquivalent(with: event)
@@ -223,108 +218,568 @@ class OverlayWindow: NSPanel {
     }
 }
 
-// ─── Custom Content View for High-Performance Ghost Text ─────────────────────
-class OverlayContentView: NSView {
-    let textLayer = CATextLayer()
-    var hostingView: NSHostingView<CompletionOverlayView>?
+// ─── Support Models from Cotabby ──────────────────────────────────────────
+
+enum CaretGeometryQuality: String, Equatable {
+    case exact
+    case derived
+    case estimated
+    case layoutEstimated
+}
+
+struct ResolvedFieldStyle: Equatable {
+    let fontName: String?
+    let fontPointSize: CGFloat?
+    let colorHex: String?
     
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        self.wantsLayer = true
-        self.layer?.cornerRadius = 5
-        self.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.92).cgColor
-        self.layer?.shadowColor = NSColor.black.cgColor
-        self.layer?.shadowOpacity = 0.14
-        self.layer?.shadowRadius = 4
-        self.layer?.shadowOffset = CGSize(width: 0, height: -1)
-        
-        textLayer.font = NSFont.systemFont(ofSize: 13, weight: .regular)
-        textLayer.fontSize = 13
-        textLayer.foregroundColor = NSColor.secondaryLabelColor.cgColor
-        textLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
-        textLayer.alignmentMode = .left
-        
-        // Disable implicit animations
-        textLayer.actions = [
-            "contents": NSNull(),
-            "bounds": NSNull(),
-            "position": NSNull(),
-            "string": NSNull(),
-            "hidden": NSNull()
-        ]
-        
-        self.layer?.addSublayer(textLayer)
+    var isEmpty: Bool {
+        fontName == nil && colorHex == nil
     }
+}
+
+struct SuggestionOverlayGeometry: Equatable {
+    let caretRect: CGRect
+    let inputFrameRect: CGRect?
+    let caretQuality: CaretGeometryQuality
+    let isCaretAtEndOfLine: Bool
+    let observedCharWidth: CGFloat?
+    let isRightToLeft: Bool
+    let focusChangeSequence: UInt64
+    let focusedInputIdentityKey: UInt64
+    let isCorrection: Bool
+    let resolvedFieldStyle: ResolvedFieldStyle?
     
-    required init?(coder: NSCoder) { fatalError() }
-    
-    override func layout() {
-        super.layout()
-        // Center text vertically.
-        // For a 13pt font, 16pt height is appropriate.
-        textLayer.frame = CGRect(x: 6, y: (bounds.height - 16) / 2 - 1, width: bounds.width - 12, height: 16)
-        hostingView?.frame = bounds
+    func withCaretRect(_ caretRect: CGRect) -> SuggestionOverlayGeometry {
+        SuggestionOverlayGeometry(
+            caretRect: caretRect,
+            inputFrameRect: inputFrameRect,
+            caretQuality: caretQuality,
+            isCaretAtEndOfLine: isCaretAtEndOfLine,
+            observedCharWidth: observedCharWidth,
+            isRightToLeft: isRightToLeft,
+            focusChangeSequence: focusChangeSequence,
+            focusedInputIdentityKey: focusedInputIdentityKey,
+            isCorrection: isCorrection,
+            resolvedFieldStyle: resolvedFieldStyle
+        )
     }
-    
-    func configure(text: String, isSpellCorrection: Bool, isRewrite: Bool, isLoading: Bool, isSmartReply: Bool, model: CompletionModel) {
-        let useSwiftUI = isRewrite || isLoading || isSmartReply
-        
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        if useSwiftUI {
-            textLayer.isHidden = true
-            self.layer?.backgroundColor = NSColor.clear.cgColor
-            self.layer?.shadowOpacity = 0
-            
-            if hostingView == nil {
-                let hv = NSHostingView(rootView: CompletionOverlayView(model: model))
-                hv.frame = self.bounds
-                self.addSubview(hv)
-                self.hostingView = hv
+}
+
+struct GhostFontSizeStabilizer {
+    private var sessionKey: UInt64?
+    private var minCaretHeight: CGFloat?
+
+    mutating func stabilizedCaretHeight(_ caretHeight: CGFloat, focusSessionKey: UInt64) -> CGFloat {
+        guard caretHeight > 0 else {
+            return caretHeight
+        }
+
+        if sessionKey != focusSessionKey {
+            sessionKey = focusSessionKey
+            minCaretHeight = caretHeight
+            return caretHeight
+        }
+
+        let stabilized = min(caretHeight, minCaretHeight ?? caretHeight)
+        minCaretHeight = stabilized
+        return stabilized
+    }
+}
+
+enum GhostFontMetrics {
+    static let absoluteMinimumPointSize: CGFloat = 9
+
+    struct FieldFontMetrics: Equatable {
+        let pointSize: CGFloat
+        let ascender: CGFloat
+        let descender: CGFloat
+    }
+
+    static func pointSize(
+        caretHeight: CGFloat,
+        fieldMetrics: FieldFontMetrics?,
+        fallbackRatio: CGFloat,
+        minimum: CGFloat,
+        maximum: CGFloat,
+        sizeMultiplier: CGFloat = 1
+    ) -> CGFloat {
+        let ratio = metricRatio(fieldMetrics) ?? fallbackRatio
+        let autoSize = min(max(minimum, caretHeight * ratio), maximum)
+        return max(absoluteMinimumPointSize, autoSize * sizeMultiplier)
+    }
+
+    private static func metricRatio(_ metrics: FieldFontMetrics?) -> CGFloat? {
+        guard let metrics, metrics.pointSize > 0 else {
+            return nil
+        }
+
+        let glyphBoxHeight = metrics.ascender - metrics.descender
+        guard glyphBoxHeight > 0 else {
+            return nil
+        }
+
+        return metrics.pointSize / glyphBoxHeight
+    }
+}
+
+struct GhostSuggestionLayout: Equatable {
+    struct Line: Equatable, Identifiable {
+        let index: Int
+        let text: String
+        let leadingIndent: CGFloat
+        let showsKeycap: Bool
+
+        var id: Int { index }
+    }
+
+    let lines: [Line]
+    let panelOriginX: CGFloat
+    let lineHeight: CGFloat
+    let topLineCenterOffsetFromCaret: CGFloat
+    let isRightToLeft: Bool
+
+    private enum Metrics {
+        static let caretGap: CGFloat = 4
+        static let inputHorizontalPadding: CGFloat = 8
+        static let fallbackScreenMargin: CGFloat = 16
+        static let minimumLineWidth: CGFloat = 48
+        static let estimatedKeycapAndSpacingWidth: CGFloat = 36
+        static let lineHeightMultiplier: CGFloat = 1.25
+    }
+
+    private struct TextMeasure {
+        let fontSize: CGFloat
+        let observedCharWidth: CGFloat?
+        let font: NSFont?
+    }
+
+    static func make(
+        text: String,
+        geometry: SuggestionOverlayGeometry,
+        fontSize: CGFloat,
+        visibleFrame: CGRect,
+        showsAcceptanceHint: Bool = false,
+        font: NSFont? = nil
+    ) -> GhostSuggestionLayout {
+        let normalizedText = normalizedDisplayText(text)
+        let lineHeight = ceil(fontSize * Metrics.lineHeightMultiplier)
+        let isRTL = geometry.isRightToLeft
+        let measure = TextMeasure(
+            fontSize: fontSize,
+            observedCharWidth: geometry.observedCharWidth,
+            font: font
+        )
+        let keycapReservation = showsAcceptanceHint ? Metrics.estimatedKeycapAndSpacingWidth : 0
+        let usableFrame = usableTextFrame(
+            geometry: geometry,
+            visibleFrame: visibleFrame
+        )
+
+        let firstLineAnchor: CGFloat
+        let firstLineBudget: CGFloat
+        if isRTL {
+            firstLineAnchor = min(
+                max(geometry.caretRect.minX - Metrics.caretGap, usableFrame.minX),
+                usableFrame.maxX
+            )
+            firstLineBudget = max(
+                0,
+                firstLineAnchor - usableFrame.minX - keycapReservation
+            )
+        } else {
+            firstLineAnchor = min(
+                max(geometry.caretRect.maxX + Metrics.caretGap, usableFrame.minX),
+                usableFrame.maxX
+            )
+            firstLineBudget = max(
+                0,
+                usableFrame.maxX - firstLineAnchor - keycapReservation
+            )
+        }
+
+        let overflowBudget = max(
+            Metrics.minimumLineWidth,
+            usableFrame.width - keycapReservation
+        )
+
+        let singleLineFits = !normalizedText.contains("\n")
+            && measuredWidth(of: normalizedText, using: measure) <= firstLineBudget
+
+        if singleLineFits {
+            return GhostSuggestionLayout(
+                lines: [
+                    Line(index: 0, text: normalizedText, leadingIndent: 0, showsKeycap: showsAcceptanceHint)
+                ],
+                panelOriginX: firstLineAnchor,
+                lineHeight: lineHeight,
+                topLineCenterOffsetFromCaret: 0,
+                isRightToLeft: isRTL
+            )
+        }
+
+        let panelOriginX = isRTL ? usableFrame.maxX : usableFrame.minX
+        var remainingText = normalizedText
+        var rawLines: [(text: String, leadingIndent: CGFloat)] = []
+        var startsBelowCaret = false
+
+        if firstLineBudget >= Metrics.minimumLineWidth {
+            let split = splitPrefix(
+                from: remainingText,
+                maxWidth: firstLineBudget,
+                using: measure
+            )
+            if !split.line.isEmpty {
+                let indent: CGFloat
+                if isRTL {
+                    indent = panelOriginX - firstLineAnchor
+                } else {
+                    indent = firstLineAnchor - panelOriginX
+                }
+                rawLines.append((split.line, indent))
+                remainingText = split.remainder
+            } else {
+                startsBelowCaret = true
             }
         } else {
-            textLayer.isHidden = false
-            self.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.92).cgColor
-            self.layer?.shadowOpacity = 0.14
-            
-            hostingView?.removeFromSuperview()
-            hostingView = nil
-            
-            textLayer.string = text
-            textLayer.foregroundColor = isSpellCorrection ? NSColor.systemOrange.cgColor : NSColor.secondaryLabelColor.cgColor
+            startsBelowCaret = true
         }
-        CATransaction.commit()
+
+        while !remainingText.isEmpty {
+            let split = splitPrefix(
+                from: remainingText,
+                maxWidth: overflowBudget,
+                using: measure
+            )
+            guard !split.line.isEmpty else {
+                break
+            }
+
+            rawLines.append((split.line, 0))
+            remainingText = split.remainder
+        }
+
+        if rawLines.isEmpty {
+            rawLines.append((normalizedText, 0))
+            startsBelowCaret = true
+        }
+
+        let finalLines = rawLines.enumerated().map { offset, rawLine in
+            Line(
+                index: offset,
+                text: rawLine.text,
+                leadingIndent: rawLine.leadingIndent,
+                showsKeycap: showsAcceptanceHint && offset == rawLines.count - 1
+            )
+        }
+
+        return GhostSuggestionLayout(
+            lines: finalLines,
+            panelOriginX: panelOriginX,
+            lineHeight: lineHeight,
+            topLineCenterOffsetFromCaret: startsBelowCaret ? -lineHeight : 0,
+            isRightToLeft: isRTL
+        )
+    }
+
+    func panelFrame(for contentSize: CGSize, caretRect: CGRect) -> CGRect {
+        let topLineCenterY = caretRect.midY + topLineCenterOffsetFromCaret
+        let originY = topLineCenterY - contentSize.height + (lineHeight / 2)
+        let originX = isRightToLeft ? panelOriginX - contentSize.width : panelOriginX
+
+        return CGRect(
+            origin: CGPoint(x: originX, y: originY),
+            size: contentSize
+        )
+    }
+
+    private static func usableTextFrame(
+        geometry: SuggestionOverlayGeometry,
+        visibleFrame: CGRect
+    ) -> CGRect {
+        if let inputFrame = geometry.inputFrameRect?.standardized,
+           inputFrame.width > Metrics.minimumLineWidth {
+            let minX = max(
+                inputFrame.minX + Metrics.inputHorizontalPadding,
+                visibleFrame.minX + Metrics.fallbackScreenMargin
+            )
+            let maxX = min(
+                inputFrame.maxX - Metrics.inputHorizontalPadding,
+                visibleFrame.maxX - Metrics.fallbackScreenMargin
+            )
+
+            if maxX - minX > Metrics.minimumLineWidth {
+                return CGRect(
+                    x: minX,
+                    y: inputFrame.minY,
+                    width: maxX - minX,
+                    height: inputFrame.height
+                )
+            }
+        }
+
+        let fallbackMinX: CGFloat
+        let fallbackMaxX: CGFloat
+        if geometry.isRightToLeft {
+            fallbackMinX = visibleFrame.minX + Metrics.fallbackScreenMargin
+            fallbackMaxX = geometry.caretRect.minX - Metrics.caretGap
+        } else {
+            fallbackMinX = geometry.caretRect.maxX + Metrics.caretGap
+            fallbackMaxX = visibleFrame.maxX - Metrics.fallbackScreenMargin
+        }
+
+        return CGRect(
+            x: fallbackMinX,
+            y: geometry.caretRect.minY,
+            width: max(Metrics.minimumLineWidth, fallbackMaxX - fallbackMinX),
+            height: geometry.caretRect.height
+        )
+    }
+
+    static func renderedWidth(of text: String, font: NSFont) -> CGFloat {
+        let display = normalizedDisplayText(text)
+        guard !display.isEmpty else { return 0 }
+        return (display as NSString).size(withAttributes: [.font: font]).width
+    }
+
+    private static func normalizedDisplayText(_ text: String) -> String {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let normalizedLines = lines.map { line -> String in
+            let words = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard !words.isEmpty else { return "" }
+            let joined = words.joined(separator: " ")
+            return line.first?.isWhitespace == true ? " \(joined)" : joined
+        }
+        return normalizedLines.joined(separator: "\n")
+    }
+
+    private static func splitPrefix(
+        from text: String,
+        maxWidth: CGFloat,
+        using measure: TextMeasure
+    ) -> (line: String, remainder: String) {
+        let source = text.trimmingCharacters(in: .whitespaces)
+        guard !source.isEmpty else {
+            return ("", "")
+        }
+
+        let safeMaxWidth = max(maxWidth, Metrics.minimumLineWidth)
+
+        if let newlineIndex = source.firstIndex(of: "\n") {
+            return splitAtNewline(
+                source: source,
+                newlineIndex: newlineIndex,
+                maxWidth: maxWidth,
+                using: measure
+            )
+        }
+
+        if measuredWidth(of: source, using: measure) <= safeMaxWidth {
+            return (source, "")
+        }
+
+        let characters = Array(source)
+        var lastWhitespaceBreak: Int?
+
+        for endIndex in characters.indices {
+            let prefix = String(characters[...endIndex])
+            if characters[endIndex].isWhitespace {
+                lastWhitespaceBreak = endIndex + 1
+            }
+
+            if measuredWidth(of: prefix, using: measure) > safeMaxWidth {
+                if let breakIndex = lastWhitespaceBreak, breakIndex > 0 {
+                    let line = String(characters[..<breakIndex])
+                        .trimmingCharacters(in: .whitespaces)
+                    let remainder = String(characters[breakIndex...])
+                        .trimmingCharacters(in: .whitespaces)
+                    return (line, remainder)
+                }
+
+                let splitIndex = max(endIndex, 1)
+                let line = String(characters[..<splitIndex])
+                    .trimmingCharacters(in: .whitespaces)
+                let remainder = String(characters[splitIndex...])
+                    .trimmingCharacters(in: .whitespaces)
+                return (line, remainder)
+            }
+        }
+
+        return (text.trimmingCharacters(in: .whitespaces), "")
+    }
+
+    private static func splitAtNewline(
+        source: String,
+        newlineIndex: String.Index,
+        maxWidth: CGFloat,
+        using measure: TextMeasure
+    ) -> (line: String, remainder: String) {
+        let safeMaxWidth = max(maxWidth, Metrics.minimumLineWidth)
+        let segment = String(source[..<newlineIndex]).trimmingCharacters(in: .whitespaces)
+        let afterIndex = source.index(after: newlineIndex)
+        let afterNewline = afterIndex < source.endIndex
+            ? String(source[afterIndex...]).trimmingCharacters(in: .whitespaces)
+            : ""
+
+        guard !segment.isEmpty else {
+            return splitPrefix(from: afterNewline, maxWidth: maxWidth, using: measure)
+        }
+
+        if measuredWidth(of: segment, using: measure) <= safeMaxWidth {
+            return (segment, afterNewline)
+        }
+
+        let widthSplit = splitPrefix(from: segment, maxWidth: maxWidth, using: measure)
+        let combined: String
+        if widthSplit.remainder.isEmpty {
+            combined = afterNewline
+        } else if afterNewline.isEmpty {
+            combined = widthSplit.remainder
+        } else {
+            combined = widthSplit.remainder + "\n" + afterNewline
+        }
+        return (widthSplit.line, combined)
+    }
+
+    private static func measuredWidth(of text: String, using measure: TextMeasure) -> CGFloat {
+        if let observedCharWidth = measure.observedCharWidth, observedCharWidth > 0 {
+            return CGFloat((text as NSString).length) * observedCharWidth
+        }
+
+        return (text as NSString).size(withAttributes: [
+            .font: measure.font ?? NSFont.systemFont(ofSize: measure.fontSize)
+        ]).width
+    }
+}
+
+struct GhostSuggestionView: View {
+    @Environment(\.colorScheme) var colorScheme
+    let layout: GhostSuggestionLayout
+    let fontSize: CGFloat
+    let fieldFont: NSFont?
+    let fieldColor: Color?
+    let customColor: Color?
+    let keycapLabel: String?
+    let opacity: Double
+    let isCorrection: Bool
+
+    var ghostColor: Color {
+        if isCorrection {
+            return (colorScheme == .dark
+                ? Color(red: 0.45, green: 0.85, blue: 0.45)
+                : Color(red: 0.15, green: 0.60, blue: 0.20)).opacity(opacity)
+        }
+        let baseColor = customColor
+            ?? fieldColor
+            ?? Color.secondary
+        return baseColor.opacity(opacity)
+    }
+
+    private var resolvedFont: Font {
+        if let fieldFont {
+            return Font(fieldFont as CTFont)
+        }
+        return .system(size: fontSize)
+    }
+
+    var body: some View {
+        let alignment: HorizontalAlignment = layout.isRightToLeft ? .trailing : .leading
+        VStack(alignment: alignment, spacing: 0) {
+            ForEach(layout.lines) { line in
+                let showsKeycap = line.showsKeycap && keycapLabel != nil
+                HStack(alignment: .firstTextBaseline, spacing: showsKeycap ? 6 : 0) {
+                    if layout.isRightToLeft, showsKeycap, let keycapLabel {
+                        GhostKeycap(label: keycapLabel)
+                    }
+
+                    Text(line.text)
+                        .font(resolvedFont)
+                        .foregroundStyle(ghostColor)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: true)
+
+                    if !layout.isRightToLeft, showsKeycap, let keycapLabel {
+                        GhostKeycap(label: keycapLabel)
+                    }
+                }
+                .padding(layout.isRightToLeft ? .trailing : .leading, line.leadingIndent)
+                .fixedSize(horizontal: true, vertical: true)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: true)
+    }
+}
+
+private struct GhostKeycap: View {
+    @Environment(\.colorScheme) var colorScheme
+    let label: String
+
+    var textColor: Color {
+        colorScheme == .dark ? Color(white: 0.65) : Color(white: 0.45)
+    }
+
+    var bgColor: Color {
+        colorScheme == .dark ? Color(white: 0.18) : Color(white: 0.95)
+    }
+
+    var borderColor: Color {
+        colorScheme == .dark ? Color(white: 0.3) : Color(white: 0.8)
+    }
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 10, weight: .medium, design: .rounded))
+            .foregroundStyle(textColor)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(bgColor)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(borderColor, lineWidth: 1)
+            )
+            .fixedSize(horizontal: true, vertical: true)
     }
 }
 
 // ─── Window Controller ────────────────────────────────────────────────────────
+
 class OverlayWindowController: NSWindowController {
     var overlayWindow: OverlayWindow!
     private let completionModel = CompletionModel()
-    private var overlayContentView: OverlayContentView!
     private var lastCaretRect = CGRect.zero
     private var localEventMonitor: Any?
 
-    init() {
-        overlayContentView = OverlayContentView(frame: CGRect(x: 0, y: 0, width: 360, height: 28))
+    private var inlineHostingView: NSHostingView<GhostSuggestionView>?
+    private var completionOverlayHostingView: NSHostingView<CompletionOverlayView>?
+    
+    private var ghostFontStabilizer = GhostFontSizeStabilizer()
+    private var lastInlineRenderFont: NSFont?
+    private var lastInlineFontSize: CGFloat?
+    private var lastGeometry: SuggestionOverlayGeometry?
+    
+    private var lastFocusedPID: pid_t = 0
+    private var focusSessionKey: UInt64 = 0
 
+    init() {
         overlayWindow = OverlayWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 360, height: 32),
+            contentRect: CGRect(x: 0, y: 0, width: 10, height: 10),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
-            defer: false
+            defer: true
         )
-        overlayWindow.level = .screenSaver
+        overlayWindow.isReleasedWhenClosed = false
         overlayWindow.backgroundColor = .clear
-        // Rewrite mode bar needs mouse events; ghost-text overlay ignores them
-        overlayWindow.ignoresMouseEvents = false
         overlayWindow.isOpaque = false
-        overlayWindow.contentView = overlayContentView
+        overlayWindow.ignoresMouseEvents = true
+        overlayWindow.hasShadow = false
+        overlayWindow.animationBehavior = .none
+        overlayWindow.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 2)
         overlayWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
         super.init(window: overlayWindow)
 
-        // Setup local event monitor to intercept Tab/Escape when TypeFlow is key
         localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let keyCode = event.keyCode
             if keyCode == 48 { // Tab
@@ -333,7 +788,7 @@ class OverlayWindowController: NSWindowController {
                     DispatchQueue.main.async {
                         _ = CompletionManager.shared.handleTabPressed()
                     }
-                    return nil // swallow
+                    return nil
                 }
             }
             if keyCode == 53 { // Escape
@@ -342,7 +797,7 @@ class OverlayWindowController: NSWindowController {
                     DispatchQueue.main.async {
                         CompletionManager.shared.clearCompletion()
                     }
-                    return nil // swallow
+                    return nil
                 }
             }
             return event
@@ -360,55 +815,255 @@ class OverlayWindowController: NSWindowController {
     }
 
     func moveOverlay(to rect: CGRect) {
-        lastCaretRect = rect
-        repositionWindow()
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.lastCaretRect = rect
+            self.updateFocusSessionKeyIfNeeded()
+            self.repositionWindow()
+        }
+    }
+
+    private func updateFocusSessionKeyIfNeeded() {
+        let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        if currentPID != lastFocusedPID {
+            lastFocusedPID = currentPID
+            focusSessionKey = focusSessionKey &+ 1
+        }
     }
 
     private func repositionWindow() {
         guard !completionModel.text.isEmpty || completionModel.isLoading || (!completionModel.smartReplyOptions.isEmpty && completionModel.isSmartReply) else { return }
 
-        // Rewrite mode bar is wider and taller (but not when actually generating/showing spinner)
-        let isRewriteBar = completionModel.isLoading && completionModel.isRewrite && completionModel.text != "Generating..."
-        let isSmartReplyList = completionModel.isSmartReply && !completionModel.smartReplyOptions.isEmpty
-        let windowWidth: CGFloat
-        let windowHeight: CGFloat
+        let useSwiftUIOverlay = completionModel.isRewrite || completionModel.isSmartReply || completionModel.isLoading
+        
+        if useSwiftUIOverlay {
+            // Rewrite, smart reply, or loading spinner mode
+            let isRewriteBar = completionModel.isLoading && completionModel.isRewrite && completionModel.text != "Generating..."
+            let isSmartReplyList = completionModel.isSmartReply && !completionModel.smartReplyOptions.isEmpty
+            let windowWidth: CGFloat
+            let windowHeight: CGFloat
 
-        if isSmartReplyList {
-            windowHeight = CGFloat(30 + (completionModel.smartReplyOptions.count * 32))
-            windowWidth = 360
-        } else if isRewriteBar {
-            windowHeight = 36
-            windowWidth = 360
+            if isSmartReplyList {
+                windowHeight = CGFloat(30 + (completionModel.smartReplyOptions.count * 32))
+                windowWidth = 360
+            } else if isRewriteBar {
+                windowHeight = 36
+                windowWidth = 360
+            } else {
+                windowHeight = 28
+                let font = NSFont.systemFont(ofSize: 13, weight: .regular)
+                let attributes = [NSAttributedString.Key.font: font]
+                let measureText = (completionModel.isLoading && (completionModel.isRewrite || completionModel.isSmartReply)) ? "Rewriting..." : (completionModel.isLoading ? "Rewriting…" : completionModel.text)
+                var w = (measureText as NSString).size(withAttributes: attributes).width + 20
+                if completionModel.isRewrite && !completionModel.isLoading { w += 68 }
+                windowWidth = w
+            }
+
+            let displayBounds = CGDisplayBounds(CGMainDisplayID())
+            let displayHeight = displayBounds.height
+            
+            var flippedY = displayHeight - lastCaretRect.origin.y - lastCaretRect.height - windowHeight - 4
+            
+            if flippedY < 0 {
+                flippedY = displayHeight - lastCaretRect.origin.y + 4
+                print("[TypeFlow-Debug] OverlayWindowController: Window flipped above caret due to bounds")
+            }
+
+            let newFrame = CGRect(
+                x: lastCaretRect.origin.x,
+                y: flippedY,
+                width: windowWidth,
+                height: windowHeight
+            )
+            
+            if completionOverlayHostingView == nil {
+                let hv = NSHostingView(rootView: CompletionOverlayView(model: completionModel))
+                completionOverlayHostingView = hv
+            }
+            
+            if overlayWindow.contentView !== completionOverlayHostingView {
+                overlayWindow.contentView = completionOverlayHostingView
+            }
+            
+            overlayWindow.ignoresMouseEvents = !((completionModel.isLoading && completionModel.isRewrite) || (completionModel.isSmartReply && !completionModel.smartReplyOptions.isEmpty))
+            overlayWindow.setFrame(newFrame, display: true)
         } else {
-            windowHeight = 28
-            let font = NSFont.systemFont(ofSize: 13, weight: .regular)
-            let attributes = [NSAttributedString.Key.font: font]
-            let measureText = (completionModel.isLoading && (completionModel.isRewrite || completionModel.isSmartReply)) ? "Rewriting..." : (completionModel.isLoading ? "Rewriting…" : completionModel.text)
-            var w = (measureText as NSString).size(withAttributes: attributes).width + 20
-            if completionModel.isRewrite && !completionModel.isLoading { w += 68 }
-            windowWidth = w
+            // Normal inline ghost text rendering mode
+            var resolvedStyle: ResolvedFieldStyle? = nil
+            var inputFrame: CGRect? = nil
+            
+            let systemWideElement = AXUIElementCreateSystemWide()
+            var focusedElement: CFTypeRef?
+            if AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success,
+               let element = focusedElement {
+                let axElement = element as! AXUIElement
+                resolvedStyle = resolveFieldStyle(for: axElement)
+                
+                var frameVal: CFTypeRef?
+                if AXUIElementCopyAttributeValue(axElement, "AXFrame" as CFString, &frameVal) == .success {
+                    let axValue = frameVal as! AXValue
+                    var rect = CGRect.zero
+                    if AXValueGetValue(axValue, .cgRect, &rect) {
+                        inputFrame = rect
+                    }
+                }
+            }
+            
+            let displayBounds = CGDisplayBounds(CGMainDisplayID())
+            let displayHeight = displayBounds.height
+            
+            let appKitCaretRect = CGRect(
+                x: lastCaretRect.origin.x,
+                y: displayHeight - lastCaretRect.origin.y - lastCaretRect.height,
+                width: lastCaretRect.width,
+                height: lastCaretRect.height
+            )
+            
+            var appKitInputFrame: CGRect? = nil
+            if let frame = inputFrame {
+                appKitInputFrame = CGRect(
+                    x: frame.origin.x,
+                    y: displayHeight - frame.origin.y - frame.height,
+                    width: frame.width,
+                    height: frame.height
+                )
+            }
+            
+            let geom = SuggestionOverlayGeometry(
+                caretRect: appKitCaretRect,
+                inputFrameRect: appKitInputFrame,
+                caretQuality: .exact,
+                isCaretAtEndOfLine: true,
+                observedCharWidth: nil,
+                isRightToLeft: false,
+                focusChangeSequence: focusSessionKey,
+                focusedInputIdentityKey: focusSessionKey,
+                isCorrection: completionModel.isSpellCorrection,
+                resolvedFieldStyle: resolvedStyle
+            )
+            
+            lastGeometry = geom
+            
+            let stabilizedCaretHeight = ghostFontStabilizer.stabilizedCaretHeight(
+                geom.caretRect.height,
+                focusSessionKey: geom.focusedInputIdentityKey
+            )
+            
+            let referenceFieldFont = resolvedStyle.flatMap { fieldFont(from: $0) }
+            let fontSize = resolvedGhostFontSize(
+                forCaretHeight: stabilizedCaretHeight,
+                caretQuality: geom.caretQuality,
+                fieldFont: referenceFieldFont
+            )
+            
+            let renderFont = referenceFieldFont.flatMap { NSFont(name: $0.fontName, size: fontSize) }
+            lastInlineFontSize = fontSize
+            lastInlineRenderFont = renderFont
+            
+            let layout = GhostSuggestionLayout.make(
+                text: completionModel.text,
+                geometry: geom,
+                fontSize: fontSize,
+                visibleFrame: targetScreenVisibleFrame(for: geom.caretRect),
+                showsAcceptanceHint: false,
+                font: renderFont
+            )
+            
+            let rootView = GhostSuggestionView(
+                layout: layout,
+                fontSize: fontSize,
+                fieldFont: renderFont,
+                fieldColor: fieldGhostColor(from: geom.resolvedFieldStyle),
+                customColor: nil,
+                keycapLabel: nil,
+                opacity: 0.75,
+                isCorrection: geom.isCorrection
+            )
+            
+            if let existing = inlineHostingView {
+                existing.rootView = rootView
+            } else {
+                let fresh = NSHostingView(rootView: rootView)
+                inlineHostingView = fresh
+            }
+            
+            if overlayWindow.contentView !== inlineHostingView {
+                overlayWindow.contentView = inlineHostingView
+            }
+            
+            overlayWindow.ignoresMouseEvents = true
+            
+            inlineHostingView?.layoutSubtreeIfNeeded()
+            let contentSize = inlineHostingView?.fittingSize ?? .zero
+            let frame = layout.panelFrame(for: contentSize, caretRect: geom.caretRect)
+            
+            guard AXHelper_rectHasFiniteComponents(frame) else {
+                return
+            }
+            overlayWindow.setFrame(frame.integral, display: true)
         }
+    }
 
-        let displayBounds = CGDisplayBounds(CGMainDisplayID())
-        let displayHeight = displayBounds.height
-        
-        // Default: draw below the caret
-        var flippedY = displayHeight - lastCaretRect.origin.y - lastCaretRect.height - windowHeight - 4
-        
-        // If it goes below the screen (flippedY < 0), draw it ABOVE the caret instead
-        if flippedY < 0 {
-            flippedY = displayHeight - lastCaretRect.origin.y + 4
-            print("[TypeFlow-Debug] OverlayWindowController: Window flipped above caret due to bounds")
+    func shiftOverlayX(by points: CGFloat) {
+        guard overlayWindow.isVisible else { return }
+        lastCaretRect.origin.x += points
+        if var geom = lastGeometry {
+            lastGeometry = geom.withCaretRect(geom.caretRect.offsetBy(dx: points, dy: 0))
         }
+        var f = overlayWindow.frame
+        f.origin.x += points
+        overlayWindow.setFrameOrigin(f.origin)
+    }
 
-        let newFrame = CGRect(
-            x: lastCaretRect.origin.x,
-            y: flippedY,
-            width: windowWidth,
-            height: windowHeight
-        )
-        print("[TypeFlow-Debug] OverlayWindowController frame: \(newFrame) text: '\(completionModel.text)'")
-        overlayWindow.setFrame(newFrame, display: true)
+    func updateGhostText(_ newText: String) {
+        completionModel.text = newText
+        
+        guard !newText.isEmpty else {
+            overlayWindow.orderOut(nil)
+            return
+        }
+        
+        if var geom = lastGeometry {
+            let font = lastInlineRenderFont ?? NSFont.systemFont(ofSize: lastInlineFontSize ?? 13)
+            let layout = GhostSuggestionLayout.make(
+                text: newText,
+                geometry: geom,
+                fontSize: lastInlineFontSize ?? 13,
+                visibleFrame: targetScreenVisibleFrame(for: geom.caretRect),
+                showsAcceptanceHint: false,
+                font: font
+            )
+            
+            let rootView = GhostSuggestionView(
+                layout: layout,
+                fontSize: lastInlineFontSize ?? 13,
+                fieldFont: font,
+                fieldColor: fieldGhostColor(from: geom.resolvedFieldStyle),
+                customColor: nil,
+                keycapLabel: nil,
+                opacity: 0.75,
+                isCorrection: geom.isCorrection
+            )
+            
+            if let existing = inlineHostingView {
+                existing.rootView = rootView
+            } else {
+                let fresh = NSHostingView(rootView: rootView)
+                inlineHostingView = fresh
+            }
+            
+            if overlayWindow.contentView !== inlineHostingView {
+                overlayWindow.contentView = inlineHostingView
+            }
+            
+            inlineHostingView?.layoutSubtreeIfNeeded()
+            let contentSize = inlineHostingView?.fittingSize ?? .zero
+            let frame = layout.panelFrame(for: contentSize, caretRect: geom.caretRect)
+            
+            if AXHelper_rectHasFiniteComponents(frame) {
+                overlayWindow.setFrame(frame.integral, display: true)
+            }
+        }
     }
 
     func updateText(_ newText: String,
@@ -427,10 +1082,6 @@ class OverlayWindowController: NSWindowController {
             self.completionModel.smartReplyOptions = smartReplyOptions
             self.completionModel.text = newText
             
-            self.overlayContentView.configure(text: newText, isSpellCorrection: isSpellCorrection, isRewrite: isRewrite, isLoading: isLoading, isSmartReply: isSmartReply, model: self.completionModel)
-            
-            // Allow mouse events only for the rewrite mode bar and smart reply list
-            self.overlayWindow.ignoresMouseEvents = !((isLoading && isRewrite) || (isSmartReply && !smartReplyOptions.isEmpty))
             if newText.isEmpty && !isLoading && smartReplyOptions.isEmpty {
                 self.overlayWindow.orderOut(nil)
             } else {
@@ -438,5 +1089,173 @@ class OverlayWindowController: NSWindowController {
                 self.overlayWindow.orderFront(nil)
             }
         }
+    }
+
+    // ─── Geometry and Style Resolution ────────────────────────────────────────
+
+    private func resolveFieldStyle(for element: AXUIElement) -> ResolvedFieldStyle? {
+        var selectedRangeRef: CFTypeRef?
+        var caretLocation = 0
+        var textLength = 1
+        
+        var valueRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success {
+            if let str = valueRef as? String {
+                textLength = str.count
+            } else if let attrStr = valueRef as? NSAttributedString {
+                textLength = attrStr.length
+            }
+        }
+        
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success {
+            let rangeValue = selectedRangeRef as! AXValue
+            var range = CFRange(location: 0, length: 0)
+            AXValueGetValue(rangeValue, .cfRange, &range)
+            caretLocation = range.location
+        }
+        
+        guard textLength > 0 else { return nil }
+        let clampedCaret = min(max(caretLocation - 1, 0), textLength - 1)
+        let candidateIndices = clampedCaret == 0 ? [0] : [clampedCaret, 0]
+        
+        for index in candidateIndices {
+            var parameter: AXValue?
+            var cfRange = CFRange(location: index, length: 1)
+            parameter = AXValueCreate(.cfRange, &cfRange)
+            
+            if let parameter = parameter {
+                var value: CFTypeRef?
+                let result = AXUIElementCopyParameterizedAttributeValue(element, "AXAttributedStringForRange" as CFString, parameter, &value)
+                if result == .success, let val = value as? NSAttributedString, val.length > 0 {
+                    let attributes = val.attributes(at: 0, effectiveRange: nil)
+                    var fontName: String?
+                    var fontPointSize: CGFloat?
+                    if let font = attributes[.font] as? NSFont {
+                        fontName = font.fontName
+                        fontPointSize = font.pointSize
+                    } else if let fontInfo = attributes[NSAttributedString.Key("AXFont")] as? [String: Any] {
+                        fontName = fontInfo["AXFontName"] as? String
+                        if let size = fontInfo["AXFontSize"] as? NSNumber {
+                            fontPointSize = CGFloat(size.doubleValue)
+                        }
+                    }
+                    
+                    var colorHex: String?
+                    if let nsColor = attributes[.foregroundColor] as? NSColor {
+                        colorHex = hexString(from: nsColor)
+                    } else if let foreground = attributes[.foregroundColor],
+                              CFGetTypeID(foreground as CFTypeRef) == CGColor.typeID {
+                        let cgColor = foreground as! CGColor
+                        if let nsColor = NSColor(cgColor: cgColor) {
+                            colorHex = hexString(from: nsColor)
+                        }
+                    }
+                    
+                    let style = ResolvedFieldStyle(fontName: fontName, fontPointSize: fontPointSize, colorHex: colorHex)
+                    if !style.isEmpty {
+                        return style
+                    }
+                }
+            }
+        }
+        return nil
+    }
+    
+    private func hexString(from color: NSColor) -> String? {
+        guard let rgb = color.usingColorSpace(.sRGB) else { return nil }
+        let r = Int(round(rgb.redComponent * 255))
+        let g = Int(round(rgb.greenComponent * 255))
+        let b = Int(round(rgb.blueComponent * 255))
+        return String(format: "%02X%02X%02X", r, g, b)
+    }
+
+    private func fieldGhostColor(from style: ResolvedFieldStyle?) -> Color? {
+        guard let hex = style?.colorHex,
+              let nsColor = nsColor(fromHex: hex)?.usingColorSpace(.sRGB)
+        else {
+            return nil
+        }
+
+        let luminance = 0.299 * nsColor.redComponent
+            + 0.587 * nsColor.greenComponent
+            + 0.114 * nsColor.blueComponent
+        guard luminance > 0.06, luminance < 0.94 else {
+            return nil
+        }
+
+        return Color(nsColor: nsColor)
+    }
+
+    private func nsColor(fromHex hex: String) -> NSColor? {
+        let cleaned = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int = UInt64()
+        Scanner(string: cleaned).scanHexInt64(&int)
+        let a, r, g, b: UInt64
+        switch cleaned.count {
+        case 3:
+            (a, r, g, b) = (255, (int >> 8) * 17, (int >> 4 & 0xF) * 17, (int & 0xF) * 17)
+        case 6:
+            (a, r, g, b) = (255, int >> 16, int >> 8 & 0xFF, int & 0xFF)
+        case 8:
+            (a, r, g, b) = (int >> 24, int >> 16 & 0xFF, int >> 8 & 0xFF, int & 0xFF)
+        default:
+            return nil
+        }
+        return NSColor(
+            red: CGFloat(r) / 255,
+            green: CGFloat(g) / 255,
+            blue: CGFloat(b) / 255,
+            alpha: CGFloat(a) / 255
+        )
+    }
+
+    private func fieldFont(from style: ResolvedFieldStyle) -> NSFont? {
+        guard let name = style.fontName else { return nil }
+        return NSFont(name: name, size: style.fontPointSize ?? 12)
+    }
+
+    private func resolvedGhostFontSize(
+        forCaretHeight caretHeight: CGFloat,
+        caretQuality: CaretGeometryQuality,
+        fieldFont: NSFont?
+    ) -> CGFloat {
+        let qualityCap: CGFloat = caretQuality == .estimated ? 16 : 24
+        
+        let fieldMetrics = fieldFont.map {
+            GhostFontMetrics.FieldFontMetrics(
+                pointSize: $0.pointSize,
+                ascender: $0.ascender,
+                descender: $0.descender
+            )
+        }
+        
+        let heightToUse = caretHeight <= 0 ? 18 : caretHeight
+        return GhostFontMetrics.pointSize(
+            caretHeight: heightToUse,
+            fieldMetrics: fieldMetrics,
+            fallbackRatio: 0.78,
+            minimum: 14,
+            maximum: qualityCap,
+            sizeMultiplier: 1.0
+        )
+    }
+
+    private func targetScreenVisibleFrame(for caretRect: CGRect) -> CGRect {
+        let midpoint = CGPoint(x: caretRect.midX, y: caretRect.midY)
+
+        if let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(midpoint) }) {
+            return screen.visibleFrame
+        }
+
+        if let screen = NSScreen.screens.first(where: { $0.frame.intersects(caretRect) }) {
+            return screen.visibleFrame
+        }
+
+        return NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 800, height: 600)
+    }
+
+    private func AXHelper_rectHasFiniteComponents(_ rect: CGRect) -> Bool {
+        rect.origin.x.isFinite && rect.origin.y.isFinite
+            && rect.size.width.isFinite && rect.size.height.isFinite
     }
 }

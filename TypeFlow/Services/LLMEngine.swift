@@ -58,7 +58,12 @@ actor LLMEngine {
         resetInactivityTimer()
     }
 
-    func generateCompletion(textBeforeCaret: String, liveBuffer: String, toneProfile: ToneProfile) async -> String {
+    func generateCompletion(
+        textBeforeCaret: String,
+        liveBuffer: String,
+        toneProfile: ToneProfile,
+        onStream: (@Sendable (String) -> Void)? = nil
+    ) async -> String {
         print("[TypeFlow-Debug] LLMEngine: generateCompletion called with tone \(toneProfile.name)")
         
         await loadModelIfNeeded()
@@ -81,7 +86,10 @@ actor LLMEngine {
             let output = try await runtime.generate(
                 prompt: fullPrompt,
                 maxTokens: toneProfile.maxTokens,
-                temperature: Float(toneProfile.temperature)
+                temperature: Float(toneProfile.temperature),
+                onPartialRawText: { partialText in
+                    onStream?(partialText)
+                }
             )
             
             var trimmedResult = output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
