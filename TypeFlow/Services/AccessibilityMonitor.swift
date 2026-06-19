@@ -430,22 +430,29 @@ class AccessibilityMonitor {
                     let obj = unmanaged.takeUnretainedValue()
                     
                     if type == .keyDown || type == .keyUp {
-                        // Rewrite Shortcut
-                        if obj.matchesRewriteShortcut(event: event) {
-                            if type == .keyDown {
-                                print("[TypeFlow] Intercepted Rewrite Shortcut (keyDown)")
-                                DispatchQueue.main.async { CompletionManager.shared.triggerRewrite() }
-                            }
-                            return nil
-                        }
+                        // Only evaluate shortcut matches when at least one modifier key is
+                        // held. A bare alphanumeric keypress (e.g. plain 'r') must NEVER
+                        // be swallowed here regardless of the configured shortcut string.
+                        let hasAnyModifier = !flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty
                         
-                        // Smart Reply Shortcut
-                        if obj.matchesSmartReplyShortcut(event: event) {
-                            if type == .keyDown {
-                                print("[TypeFlow] Intercepted Smart Reply Shortcut (keyDown)")
-                                DispatchQueue.main.async { CompletionManager.shared.triggerSmartReply() }
+                        if hasAnyModifier {
+                            // Rewrite Shortcut
+                            if obj.matchesRewriteShortcut(event: event) {
+                                if type == .keyDown {
+                                    print("[TypeFlow] Intercepted Rewrite Shortcut (keyDown)")
+                                    DispatchQueue.main.async { CompletionManager.shared.triggerRewrite() }
+                                }
+                                return nil
                             }
-                            return nil
+                            
+                            // Smart Reply Shortcut
+                            if obj.matchesSmartReplyShortcut(event: event) {
+                                if type == .keyDown {
+                                    print("[TypeFlow] Intercepted Smart Reply Shortcut (keyDown)")
+                                    DispatchQueue.main.async { CompletionManager.shared.triggerSmartReply() }
+                                }
+                                return nil
+                            }
                         }
                     }
                     
@@ -1078,6 +1085,11 @@ class AccessibilityMonitor {
         let hasShift = flags.contains(.maskShift)
         let hasCommand = flags.contains(.maskCommand)
         
+        // Safety: never match if the event carries no modifier at all
+        if !hasOption && !hasControl && !hasShift && !hasCommand {
+            return false
+        }
+        
         if reqOption != hasOption || reqControl != hasControl || reqShift != hasShift || reqCommand != hasCommand {
             return false
         }
@@ -1124,6 +1136,11 @@ class AccessibilityMonitor {
         let hasControl = flags.contains(.maskControl)
         let hasShift = flags.contains(.maskShift)
         let hasCommand = flags.contains(.maskCommand)
+        
+        // Safety: never match if the event carries no modifier at all
+        if !hasOption && !hasControl && !hasShift && !hasCommand {
+            return false
+        }
         
         if reqOption != hasOption || reqControl != hasControl || reqShift != hasShift || reqCommand != hasCommand {
             return false
