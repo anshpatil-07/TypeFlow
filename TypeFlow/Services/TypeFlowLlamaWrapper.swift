@@ -219,13 +219,14 @@ actor TypeFlowLlamaWrapper {
                 }
             }
             
-            // Explicit string-based stop sequences (fallback for when llama_vocab_is_eog fails)
-            if let stopIdx = generatedText.range(of: "<end_of_turn>")?.lowerBound {
-                generatedText = String(generatedText[..<stopIdx])
-                break
-            }
-            if let stopIdx = generatedText.range(of: "<start_of_turn>")?.lowerBound {
-                generatedText = String(generatedText[..<stopIdx])
+            // Explicit string-based stop sequences for base models (FIM boundary markers).
+            // Do NOT scan for <end_of_turn> or <start_of_turn> — those are Gemma Instruct chat
+            // template tokens and will never appear in base model output; scanning for them on
+            // every token wastes CPU and causes spurious truncations if the model emits angle brackets.
+            if generatedText.contains("<|endoftext|>") {
+                if let stopIdx = generatedText.range(of: "<|endoftext|>")?.lowerBound {
+                    generatedText = String(generatedText[..<stopIdx])
+                }
                 break
             }
             

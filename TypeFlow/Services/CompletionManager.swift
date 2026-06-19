@@ -7,6 +7,10 @@ class CompletionManager: @unchecked Sendable {
     weak var accessibilityMonitor: AccessibilityMonitor?
     weak var overlayWindowController: OverlayWindowController?
     
+    var isOverlayVisible: Bool {
+        return overlayWindowController?.overlayWindow.isVisible ?? false
+    }
+    
     private let workController = SuggestionWorkController()
     
     /// Tracks the timestamp of the most recent keystroke for adaptive debounce.
@@ -384,18 +388,16 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // Adaptive debounce: if the user is typing rapidly (<200ms between keystrokes),
-        // scale up the delay to 0.6s to keep the GPU fully asleep until they pause.
-        // Otherwise fall back to the baseline 0.4s.
+        // Adaptive debounce: if typing rapidly (<150ms between keystrokes) use 150ms,
+        // otherwise drop to 50ms so the first word gets a prediction nearly instantly.
         let now = Date()
         let keystrokeInterval = now.timeIntervalSince(lastKeystrokeTime)
         lastKeystrokeTime = now
-        let debounceInterval: TimeInterval = 0.6
-        print("[TypeFlow-Debug] Adaptive debounce: keystroke interval \(String(format: "%.0f", keystrokeInterval * 1000))ms → using \(debounceInterval)s")
+        let debounceInterval: TimeInterval = keystrokeInterval < 0.15 ? 0.15 : 0.05
+        print("[TypeFlow-Debug] Adaptive debounce: keystroke interval \(String(format: "%.0f", keystrokeInterval * 1000))ms → using \(String(format: "%.0f", debounceInterval * 1000))ms")
         
         NotificationCenter.default.post(name: Notification.Name("UserDidType"), object: nil)
         
-        // Debounce: 150-300ms ensures user has paused before spinning up GPU inference.
         workController.replaceDebouncedWork(delayMilliseconds: Int(debounceInterval * 1000)) { [weak self] _ in
             print("[TypeFlow-Debug] Debounce timer fired!")
             self?.triggerGeneration()
@@ -820,7 +822,7 @@ class CompletionManager: @unchecked Sendable {
             print("[TypeFlow-Debug] Accept spell correction: injecting \(deleteCount) backspaces and typing '\(spellCorrection.corrected)'")
             UsageStatsManager.shared.recordSpellCorrection()
             TextInjector.shared.injectBackspaces(count: deleteCount)
-            TextInjector.shared.inject(text: spellCorrection.corrected)
+            TextInjector.shared.injectCharByChar(text: spellCorrection.corrected)
             clearCompletion()
             
             let correctedLine = String(activeLine.dropLast(deleteCount)) + spellCorrection.corrected
@@ -873,9 +875,13 @@ class CompletionManager: @unchecked Sendable {
             
             TypingHistoryManager.shared.logSentence(activeLine + completion)
             
-            // Inject the first segment only
+            // Inject the first segment only.
+            // CRITICAL: Use injectCharByChar (direct Unicode synthetic keystroke) NOT inject() here.
+            // inject() uses clipboard + Cmd+V which has a race condition: the 50ms restore fires
+            // before the host app processes the paste, injecting the OLD clipboard contents instead.
+            // injectCharByChar posts virtualKey=0 with the Unicode payload directly — no clipboard touch.
             UsageStatsManager.shared.recordCompletionAccepted(charactersSaved: completion.count)
-            TextInjector.shared.inject(text: wordToInsert)
+            TextInjector.shared.injectCharByChar(text: wordToInsert)
             
             if !remainder.isEmpty {
                 // Keep the remaining ghost text visible
