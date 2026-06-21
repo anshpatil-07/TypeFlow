@@ -866,7 +866,7 @@ class OverlayWindowController: NSWindowController {
             
             if flippedY < 0 {
                 flippedY = displayHeight - lastCaretRect.origin.y + 4
-                print("[TypeFlow-Debug] OverlayWindowController: Window flipped above caret due to bounds")
+                // Suppressed: print("[TypeFlow-Debug] OverlayWindowController: Window flipped above caret due to bounds")
             }
 
             let newFrame = CGRect(
@@ -1072,7 +1072,7 @@ class OverlayWindowController: NSWindowController {
                     isLoading: Bool = false,
                     isSmartReply: Bool = false,
                     smartReplyOptions: [String] = []) {
-        print("[TypeFlow-Debug] OverlayWindowController updateText '\(newText)' spell:\(isSpellCorrection) rewrite:\(isRewrite) loading:\(isLoading) smartReply:\(isSmartReply)")
+        // Suppressed: print("[TypeFlow-Debug] OverlayWindowController updateText '\(newText.prefix(40))' ...")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.completionModel.isSpellCorrection = isSpellCorrection
