@@ -235,7 +235,7 @@ class CompletionManager: @unchecked Sendable {
     
     func onTextChanged(bufferFallback: String = "") {
         if isRewrite || isSmartReply { return }
-        print("[TypeFlow-Debug] onTextChanged called")
+        // Suppressed: print("[TypeFlow-Debug] onTextChanged called")
         
         if currentCompletion != nil && !currentCompletion!.isEmpty {
             print("[TypeFlow-Debug] onTextChanged: ignoring clear command because an active completion is present.")
@@ -280,13 +280,13 @@ class CompletionManager: @unchecked Sendable {
                         let shiftPx = (newChar as NSString).size(withAttributes: attrs).width
                         overlayWindowController?.shiftOverlayX(by: shiftPx)
                         overlayWindowController?.updateGhostText(advanced)
-                        print("[TypeFlow-Debug] DynamicInvalidation: char '\(newChar)' matched, shifted \(String(format: "%.1f", shiftPx))px, ghost advanced to '\(advanced)'")
+                        // Suppressed: print("[TypeFlow-Debug] DynamicInvalidation matched...")
                     }
                     return
                 } else {
                     // Mismatch — mark as stale and cancel any pending debounce work,
                     // then fall through so a new completion is generated immediately.
-                    print("[TypeFlow-Debug] DynamicInvalidation: char '\(newChar)' mismatched ghost '\(ghostFirst)', dimming instantly")
+                    // Suppressed: print("[TypeFlow-Debug] DynamicInvalidation mismatched...")
                     currentCompletion = nil
                     workController.cancelAll()
                     overlayWindowController?.updateGhostText(ghost, isStale: true)
@@ -422,7 +422,7 @@ class CompletionManager: @unchecked Sendable {
         let keystrokeInterval = now.timeIntervalSince(lastKeystrokeTime)
         lastKeystrokeTime = now
         let debounceInterval: TimeInterval = keystrokeInterval < 0.15 ? 0.15 : 0.05
-        print("[TypeFlow-Debug] Adaptive debounce: keystroke interval \(String(format: "%.0f", keystrokeInterval * 1000))ms → using \(String(format: "%.0f", debounceInterval * 1000))ms")
+        // Suppressed: print("[TypeFlow-Debug] Adaptive debounce...")
         
         NotificationCenter.default.post(name: Notification.Name("UserDidType"), object: nil)
         
@@ -637,7 +637,7 @@ class CompletionManager: @unchecked Sendable {
                     }
                 }
             )
-            print("[TypeFlow-Debug] Raw model output: '\(completion)'")
+            print("[TypeFlow-Debug] Raw model output: '\(completion.prefix(40))'")
             if Task.isCancelled || !self.workController.isCurrent(workID) {
                 print("[TypeFlow-Debug] Task was cancelled or stale work ID, ignoring output.")
                 return 
@@ -678,7 +678,7 @@ class CompletionManager: @unchecked Sendable {
                 }
             }
             
-            print("[TypeFlow-Debug] Processed completion (after stripping overlap & markdown): '\(finalRemainder)'")
+            print("[TypeFlow-Debug] Processed completion: '\(finalRemainder.prefix(40))'")
             
             if Task.isCancelled || !self.workController.isCurrent(workID) { return }
             
@@ -687,15 +687,15 @@ class CompletionManager: @unchecked Sendable {
                 if !finalRemainder.isEmpty {
                     UsageStatsManager.shared.recordCompletionShown()
                     if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
-                        print("[TypeFlow-Debug] Telling overlay to move to caret rect: \(rect)")
+                        // Suppressed: print("[TypeFlow-Debug] Telling overlay to move to caret rect: \(rect)")
                         self.overlayWindowController?.moveOverlay(to: rect)
                     } else {
-                        print("[TypeFlow-Debug] Caret rect was nil, NOT moving overlay!")
+                        // Suppressed: print("[TypeFlow-Debug] Caret rect was nil, NOT moving overlay!")
                     }
-                    print("[TypeFlow-Debug] Telling overlay to update text to: '\(finalRemainder)'")
+                    // Suppressed: print("[TypeFlow-Debug] Telling overlay to update text to: '\(finalRemainder)'")
                     self.overlayWindowController?.updateText(finalRemainder)
                 } else {
-                    print("[TypeFlow-Debug] Processed completion was empty, hiding overlay.")
+                    // Suppressed: print("[TypeFlow-Debug] Processed completion was empty, hiding overlay.")
                     self.overlayWindowController?.updateText("")
                 }
             }

@@ -269,7 +269,7 @@ class AccessibilityMonitor {
                     }
                     
                     if type == .keyDown {
-                        print("[TypeFlow] Observer keyDown detected: keyCode=\(keyCode)")
+                        // Suppressed: print("[TypeFlow] Observer keyDown detected: keyCode=\(keyCode)")
                         
                         // Pass event processing to the background immediately.
                         // The tap callback MUST return without blocking — copy the event
@@ -324,7 +324,7 @@ class AccessibilityMonitor {
                                         CompletionManager.shared.overlayWindowController?.shiftOverlayX(by: shiftPx)
                                         CompletionManager.shared.overlayWindowController?.updateGhostText(advanced)
                                     }
-                                    print("[TypeFlow-Debug] AccessibilityMonitor matching: eaten '\(typedCharString)', shifted and updated to '\(advanced)'")
+                                    // Suppressed: print("[TypeFlow-Debug] AccessibilityMonitor matching...")
                                 }
                                 return // Match processed!
                             }
@@ -355,7 +355,7 @@ class AccessibilityMonitor {
                                 }
                                 
                                 if let oldText = CompletionManager.shared.currentCompletion {
-                                    print("[TypeFlow-Debug] AccessibilityMonitor diverging on Space/Return: dimming overlay")
+                                    // Suppressed: print("[TypeFlow-Debug] AccessibilityMonitor diverging on Space/Return: dimming overlay")
                                     CompletionManager.shared.currentCompletion = nil
                                     DispatchQueue.main.async {
                                         CompletionManager.shared.overlayWindowController?.updateGhostText(oldText, isStale: true)
@@ -371,7 +371,7 @@ class AccessibilityMonitor {
                             let isPunctuation = (keyCode == 43 || keyCode == 47)
                             
                             if let oldText = CompletionManager.shared.currentCompletion {
-                                print("[TypeFlow-Debug] AccessibilityMonitor diverging: dimming overlay")
+                                // Suppressed: print("[TypeFlow-Debug] AccessibilityMonitor diverging: dimming overlay")
                                 CompletionManager.shared.currentCompletion = nil
                                 DispatchQueue.main.async {
                                     CompletionManager.shared.overlayWindowController?.updateGhostText(oldText, isStale: true)
@@ -624,7 +624,7 @@ class AccessibilityMonitor {
                 AXValueGetValue(axValue, .cgRect, &rect)
                 
                 if rect != .zero {
-                    print("[TypeFlow-Debug] Browser Caret found via AXTextMarker: \(rect)")
+                    // Suppressed: print("[TypeFlow-Debug] Browser Caret found via AXTextMarker: \(rect)")
                     return rect
                 }
             }
@@ -714,7 +714,7 @@ class AccessibilityMonitor {
 
     func clearKeystrokeBuffer() {
         keystrokeBuffer = ""
-        print("[TypeFlow-Debug] Keystroke buffer cleared")
+        // Suppressed: print("[TypeFlow-Debug] Keystroke buffer cleared")
     }
     
     private func capKeystrokeBuffer() {
@@ -810,7 +810,7 @@ class AccessibilityMonitor {
             }
             if !keystrokeBuffer.isEmpty {
                 keystrokeBuffer.removeLast()
-                print("[TypeFlow-Debug] Backspace: buffer is now '\(keystrokeBuffer)'")
+                // Suppressed: print("[TypeFlow-Debug] Backspace: buffer is now '\(keystrokeBuffer)'")
             }
             return
         } else {
@@ -838,7 +838,7 @@ class AccessibilityMonitor {
             if !filtered.isEmpty {
                 keystrokeBuffer += filtered
                 capKeystrokeBuffer()
-                print("[TypeFlow-Debug] Typed: '\(filtered)', buffer is now '\(keystrokeBuffer)'")
+                // Suppressed: print("[TypeFlow-Debug] Typed: '\(filtered)', buffer is now '\(keystrokeBuffer)'")
             }
         }
     }
@@ -847,7 +847,7 @@ class AccessibilityMonitor {
         guard let axElement = getFocusedElement() else {
             print("[TypeFlow-Debug] AX: No focused element found")
             if !keystrokeBuffer.isEmpty {
-                print("[TypeFlow-Debug] AX: Using CGEvent keystroke buffer (no focused element): '\(keystrokeBuffer.suffix(50))'")
+                print("[TypeFlow-Debug] AX: Using buffer: '\(keystrokeBuffer.suffix(40))' (Len: \(keystrokeBuffer.count))")
                 return keystrokeBuffer
             }
             return nil
@@ -879,7 +879,7 @@ class AccessibilityMonitor {
                         let textBeforeCursor = String(fullText[..<sliceEnd])
                         let result = String(textBeforeCursor.suffix(1000))
                         if !result.isEmpty {
-                            print("[TypeFlow-Debug] AX: text extracted via kAXValue (\(safeCursorIndex) UTF-16 chars): '\(result.suffix(50))'")
+                            print("[TypeFlow-Debug] AX kAXValue: '\(result.suffix(40))' (Len: \(result.count))")
                             return result
                         }
                     }
@@ -893,7 +893,7 @@ class AccessibilityMonitor {
            let selectedText = selectedTextRef as? String,
            !selectedText.isEmpty {
             let result = String(selectedText.suffix(1000))
-            print("[TypeFlow-Debug] AX: text extracted via kAXSelectedTextAttribute: '\(result.suffix(50))'")
+            print("[TypeFlow-Debug] AX kAXSelectedText: '\(result.suffix(40))' (Len: \(result.count))")
             return result
         }
         
@@ -914,7 +914,7 @@ class AccessibilityMonitor {
                 if AXUIElementCopyParameterizedAttributeValue(axElement, kAXStringForRangeParameterizedAttribute as CFString, axFetchRange, &stringRef) == .success,
                    let string = stringRef as? String,
                    !string.isEmpty {
-                    print("[TypeFlow-Debug] AX: text extracted via kAXStringForRangeParameterizedAttribute: '\(string.suffix(50))'")
+                    print("[TypeFlow-Debug] AX kAXStringForRange: '\(string.suffix(40))' (Len: \(string.count))")
                     return string
                 }
             }
@@ -922,7 +922,7 @@ class AccessibilityMonitor {
         
         // --- Fallback 4: CGEvent keystroke buffer ---
         if !keystrokeBuffer.isEmpty {
-            print("[TypeFlow-Debug] AX: all AX queries failed. Using CGEvent keystroke buffer: '\(keystrokeBuffer.suffix(50))'")
+            print("[TypeFlow-Debug] AX Fallback Buffer: '\(keystrokeBuffer.suffix(40))' (Len: \(keystrokeBuffer.count))")
             return keystrokeBuffer
         }
         
