@@ -32,6 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         if let monitor = accessibilityMonitor, let overlay = overlayWindowController {
             CompletionManager.shared.setup(accessibilityMonitor: monitor, overlayWindowController: overlay)
+            PredictionCoordinator.shared.setup(overlayWindowController: overlay, accessibilityMonitor: monitor)
         }
         
         // Delay start by 1 second: AXIsProcessTrusted() can return false immediately

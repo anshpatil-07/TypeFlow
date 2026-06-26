@@ -11,8 +11,6 @@ class CompletionManager: @unchecked Sendable {
         return overlayWindowController?.overlayWindow.isVisible ?? false
     }
     
-    private let workController = SuggestionWorkController()
-    
     /// Tracks the timestamp of the most recent keystroke for adaptive debounce.
     private var lastKeystrokeTime: Date = .distantPast
     
@@ -37,22 +35,8 @@ class CompletionManager: @unchecked Sendable {
         return activeSmartReplyPID != nil
     }
     
-    private init() {
-        NotificationCenter.default.addObserver(
-            forName: Notification.Name("TypeFlowModelLoadingStateChanged"),
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            guard let self = self else { return }
-            if let isLoading = notification.object as? Bool, !isLoading {
-                if let pending = self.pendingCompletionRequest {
-                    print("[TypeFlow-Debug] Model finished loading. Firing pending completion request: '\(pending)'")
-                    self.pendingCompletionRequest = nil
-                    self.triggerGeneration(with: pending)
-                }
-            }
-        }
-    }
+    private var smartReplyTask: Task<Void, Never>?
+    private init() {}
     
     func setup(accessibilityMonitor: AccessibilityMonitor, overlayWindowController: OverlayWindowController) {
         self.accessibilityMonitor = accessibilityMonitor
@@ -200,8 +184,6 @@ class CompletionManager: @unchecked Sendable {
                 let deleteCount = word.count
                 
                 DispatchQueue.main.async {
-                    self.workController.cancelAll()
-                    
                     // Buffer Alignment Protection for Screen UI: check if user typed anything while we were calculating
                     let currentBufferCount = self.accessibilityMonitor?.keystrokeBuffer.count ?? bufferSnapshot.count
                     let delta = currentBufferCount - bufferSnapshot.count
@@ -232,17 +214,65 @@ class CompletionManager: @unchecked Sendable {
         }
         return nil
     }
+    enum KeystrokeEvaluationResult {
+        case matchedAndAdvanced
+        case invalidated
+        case noGhostText
+    }
     
-    func onTextChanged(bufferFallback: String = "") {
+    /// Evaluates the keystroke synchronously on the UI thread, allowing instant ghost text invalidation.
+    func evaluateKeystrokeSynchronously(bufferFallback: String) -> KeystrokeEvaluationResult {
+        if isRewrite || isSmartReply {
+            lastBufferSnapshot = bufferFallback
+            return .noGhostText
+        }
+        
+        if let ghost = currentCompletion, !ghost.isEmpty {
+            let prev = lastBufferSnapshot
+            let curr = bufferFallback
+            if curr.count == prev.count + 1 && curr.hasPrefix(prev) {
+                let newChar = String(curr.last!)
+                let ghostFirst = String(ghost.prefix(1))
+                if newChar == ghostFirst {
+                    // Match — advance the ghost text optimistically
+                    let advanced = String(ghost.dropFirst())
+                    if advanced.isEmpty {
+                        clearCompletion()
+                    } else {
+                        currentCompletion = advanced
+                        let font = NSFont.systemFont(ofSize: 13, weight: .regular)
+                        let attrs = [NSAttributedString.Key.font: font]
+                        let shiftPx = (newChar as NSString).size(withAttributes: attrs).width
+                        overlayWindowController?.shiftOverlayX(by: shiftPx)
+                        overlayWindowController?.updateGhostText(advanced)
+                    }
+                    lastBufferSnapshot = bufferFallback
+                    return .matchedAndAdvanced
+                } else {
+                    // Mismatch
+                    currentCompletion = nil
+                    overlayWindowController?.updateText("")
+                                        lastBufferSnapshot = bufferFallback
+                    return .invalidated
+                }
+            } else {
+                // Multi-char jump or deletion
+                currentCompletion = nil
+                overlayWindowController?.updateText("")
+                                lastBufferSnapshot = bufferFallback
+                return .invalidated
+            }
+        }
+        
+        lastBufferSnapshot = bufferFallback
+        return .noGhostText
+    }
+    
+    func handleLocalTextChanges(bufferFallback: String = "") {
         if isRewrite || isSmartReply { return }
         // Suppressed: print("[TypeFlow-Debug] onTextChanged called")
         
         // Removed early return to allow onTextChanged to process while ghost text is visible
-        
-        if workController.isGenerationRunning {
-            print("[TypeFlow-Debug] onTextChanged: ignoring because a background generation is actively running.")
-            return
-        }
         
         if isSuppressedUntilNextTyping {
             let activeLine = bufferFallback.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -252,44 +282,7 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // ── Dynamic Typing Invalidation ──────────────────────────────────────
-        // If an overlay is active, extract the newly typed character by diffing
-        // against the previous buffer snapshot. If it matches the first char of
-        // the ghost text, advance the suggestion instead of discarding it.
-        if let ghost = currentCompletion, !ghost.isEmpty, !isRewrite, !isSmartReply {
-            // Extract new characters appended since last snapshot
-            let prev = lastBufferSnapshot
-            let curr = bufferFallback
-            if curr.count == prev.count + 1 && curr.hasPrefix(prev) {
-                let newChar = String(curr.last!)
-                let ghostFirst = String(ghost.prefix(1))
-                if newChar == ghostFirst {
-                    // Match — advance the ghost text by one character using optimistic UI shift
-                    let advanced = String(ghost.dropFirst())
-                    lastBufferSnapshot = curr
-                    if advanced.isEmpty {
-                        clearCompletion()
-                    } else {
-                        currentCompletion = advanced
-                        // Estimate single-char pixel width and slide the window right instantly
-                        let font = NSFont.systemFont(ofSize: 13, weight: .regular)
-                        let attrs = [NSAttributedString.Key.font: font]
-                        let shiftPx = (newChar as NSString).size(withAttributes: attrs).width
-                        overlayWindowController?.shiftOverlayX(by: shiftPx)
-                        overlayWindowController?.updateGhostText(advanced)
-                        // Suppressed: print("[TypeFlow-Debug] DynamicInvalidation matched...")
-                    }
-                    return
-                } else {
-                    // Mismatch — cancel any pending debounce work, fall through to generate new immediately.
-                    workController.cancelAll()
-                }
-            } else {
-                // Multi-char jump or deletion — cancel work, fall through to generate new
-                workController.cancelAll()
-            }
-        }
-        lastBufferSnapshot = bufferFallback
+        // Dynamic Invalidation has been moved to evaluateKeystrokeSynchronously()
         
         // Clear active spell/snippet state, but keep currentCompletion for the UI
         activeSpellCorrection = nil
@@ -319,8 +312,7 @@ class CompletionManager: @unchecked Sendable {
                 print("[TypeFlow-Debug] Completed word spell correction found: '\(word)' -> '\(correction)'")
                 
                 // Cancel any pending LLM generation tasks
-                workController.cancelAll()
-                
+                                
                 if SettingsManager.shared.autoCorrectEnabled {
                     print("[TypeFlow-Debug] Auto-correct is enabled. Automatically correcting '\(word)' to '\(correction)'")
                     let deleteCount = calculateDeleteCount(activeLine: activeLine, misspelled: word)
@@ -380,8 +372,7 @@ class CompletionManager: @unchecked Sendable {
                     if let correction = correction {
                         print("[TypeFlow-Debug] Inline definite typo spell correction found: '\(word)' -> '\(correction)'")
                         // Cancel any pending LLM generation tasks
-                        workController.cancelAll()
-                        
+                                                
                         activeSpellCorrection = (misspelled: word, corrected: correction)
                         
                         let ghostText = getGhostText(misspelled: word, correction: correction)
@@ -408,97 +399,11 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // Adaptive debounce: if typing rapidly (<150ms between keystrokes) use 150ms,
-        // otherwise drop to 50ms so the first word gets a prediction nearly instantly.
-        let now = Date()
-        let keystrokeInterval = now.timeIntervalSince(lastKeystrokeTime)
-        lastKeystrokeTime = now
-        let debounceInterval: TimeInterval = keystrokeInterval < 0.15 ? 0.15 : 0.05
-        // Suppressed: print("[TypeFlow-Debug] Adaptive debounce...")
-        
-        NotificationCenter.default.post(name: Notification.Name("UserDidType"), object: nil)
-        
-        workController.replaceDebouncedWork(delayMilliseconds: Int(debounceInterval * 1000)) { [weak self] _ in
-            print("[TypeFlow-Debug] Debounce timer fired!")
-            self?.triggerGeneration()
-        }
-    }
-    
-    private func triggerGeneration(with text: String? = nil) {
-        guard SettingsManager.shared.enableAutocomplete else {
-            print("[TypeFlow-Debug] triggerGeneration: Autocomplete disabled, skipping.")
-            return
-        }
-        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            guard let self = self else { return }
-            
-            if self.isSuppressedUntilNextTyping {
-                print("[TypeFlow-Debug] triggerGeneration aborted due to isSuppressedUntilNextTyping.")
-                return
-            }
-            
-            print("[TypeFlow-Debug] triggerGeneration started. Cancelling any previous inflight task...")
-            // workController manages the current work ID and will cancel its own tasks.
-            
-            if let providedText = text {
-                self.continueGeneration(activeLine: providedText, keystrokeBuffer: "")
-            } else {
-                // We MUST fetch AX text on a background thread because kAXValue polling is extremely expensive.
-                let axText = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
-                
-                let isBrowser = ["zen", "safari", "chrome", "brave", "edge", "arc", "firefox"].contains {
-                    NSWorkspace.shared.frontmostApplication?.localizedName?.lowercased().contains($0) == true ||
-                    NSWorkspace.shared.frontmostApplication?.bundleIdentifier?.lowercased().contains($0) == true
-                }
-                
-                if axText.count < 100 && isBrowser {
-                    Task {
-                        if let ocrText = await ScreenContextManager.shared.performRapidBrowserOCR() {
-                            DispatchQueue.main.async {
-                                // Append this OCR text to the === Screen Context === payload
-                                ScreenContextManager.shared.latestScreenText = ocrText
-                                let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                                let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                                self.continueGeneration(activeLine: finalLine, keystrokeBuffer: liveBuffer)
-                            }
-                        } else {
-                            DispatchQueue.main.async {
-                                let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                                let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                                self.continueGeneration(activeLine: finalLine, keystrokeBuffer: liveBuffer)
-                            }
-                        }
-                    }
-                } else {
-                    let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                    let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                    
-                    DispatchQueue.main.async {
-                        self.continueGeneration(activeLine: finalLine, keystrokeBuffer: liveBuffer)
-                    }
-                }
-            }
-        }
-    }
-    
-    private func continueGeneration(activeLine: String, keystrokeBuffer: String) {
-        guard !activeLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            print("[TypeFlow-Debug] Active line is empty, skipping generation.")
-            return
-        }
-        
-        let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
-        let effectiveConfig = SettingsManager.shared.getEffectiveConfig(for: bundleId)
-        
-        if !effectiveConfig.isEnabled {
-            print("[TypeFlow-Debug] Completions disabled for \(bundleId), skipping.")
-            return
-        }
-        
         // Snippets check
+        let currentActiveLine = self.accessibilityMonitor?.getTextBeforeCaret() ?? bufferFallback
         let snippets = SettingsManager.shared.getSnippets()
         for (key, value) in snippets {
-            if (key.hasPrefix("/") || key.hasPrefix(";")) && hasWordBoundaryBeforeSuffix(activeLine: activeLine, suffix: key) {
+            if (key.hasPrefix("/") || key.hasPrefix(";")) && hasWordBoundaryBeforeSuffix(activeLine: currentActiveLine, suffix: key) {
                 print("[TypeFlow-Debug] Snippet matched: '\(key)' -> '\(value)'")
                 activeSnippetKey = key
                 
@@ -507,194 +412,12 @@ class CompletionManager: @unchecked Sendable {
                 
                 DispatchQueue.main.async {
                     self.currentCompletion = value
+                    if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
+                        self.overlayWindowController?.moveOverlay(to: rect)
+                    }
                     self.overlayWindowController?.updateText(displayText)
                 }
                 return
-            }
-        }
-        activeSnippetKey = nil
-        
-        // ── Prompt Deduplication Guard ───────────────────────────────────────
-        // When the Accessibility API successfully extracts text before the caret,
-        // it is the definitive ground truth for the current field state. We must
-        // NOT append the internal keystroke buffer to it: the AX text already
-        // contains everything the user typed. The buffer is only used as a fallback
-        // when AX extraction returns empty (e.g. sandboxed apps that block kAXValue).
-        // Grafting the buffer onto the AX string was the root cause of the echoing
-        // bug logged as: "Dispatching LLM generation for: 'the quick fox jumped the quick fox jumped'"
-        let fullActiveLine: String
-        let effectiveLiveBuffer: String
-        if !activeLine.isEmpty {
-            // AX text is available — use it exclusively, no buffer appended.
-            fullActiveLine = activeLine
-            effectiveLiveBuffer = ""
-        } else {
-            // AX unavailable — fall back to the keystroke buffer as both sources.
-            fullActiveLine = keystrokeBuffer
-            effectiveLiveBuffer = keystrokeBuffer
-        }
-        
-        self.generationStartCaretText = fullActiveLine
-        
-        // Explicitly cancel any inflight task before creating a new one.
-        let workID = workController.currentWorkID
-        
-        workController.replaceGenerationWork(for: workID) { [weak self] in
-            guard let self = self else { return }
-            defer {
-                self.workController.setGenerationFinished()
-            }
-            
-            // If this task was cancelled while waiting, abort early
-            if Task.isCancelled || !self.workController.isCurrent(workID) { return }
-            
-            let modelReady = await LLMEngine.shared.isModelReady
-            if !modelReady {
-                print("[TypeFlow-Debug] Model is not ready yet. Queuing request: '\(fullActiveLine)'")
-                await MainActor.run {
-                    self.pendingCompletionRequest = activeLine
-                }
-                return
-            }
-            
-            if Task.isCancelled { return }
-            
-            let completion = await LLMEngine.shared.generateCompletion(
-                textBeforeCaret: fullActiveLine,
-                liveBuffer: effectiveLiveBuffer,
-                onStream: { [weak self] partialText in
-                    guard let self = self else { return }
-                    guard self.workController.isCurrent(workID) else { return }
-                    
-                    let currentAX = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
-                    let currentLine = !currentAX.isEmpty ? currentAX : (self.accessibilityMonitor?.keystrokeBuffer ?? "")
-                    
-                    let startText = self.generationStartCaretText
-                    var typedSinceStart = ""
-                    if currentLine.hasPrefix(startText) {
-                        typedSinceStart = String(currentLine.dropFirst(startText.count))
-                    }
-                    
-                    var processed = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: partialText)
-                    processed = self.stripMarkdown(processed)
-                    
-                    if !processed.hasPrefix(typedSinceStart) && !typedSinceStart.hasPrefix(processed) {
-                        print("[TypeFlow-Debug] Contradiction detected! processed: '\(processed)', typedSinceStart: '\(typedSinceStart)'. Cancelling task.")
-                        self.workController.cancelAll()
-                        return
-                    }
-                    
-                    let remainder: String
-                    if processed.hasPrefix(typedSinceStart) {
-                        remainder = String(processed.dropFirst(typedSinceStart.count))
-                    } else {
-                        remainder = ""
-                    }
-                    
-                    if remainder.contains("\n") {
-                        if let newlineRange = remainder.range(of: "\n") {
-                            let truncated = String(remainder[..<newlineRange.lowerBound])
-                            self.workController.cancelAll()
-                            DispatchQueue.main.async {
-                                self.currentCompletion = truncated
-                                if !truncated.isEmpty {
-                                    if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
-                                        self.overlayWindowController?.moveOverlay(to: rect)
-                                    }
-                                    self.overlayWindowController?.updateText(truncated)
-                                } else {
-                                    self.overlayWindowController?.updateText("")
-                                }
-                            }
-                            return
-                        }
-                    }
-                    
-                    guard self.workController.isCurrent(workID) else { return }
-                    
-                    DispatchQueue.main.async {
-                        self.currentCompletion = remainder
-                        if !remainder.isEmpty {
-                            if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
-                                self.overlayWindowController?.moveOverlay(to: rect)
-                            }
-                            self.overlayWindowController?.updateText(remainder)
-                        } else {
-                            self.overlayWindowController?.updateText("")
-                        }
-                    }
-                }
-            )
-            print("[TypeFlow-Debug] Raw model output: '\(completion.prefix(40))'")
-            if Task.isCancelled || !self.workController.isCurrent(workID) {
-                print("[TypeFlow-Debug] Task was cancelled or stale work ID, ignoring output.")
-                return 
-            }
-            
-            let currentAX = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
-            let currentLine = !currentAX.isEmpty ? currentAX : (self.accessibilityMonitor?.keystrokeBuffer ?? "")
-            
-            let startText = self.generationStartCaretText
-            var typedSinceStart = ""
-            if currentLine.hasPrefix(startText) {
-                typedSinceStart = String(currentLine.dropFirst(startText.count))
-            }
-            
-        var processedCompletion = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: completion)
-        let afterSlice = processedCompletion
-        processedCompletion = self.stripMarkdown(processedCompletion)
-        let afterMarkdown = processedCompletion
-        
-        print("[TypeFlow-Debug] --- SANITIZER AUDIT ---")
-        print("[TypeFlow-Debug] Raw model output: '\(completion)'")
-        print("[TypeFlow-Debug] After overlap slice: '\(afterSlice)'")
-        print("[TypeFlow-Debug] After markdown strip: '\(afterMarkdown)'")
-        print("[TypeFlow-Debug] typedSinceStart: '\(typedSinceStart)'")
-        
-        if !processedCompletion.hasPrefix(typedSinceStart) && !typedSinceStart.hasPrefix(processedCompletion) {
-            print("[TypeFlow-Debug] Contradiction! Cancelling.")
-            self.workController.cancelAll()
-            return
-        }
-        
-        let remainder: String
-        if processedCompletion.hasPrefix(typedSinceStart) {
-            remainder = String(processedCompletion.dropFirst(typedSinceStart.count))
-        } else {
-            remainder = ""
-        }
-        
-        var finalRemainder = remainder
-        if finalRemainder.contains("\n") {
-            if let newlineRange = finalRemainder.range(of: "\n") {
-                finalRemainder = String(finalRemainder[..<newlineRange.lowerBound])
-            }
-        }
-        
-        print("[TypeFlow-Debug] Final Remainder (after typed prefix + newline strip): '\(finalRemainder)'")
-        if finalRemainder.isEmpty && !completion.isEmpty {
-            print("[TypeFlow-Debug] WARNING: Completion became empty during sanitization!")
-        }
-        print("[TypeFlow-Debug] ---------------------------")
-        
-            if Task.isCancelled || !self.workController.isCurrent(workID) { return }
-            
-            DispatchQueue.main.async {
-                self.currentCompletion = finalRemainder
-                if !finalRemainder.isEmpty {
-                    UsageStatsManager.shared.recordCompletionShown()
-                    if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
-                        // Suppressed: print("[TypeFlow-Debug] Telling overlay to move to caret rect: \(rect)")
-                        self.overlayWindowController?.moveOverlay(to: rect)
-                    } else {
-                        // Suppressed: print("[TypeFlow-Debug] Caret rect was nil, NOT moving overlay!")
-                    }
-                    // Suppressed: print("[TypeFlow-Debug] Telling overlay to update text to: '\(finalRemainder)'")
-                    self.overlayWindowController?.updateText(finalRemainder)
-                } else {
-                    // Suppressed: print("[TypeFlow-Debug] Processed completion was empty, hiding overlay.")
-                    self.overlayWindowController?.updateText("")
-                }
             }
         }
     }
@@ -712,8 +435,7 @@ class CompletionManager: @unchecked Sendable {
         print("[TypeFlow-Debug] CompletionManager: triggerRewrite called (mode: \(mode))")
 
         // Cancel previous tasks/timers immediately
-        workController.cancelAll()
-        rewriteTask?.cancel()
+                rewriteTask?.cancel()
         activeSpellCorrection = nil
         activeSnippetKey = nil
 
@@ -816,8 +538,7 @@ class CompletionManager: @unchecked Sendable {
     func triggerSmartReply() {
         print("[TypeFlow-Debug] CompletionManager: triggerSmartReply called")
         
-        workController.cancelAll()
-        activeSpellCorrection = nil
+                activeSpellCorrection = nil
         activeSnippetKey = nil
         
         self.activeSmartReplyPID = self.accessibilityMonitor?.activeFocusPID
@@ -830,8 +551,8 @@ class CompletionManager: @unchecked Sendable {
             self.overlayWindowController?.updateText("", isLoading: true, isSmartReply: true)
         }
         
-        let workID = workController.currentWorkID
-        workController.replaceGenerationWork(for: workID) { [weak self] in
+        self.smartReplyTask?.cancel()
+        self.smartReplyTask = Task { [weak self] in
             guard let self = self else { return }
             try? await Task.sleep(nanoseconds: 100_000_000) // Settle delay
             
@@ -1011,8 +732,8 @@ class CompletionManager: @unchecked Sendable {
     }
     
     func cancelInflightTasks() {
-        workController.cancelAll()
         rewriteTask?.cancel()
+        smartReplyTask?.cancel()
     }
     
     func hideOverlay() {
@@ -1043,7 +764,6 @@ class CompletionManager: @unchecked Sendable {
             if textAfterReturn == nil || textAfterReturn!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 print("[TypeFlow-Debug] Smart Submission Detected: Field is empty or lost focus after Return.")
                 self.isSuppressedUntilNextTyping = true
-                self.workController.cancelAll()
                 self.overlayWindowController?.updateText("")
                 self.clearCompletion()
             } else {
@@ -1119,93 +839,6 @@ class CompletionManager: @unchecked Sendable {
     }
 }
 
-final class SuggestionWorkController: @unchecked Sendable {
-    private var debounceTask: Task<Void, Never>?
-    private var generationTask: Task<Void, Never>?
-    private var isGenTaskActive = false
-    private var latestWorkID: UInt64 = 0
-    private let lock = NSLock()
-
-    var currentWorkID: UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        return latestWorkID
-    }
-
-    var isGenerationRunning: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return isGenTaskActive
-    }
-
-    func setGenerationFinished() {
-        lock.lock()
-        isGenTaskActive = false
-        lock.unlock()
-    }
-
-    @discardableResult
-    func replaceDebouncedWork(
-        delayMilliseconds: Int,
-        operation: @escaping @Sendable (UInt64) async -> Void
-    ) -> UInt64 {
-        lock.lock()
-        debounceTask?.cancel()
-        // Do NOT cancel generationTask here to allow continuous background generation.
-        latestWorkID &+= 1
-        let workID = latestWorkID
-        lock.unlock()
-
-        let task = Task {
-            let delayNanoseconds = UInt64(delayMilliseconds) * 1_000_000
-            try? await Task.sleep(nanoseconds: delayNanoseconds)
-            if Task.isCancelled || !isCurrent(workID) { return }
-            await operation(workID)
-        }
-        
-        lock.lock()
-        debounceTask = task
-        lock.unlock()
-        return workID
-    }
-
-    func replaceGenerationWork(
-        for workID: UInt64,
-        operation: @escaping @Sendable () async -> Void
-    ) {
-        lock.lock()
-        generationTask?.cancel()
-        isGenTaskActive = true
-        let task = Task {
-            defer {
-                lock.lock()
-                self.isGenTaskActive = false
-                lock.unlock()
-            }
-            if Task.isCancelled || !isCurrent(workID) { return }
-            await operation()
-        }
-        generationTask = task
-        lock.unlock()
-    }
-
-    func cancelAll() {
-        lock.lock()
-        debounceTask?.cancel()
-        generationTask?.cancel()
-        debounceTask = nil
-        generationTask = nil
-        isGenTaskActive = false
-        latestWorkID &+= 1
-        lock.unlock()
-    }
-
-    func isCurrent(_ workID: UInt64) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return workID == latestWorkID
-    }
-}
 
 struct SuggestionInteractionState {
     static func sliceGeneratedSuffix(activeLine: String, rawCompletion: String) -> String {

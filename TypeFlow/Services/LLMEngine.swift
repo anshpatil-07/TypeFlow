@@ -4,40 +4,29 @@ actor LLMEngine {
     static let shared = LLMEngine()
     
     private let runtime = TypeFlowLlamaWrapper()
-    private var inactivityTimer: Timer?
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
     
     var isModelReady: Bool { get async { await runtime.isModelReady } }
     
     private func unloadModel() {
         Task { await runtime.unloadModel() }
-        print("[TypeFlow-Debug] LLMEngine: Model unloaded due to inactivity")
+        print("[TypeFlow-Debug] LLMEngine: Model unloaded due to memory pressure")
+    }
+    
+    private func setupMemoryPressureListener() {
+        if memoryPressureSource != nil { return }
+        memoryPressureSource = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        memoryPressureSource?.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            print("[TypeFlow-Debug] LLMEngine: OS memory pressure detected. Unloading model.")
+            Task { await self.unloadModel() }
+        }
+        memoryPressureSource?.resume()
     }
     
     private func resetInactivityTimer() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            Task {
-                await self.invalidateTimer()
-            }
-            let timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: false) { [weak self] _ in
-                guard let self = self else { return }
-                Task {
-                    await self.unloadModel()
-                }
-            }
-            Task {
-                await self.setTimer(timer)
-            }
-        }
-    }
-    
-    private func invalidateTimer() {
-        inactivityTimer?.invalidate()
-        inactivityTimer = nil
-    }
-    
-    private func setTimer(_ timer: Timer) {
-        inactivityTimer = timer
+        // Obsolete: We keep the engine warm indefinitely. 
+        // Memory is only reclaimed upon OS memory pressure.
     }
     
     func invalidateKVCache() {
@@ -45,6 +34,7 @@ actor LLMEngine {
     }
 
     private init() {
+        setupMemoryPressureListener()
         Task { await loadModelIfNeeded() }
     }
 
@@ -107,6 +97,34 @@ actor LLMEngine {
             
         } catch {
             print("[TypeFlow-Debug] LLMEngine: Generation failed: \(error)")
+            return ""
+        }
+    }
+    
+    func generateRaw(
+        prompt: String,
+        maxTokens: Int,
+        temperature: Float,
+        onStream: (@Sendable (String) -> Void)? = nil
+    ) async -> String {
+        await loadModelIfNeeded()
+        resetInactivityTimer()
+        
+        guard await runtime.isModelReady else { return "" }
+        if Task.isCancelled { return "" }
+        
+        do {
+            let output = try await runtime.generate(
+                prompt: prompt,
+                maxTokens: maxTokens,
+                temperature: temperature == 0.0 ? 0.2 : temperature,
+                onPartialRawText: { partialText in
+                    onStream?(partialText)
+                }
+            )
+            return output
+        } catch {
+            print("[TypeFlow-Debug] LLMEngine: generateRaw failed: \(error)")
             return ""
         }
     }
@@ -195,6 +213,66 @@ actor LLMEngine {
             print("[TypeFlow-Debug] LLMEngine: Model loaded successfully.")
         } catch {
             print("[TypeFlow-Debug] LLMEngine: Failed to load model: \(error)")
+        }
+    }
+}
+
+class BenchmarkManager {
+    static let shared = BenchmarkManager()
+    
+    private init() {}
+    
+    func runBenchmark() {
+        Task {
+            print("[TypeFlow-Debug] --- STARTING INFERENCE BENCHMARK ---")
+            
+            let contexts = [
+                ("The quick brown", "fox jumps over the lazy dog"),
+                ("func calculateTotal(items: [Item]) -> Double {\\n    var total = 0.0\\n", "    for item in items {\\n        total += item.price\\n    }\\n    return total\\n}"),
+                ("I am writing to inform you that", " I will be taking PTO tomorrow.")
+            ]
+            
+            var totalLatency = 0.0
+            var totalTTFT = 0.0
+            var runs = 0
+            
+            for (prompt, expected) in contexts {
+                print("\n[TypeFlow-Debug] Prompt: \"\(prompt)\"")
+                
+                let start = CFAbsoluteTimeGetCurrent()
+                var firstToken = 0.0
+                
+                let result = await LLMEngine.shared.generateRaw(
+                    prompt: prompt,
+                    maxTokens: 20,
+                    temperature: 0.2,
+                    onStream: { partial in
+                        if firstToken == 0.0 {
+                            firstToken = CFAbsoluteTimeGetCurrent()
+                        }
+                    }
+                )
+                
+                let end = CFAbsoluteTimeGetCurrent()
+                let ttft = (firstToken > 0 ? firstToken : end) - start
+                let totalTime = end - start
+                
+                print("[TypeFlow-Debug] Output: \"\(result)\"")
+                let ttftStr = String(format: "%.2f", ttft * 1000)
+                let totalStr = String(format: "%.2f", totalTime * 1000)
+                print("[TypeFlow-Debug] TTFT: \(ttftStr) ms")
+                print("[TypeFlow-Debug] Total Latency: \(totalStr) ms")
+                
+                totalTTFT += ttft
+                totalLatency += totalTime
+                runs += 1
+            }
+            
+            print("\n[TypeFlow-Debug] --- BENCHMARK COMPLETE ---")
+            let avgTtftStr = String(format: "%.2f", (totalTTFT / Double(runs)) * 1000)
+            let avgTotalStr = String(format: "%.2f", (totalLatency / Double(runs)) * 1000)
+            print("[TypeFlow-Debug] Avg TTFT: \(avgTtftStr) ms")
+            print("[TypeFlow-Debug] Avg Total Latency: \(avgTotalStr) ms")
         }
     }
 }

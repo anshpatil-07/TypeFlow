@@ -19,7 +19,6 @@ class AccessibilityMonitor {
     // event-handling work from the main run loop and the LLM pipeline queues,
     // ensuring the event tap thread returns instantly and macOS never drops events.
     private let tapQueue = DispatchQueue(label: "com.cotyper.tapCallback", qos: .userInteractive)
-    private var contextFetchWorkItem: DispatchWorkItem?
     
     private var lastDeletedWord: String?
     private var isBackspacing = false
@@ -289,51 +288,12 @@ class AccessibilityMonitor {
                                 }
                             }
                             
-                            // Check matchesPrefix first for all keys, including Space (keyCode 49) and Punctuation
-                            var matchesPrefix = false
-                            var typedCharString = ""
-                            if let ghost = CompletionManager.shared.currentCompletion, !ghost.isEmpty {
-                                var actualLength = 0
-                                var unicodeChars = [UniChar](repeating: 0, count: 16)
-                                asyncEvent.keyboardGetUnicodeString(maxStringLength: 16, actualStringLength: &actualLength, unicodeString: &unicodeChars)
-                                if actualLength > 0 {
-                                    let typedChar = String(utf16CodeUnits: unicodeChars, count: actualLength)
-                                    if !typedChar.isEmpty {
-                                        typedCharString = typedChar
-                                        let ghostFirst = String(ghost.prefix(1))
-                                        if typedChar == ghostFirst {
-                                            matchesPrefix = true
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            if matchesPrefix {
-                                obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
-                                let advanced = String(CompletionManager.shared.currentCompletion?.dropFirst() ?? "")
-                                if advanced.isEmpty {
-                                    DispatchQueue.main.async {
-                                        CompletionManager.shared.clearCompletion()
-                                    }
-                                } else {
-                                    CompletionManager.shared.currentCompletion = advanced
-                                    DispatchQueue.main.async {
-                                        let font = NSFont.systemFont(ofSize: 13, weight: .regular)
-                                        let attrs = [NSAttributedString.Key.font: font]
-                                        let shiftPx = (typedCharString as NSString).size(withAttributes: attrs).width
-                                        CompletionManager.shared.overlayWindowController?.shiftOverlayX(by: shiftPx)
-                                        CompletionManager.shared.overlayWindowController?.updateGhostText(advanced)
-                                    }
-                                    // Suppressed: print("[TypeFlow-Debug] AccessibilityMonitor matching...")
-                                }
-                                return // Match processed!
-                            }
+                            // Just update keystroke buffer
+                            obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
+                            let bufferSnapshot = obj.keystrokeBuffer
                             
                             // Spacebar / Return Fast-Path
                             if keyCode == 49 || keyCode == 36 {
-                                obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
-                                let bufferSnapshot = obj.keystrokeBuffer
-                                
                                 if keyCode == 49 {
                                     if let correctionData = CompletionManager.shared.handleAsynchronousSpellcheck(bufferSnapshot: bufferSnapshot) {
                                         DispatchQueue.main.async {
@@ -354,18 +314,12 @@ class AccessibilityMonitor {
                                     }
                                 }
                                 
-                                // Removed completion state reset on Space/Return to allow UI to persist
-                                obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: 0.0)
+                                EditorEventBus.shared.publish(.spaceOrReturnPressed(bufferSnapshot: bufferSnapshot))
                                 return
                             }
                             
-                            obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
-                            let bufferSnapshot = obj.keystrokeBuffer
                             let isPunctuation = (keyCode == 43 || keyCode == 47)
-                            
-                            // Removed completion state reset on keystroke to allow UI to persist
-                            let delay = isPunctuation ? 0.0 : 0.15
-                            obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: delay)
+                            EditorEventBus.shared.publish(.textChanged(bufferSnapshot: bufferSnapshot, isPunctuation: isPunctuation))
                         }
                     }
                 }
@@ -533,29 +487,7 @@ class AccessibilityMonitor {
         }
     }
     
-    private func triggerContextFetch(bufferSnapshot: String, delay: TimeInterval) {
-        contextFetchWorkItem?.cancel()
-        
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            // NOTE: Caret rect is intentionally NOT fetched here.
-            // getCurrentCaretRect() is a heavy AX IPC call. Executing it on every
-            // keystroke was causing "Significant Energy" warnings and AXTextMarker spam.
-            // Caret position is now only fetched once, immediately before showing the overlay.
-            DispatchQueue.main.async {
-                CompletionManager.shared.onTextChanged(bufferFallback: bufferSnapshot)
-            }
-        }
-        
-        contextFetchWorkItem = workItem
-        
-        if delay > 0 {
-            processingQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
-        } else {
-            processingQueue.async(execute: workItem)
-        }
-    }
-    
+
     func stop() {
         if let tap = observerTap {
             CGEvent.tapEnable(tap: tap, enable: false)

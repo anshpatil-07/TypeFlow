@@ -170,10 +170,30 @@ class PromptBuilder {
         }
 
         var finalActiveLine = activeLine
-        if !liveBuffer.isEmpty && finalActiveLine.hasSuffix(liveBuffer) {
-            finalActiveLine = String(finalActiveLine.dropLast(liveBuffer.count))
+        if !liveBuffer.isEmpty {
+            if finalActiveLine.hasSuffix(liveBuffer) {
+                // Exact match (what was here before)
+                finalActiveLine = String(finalActiveLine.dropLast(liveBuffer.count)) + liveBuffer
+            } else {
+                // Find longest overlap: suffix of activeLine == prefix of liveBuffer
+                let minLen = min(finalActiveLine.count, liveBuffer.count)
+                var foundOverlap = false
+                
+                for overlapLen in (1...minLen).reversed() {
+                    let suffix = finalActiveLine.suffix(overlapLen)
+                    let prefix = liveBuffer.prefix(overlapLen)
+                    if suffix == prefix {
+                        finalActiveLine = String(finalActiveLine.dropLast(overlapLen)) + liveBuffer
+                        foundOverlap = true
+                        break
+                    }
+                }
+                
+                if !foundOverlap {
+                    finalActiveLine += liveBuffer
+                }
+            }
         }
-        finalActiveLine += liveBuffer
 
         // Trim trailing whitespace so generation begins at a clean word boundary.
         // This is the BaseCompletionPromptRenderer.trimmingTrailingWhitespace() equivalent.
