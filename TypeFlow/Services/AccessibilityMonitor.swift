@@ -354,14 +354,7 @@ class AccessibilityMonitor {
                                     }
                                 }
                                 
-                                if let oldText = CompletionManager.shared.currentCompletion {
-                                    // Suppressed: print("[TypeFlow-Debug] AccessibilityMonitor diverging on Space/Return: dimming overlay")
-                                    CompletionManager.shared.currentCompletion = nil
-                                    DispatchQueue.main.async {
-                                        CompletionManager.shared.overlayWindowController?.updateGhostText(oldText, isStale: true)
-                                    }
-                                }
-                                
+                                // Removed completion state reset on Space/Return to allow UI to persist
                                 obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: 0.0)
                                 return
                             }
@@ -370,13 +363,7 @@ class AccessibilityMonitor {
                             let bufferSnapshot = obj.keystrokeBuffer
                             let isPunctuation = (keyCode == 43 || keyCode == 47)
                             
-                            if let oldText = CompletionManager.shared.currentCompletion {
-                                // Suppressed: print("[TypeFlow-Debug] AccessibilityMonitor diverging: dimming overlay")
-                                CompletionManager.shared.currentCompletion = nil
-                                DispatchQueue.main.async {
-                                    CompletionManager.shared.overlayWindowController?.updateGhostText(oldText, isStale: true)
-                                }
-                            }
+                            // Removed completion state reset on keystroke to allow UI to persist
                             let delay = isPunctuation ? 0.0 : 0.15
                             obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: delay)
                         }

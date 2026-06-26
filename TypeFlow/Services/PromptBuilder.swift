@@ -131,6 +131,16 @@ class PromptBuilder {
         frozenPrefix = built
         frozenPrefixKey = stableKey
         print("[TypeFlow-Debug] PromptBuilder: Conditioning preface frozen (\(built.count) chars, \(prefaceLines.count) blocks).")
+        print("[TypeFlow-Debug] --- PROMPT ASSEMBLY PIPELINE: PREFIX ---")
+        if let styleLine = prefaceLines.first(where: { $0.hasPrefix("Writing style:") }) {
+            print("[TypeFlow-Debug] Block 1 (Style): '\(styleLine)'")
+        }
+        let screenBlocks = prefaceLines.filter { $0.hasPrefix("Nearby on screen:") }
+        print("[TypeFlow-Debug] Block 2/3 (Screen Context): \(screenBlocks.count) block(s) included.")
+        if let clipBlock = prefaceLines.first(where: { $0.hasPrefix("On the clipboard:") }) {
+            print("[TypeFlow-Debug] Block 4 (Clipboard): '\(clipBlock.prefix(50))...'")
+        }
+        print("[TypeFlow-Debug] -----------------------------------------")
         return built
     }
 
@@ -202,6 +212,15 @@ class PromptBuilder {
         }
 
         suffix += finalActiveLine
+        
+        print("[TypeFlow-Debug] --- PROMPT ASSEMBLY PIPELINE: SUFFIX ---")
+        print("[TypeFlow-Debug] Previous Lines Context: '\(previousLines.replacingOccurrences(of: "\n", with: "\\n"))'")
+        print("[TypeFlow-Debug] Final Active Line (Trimmed): '\(finalActiveLine)'")
+        if hasClipboardTrigger(textBeforeCaret: textBeforeCaret) {
+            print("[TypeFlow-Debug] Clipboard injected via trigger.")
+        }
+        print("[TypeFlow-Debug] -----------------------------------------")
+        
         return (text: suffix, requiresHealing: requiresHealing)
     }
 

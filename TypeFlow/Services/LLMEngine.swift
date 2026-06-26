@@ -86,6 +86,8 @@ actor LLMEngine {
         let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(systemInstructions: hardcodedInstructions)
         let fullPrompt = dynamicPrefixPrompt + suffixResult.text
         
+        print("[TypeFlow-Debug] EXACT PROMPT SENT TO MODEL:\\n\(fullPrompt)\\n---END EXACT PROMPT---")
+        
         do {
             let output = try await runtime.generate(
                 prompt: fullPrompt,

@@ -237,10 +237,7 @@ class CompletionManager: @unchecked Sendable {
         if isRewrite || isSmartReply { return }
         // Suppressed: print("[TypeFlow-Debug] onTextChanged called")
         
-        if currentCompletion != nil && !currentCompletion!.isEmpty {
-            print("[TypeFlow-Debug] onTextChanged: ignoring clear command because an active completion is present.")
-            return
-        }
+        // Removed early return to allow onTextChanged to process while ghost text is visible
         
         if workController.isGenerationRunning {
             print("[TypeFlow-Debug] onTextChanged: ignoring because a background generation is actively running.")
@@ -284,24 +281,19 @@ class CompletionManager: @unchecked Sendable {
                     }
                     return
                 } else {
-                    // Mismatch — mark as stale and cancel any pending debounce work,
-                    // then fall through so a new completion is generated immediately.
-                    // Suppressed: print("[TypeFlow-Debug] DynamicInvalidation mismatched...")
-                    currentCompletion = nil
+                    // Mismatch — cancel any pending debounce work, fall through to generate new immediately.
                     workController.cancelAll()
-                    overlayWindowController?.updateGhostText(ghost, isStale: true)
                 }
             } else {
-                // Multi-char jump or deletion — mark as stale
-                currentCompletion = nil
+                // Multi-char jump or deletion — cancel work, fall through to generate new
                 workController.cancelAll()
-                overlayWindowController?.updateGhostText(ghost, isStale: true)
             }
         }
         lastBufferSnapshot = bufferFallback
         
-        // Clear existing completion state immediately when user types, but leave UI visible
-        clearCompletion(hideUI: false)
+        // Clear active spell/snippet state, but keep currentCompletion for the UI
+        activeSpellCorrection = nil
+        activeSnippetKey = nil
 
         
         if let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier {
@@ -589,10 +581,6 @@ class CompletionManager: @unchecked Sendable {
                     if !processed.hasPrefix(typedSinceStart) && !typedSinceStart.hasPrefix(processed) {
                         print("[TypeFlow-Debug] Contradiction detected! processed: '\(processed)', typedSinceStart: '\(typedSinceStart)'. Cancelling task.")
                         self.workController.cancelAll()
-                        DispatchQueue.main.async {
-                            self.overlayWindowController?.updateText("")
-                            self.onTextChanged(bufferFallback: currentLine)
-                        }
                         return
                     }
                     
@@ -652,34 +640,43 @@ class CompletionManager: @unchecked Sendable {
                 typedSinceStart = String(currentLine.dropFirst(startText.count))
             }
             
-            var processedCompletion = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: completion)
-            processedCompletion = self.stripMarkdown(processedCompletion)
-            
-            if !processedCompletion.hasPrefix(typedSinceStart) && !typedSinceStart.hasPrefix(processedCompletion) {
-                self.workController.cancelAll()
-                DispatchQueue.main.async {
-                    self.overlayWindowController?.updateText("")
-                    self.onTextChanged(bufferFallback: currentLine)
-                }
-                return
+        var processedCompletion = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: completion)
+        let afterSlice = processedCompletion
+        processedCompletion = self.stripMarkdown(processedCompletion)
+        let afterMarkdown = processedCompletion
+        
+        print("[TypeFlow-Debug] --- SANITIZER AUDIT ---")
+        print("[TypeFlow-Debug] Raw model output: '\(completion)'")
+        print("[TypeFlow-Debug] After overlap slice: '\(afterSlice)'")
+        print("[TypeFlow-Debug] After markdown strip: '\(afterMarkdown)'")
+        print("[TypeFlow-Debug] typedSinceStart: '\(typedSinceStart)'")
+        
+        if !processedCompletion.hasPrefix(typedSinceStart) && !typedSinceStart.hasPrefix(processedCompletion) {
+            print("[TypeFlow-Debug] Contradiction! Cancelling.")
+            self.workController.cancelAll()
+            return
+        }
+        
+        let remainder: String
+        if processedCompletion.hasPrefix(typedSinceStart) {
+            remainder = String(processedCompletion.dropFirst(typedSinceStart.count))
+        } else {
+            remainder = ""
+        }
+        
+        var finalRemainder = remainder
+        if finalRemainder.contains("\n") {
+            if let newlineRange = finalRemainder.range(of: "\n") {
+                finalRemainder = String(finalRemainder[..<newlineRange.lowerBound])
             }
-            
-            let remainder: String
-            if processedCompletion.hasPrefix(typedSinceStart) {
-                remainder = String(processedCompletion.dropFirst(typedSinceStart.count))
-            } else {
-                remainder = ""
-            }
-            
-            var finalRemainder = remainder
-            if finalRemainder.contains("\n") {
-                if let newlineRange = finalRemainder.range(of: "\n") {
-                    finalRemainder = String(finalRemainder[..<newlineRange.lowerBound])
-                }
-            }
-            
-            print("[TypeFlow-Debug] Processed completion: '\(finalRemainder.prefix(40))'")
-            
+        }
+        
+        print("[TypeFlow-Debug] Final Remainder (after typed prefix + newline strip): '\(finalRemainder)'")
+        if finalRemainder.isEmpty && !completion.isEmpty {
+            print("[TypeFlow-Debug] WARNING: Completion became empty during sanitization!")
+        }
+        print("[TypeFlow-Debug] ---------------------------")
+        
             if Task.isCancelled || !self.workController.isCurrent(workID) { return }
             
             DispatchQueue.main.async {
