@@ -4,6 +4,8 @@
 
 TypeFlow is a native macOS menu bar application that provides intelligent, system-wide writing assistance. Powered by local LLMs (via llama.cpp and Apple's Metal framework) and leveraging the macOS Accessibility API (CGEventTap), TypeFlow works seamlessly across any application you type in.
 
+> 🤖 **AI Agents & Contributors**: Please read [GEMINI.md](GEMINI.md) for the canonical architecture, prediction pipeline, and strict design constraints before modifying this repository.
+
 ## Features
 
 - **Universal Autocomplete**: Get inline "ghost text" predictions as you type, in any macOS app.
@@ -15,6 +17,20 @@ TypeFlow is a native macOS menu bar application that provides intelligent, syste
 ## Privacy-First Architecture
 
 TypeFlow is built with privacy as its foundational principle. All LLM inference happens entirely locally on your device using the Metal API. Your keystrokes, screen context, and typing history **never leave your device**.
+
+### High-Level Architecture
+TypeFlow bridges native macOS keystroke events with high-performance MLX inference via a precisely timed prediction pipeline:
+1. **Accessibility (`CGEventTap` & `AXUIElement`)**: Monitors keystrokes and extracts the surrounding document context with near-zero latency.
+2. **Prediction Orchestration**: Debounces rapid typing and manages overlapping generation requests.
+3. **Context Assembly**: Fuses the active document with a real-time OCR screen snapshot and clipboard contents.
+4. **Local Inference (`llama.cpp`)**: Reuses GPU KV-caches to evaluate completions under 150ms.
+5. **Overlay UI**: Renders a non-interactive, pixel-perfect ghost text overlay ahead of the user's native cursor.
+
+### Repository Map
+* `TypeFlow/Services/`: Core orchestrators (`PredictionCoordinator`), queues (`PredictionWorker`), prompt assembly, and inference wrappers.
+* `TypeFlow/UI/`: SwiftUI settings panels, menu bar app, and the transparent ghost text overlay.
+
+* `TypeFlow/llama.cpp/`: The upstream inference engine submodule.
 
 ## Installation & Setup
 
@@ -35,7 +51,7 @@ TypeFlow requires specific permissions to function correctly:
 You will be prompted to grant these permissions upon first launch.
 
 ### Model Setup
-TypeFlow requires a local `.gguf` model file to run (e.g., Gemma 2B or 4B).
+TypeFlow requires a local `.gguf` model file to run (e.g., Gemma 2B or Llama 3 8B).
 1. Download a compatible `.gguf` model.
 2. Place the model file in your `~/Documents/` folder (or configure the path in the app).
 
