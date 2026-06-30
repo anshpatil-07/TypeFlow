@@ -12,6 +12,18 @@ actor LLMEngine {
         Task { await runtime.unloadModel() }
         print("[TypeFlow-Debug] LLMEngine: Model unloaded due to inactivity")
     }
+
+    private func contextAuditPreview(_ text: String, limit: Int = 220) -> String {
+        let escaped = text
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        if escaped.count <= limit { return escaped }
+        return "..." + String(escaped.suffix(limit))
+    }
+
+    private func logContextAudit(_ message: String) {
+        print("[TypeFlow-ContextAudit] \(message)")
+    }
     
     private func resetInactivityTimer() {
         DispatchQueue.main.async { [weak self] in
@@ -85,6 +97,7 @@ actor LLMEngine {
         let suffixResult = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer)
         let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(systemInstructions: hardcodedInstructions)
         let fullPrompt = dynamicPrefixPrompt + suffixResult.text
+        logContextAudit("LLMEngine generate textBeforeCaretLen=\(textBeforeCaret.count) textBeforeCaret='\(contextAuditPreview(textBeforeCaret))' liveBufferLen=\(liveBuffer.count) liveBuffer='\(contextAuditPreview(liveBuffer))' suffixLen=\(suffixResult.text.count) suffix='\(contextAuditPreview(suffixResult.text))' fullPromptLen=\(fullPrompt.count) fullPromptTail='\(contextAuditPreview(fullPrompt))'")
         
         do {
             let output = try await runtime.generate(

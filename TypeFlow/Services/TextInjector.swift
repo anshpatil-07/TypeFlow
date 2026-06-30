@@ -3,8 +3,40 @@ import Cocoa
 class TextInjector {
     static let shared = TextInjector()
     var isInjecting = false
+    private let auditLock = NSLock()
+    private var lastSyntheticEventTime: CFAbsoluteTime = 0
     
     private init() {}
+
+    func syntheticEventWithinLast(milliseconds: Double) -> Bool {
+        auditLock.lock()
+        let lastTime = lastSyntheticEventTime
+        auditLock.unlock()
+        guard lastTime > 0 else { return false }
+        return (CFAbsoluteTimeGetCurrent() - lastTime) * 1000.0 <= milliseconds
+    }
+
+    private func markSyntheticEvent() {
+        auditLock.lock()
+        lastSyntheticEventTime = CFAbsoluteTimeGetCurrent()
+        auditLock.unlock()
+    }
+
+    private func logSyntheticKey(action: String, keyCode: CGKeyCode, keyDown: Bool, text: String = "", flags: CGEventFlags = []) {
+        markSyntheticEvent()
+        let escapedText = text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\t", with: "\\t")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let eventType = keyDown ? "keyDown" : "keyUp"
+        let modifiers = String(flags.rawValue, radix: 16)
+        let completionActive = CompletionManager.shared.currentCompletion?.isEmpty == false
+        let focusedPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        let overlayVisible = CompletionManager.shared.isOverlayVisible
+        print("[TypeFlow-InputAudit] tap=synthetic eventType=\(eventType) keyCode=\(keyCode) chars='\(escapedText)' charsIgnoringModifiers='\(escapedText)' modifiers=0x\(modifiers) isARepeat=false timestamp=generated focusedPID=\(focusedPID) action=\(action) completionActive=\(completionActive) overlayVisible=\(overlayVisible) matchedShortcut=false modified=true swallowed=false reposted=true originalReturned=false syntheticEmitted=true")
+    }
     
     // ── Pasteboard-based injection (bulletproof for smart reply / rewrite) ────
     // 1. Saves current clipboard
@@ -49,7 +81,9 @@ class TextInjector {
             
             keyDown.flags = .maskCommand
             keyUp.flags   = .maskCommand
+            self.logSyntheticKey(action: "cmd-v-posted", keyCode: vKeyCode, keyDown: true, text: "v", flags: keyDown.flags)
             keyDown.post(tap: .cgSessionEventTap)
+            self.logSyntheticKey(action: "cmd-v-posted", keyCode: vKeyCode, keyDown: false, text: "v", flags: keyUp.flags)
             keyUp.post(tap: .cgSessionEventTap)
             
             // 4. Inside that delayed block, add another asyncAfter before restoring
@@ -83,12 +117,14 @@ class TextInjector {
                 keyDownEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
                 keyDownEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
                 keyDownEvent.flags = [] // Clear all modifiers
+                logSyntheticKey(action: "unicode-char-posted", keyCode: 0, keyDown: true, text: String(utf16CodeUnits: [char], count: 1), flags: keyDownEvent.flags)
                 keyDownEvent.post(tap: .cgSessionEventTap)
             }
             if let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
                 keyUpEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
                 keyUpEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
                 keyUpEvent.flags = [] // Clear all modifiers
+                logSyntheticKey(action: "unicode-char-posted", keyCode: 0, keyDown: false, text: String(utf16CodeUnits: [char], count: 1), flags: keyUpEvent.flags)
                 keyUpEvent.post(tap: .cgSessionEventTap)
             }
             usleep(5000)
@@ -107,10 +143,12 @@ class TextInjector {
             for _ in 0..<moveCursorBackCount {
                 if let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: 123, keyDown: true) {
                     keyDownEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
+                    logSyntheticKey(action: "left-arrow-posted", keyCode: 123, keyDown: true, flags: keyDownEvent.flags)
                     keyDownEvent.post(tap: .cgSessionEventTap)
                 }
                 if let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 123, keyDown: false) {
                     keyUpEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
+                    logSyntheticKey(action: "left-arrow-posted", keyCode: 123, keyDown: false, flags: keyUpEvent.flags)
                     keyUpEvent.post(tap: .cgSessionEventTap)
                 }
             }
@@ -127,11 +165,13 @@ class TextInjector {
             if let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: true) {
                 keyDownEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
                 keyDownEvent.flags = [] // Clear all modifiers
+                logSyntheticKey(action: "backspace-posted", keyCode: 51, keyDown: true, flags: keyDownEvent.flags)
                 keyDownEvent.post(tap: .cgSessionEventTap)
             }
             if let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: false) {
                 keyUpEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
                 keyUpEvent.flags = [] // Clear all modifiers
+                logSyntheticKey(action: "backspace-posted", keyCode: 51, keyDown: false, flags: keyUpEvent.flags)
                 keyUpEvent.post(tap: .cgSessionEventTap)
             }
             usleep(5000)

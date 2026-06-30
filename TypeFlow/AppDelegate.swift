@@ -7,6 +7,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var overlayWindowController: OverlayWindowController?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let inputIsolationMode = InputIsolationMode.current
+        print("[TypeFlow-InputIsolation] launch \(inputIsolationMode.summary)")
+
         let isTestingMode = ProcessInfo.processInfo.arguments.contains("-runTQB") || UserDefaults.standard.bool(forKey: "runTQB") || FileManager.default.fileExists(atPath: "/tmp/typeflow_tqb_active")
         if isTestingMode {
             // Redirect stdout and stderr to a log file
@@ -24,7 +27,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         menuBarManager = MenuBarManager()
-        overlayWindowController = OverlayWindowController()
+        if inputIsolationMode.allowOverlay {
+            overlayWindowController = OverlayWindowController()
+        } else {
+            print("[TypeFlow-InputIsolation] overlay/window startup disabled mode=\(inputIsolationMode.label)")
+        }
         
         accessibilityMonitor = AccessibilityMonitor { [weak self] rect in
             self?.overlayWindowController?.moveOverlay(to: rect)
@@ -41,8 +48,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.accessibilityMonitor?.startWithRetry()
         }
         
-        AppMonitor.shared.start()
-        ClipboardMonitor.shared.start()
+        if inputIsolationMode.allowAncillaryStartup {
+            AppMonitor.shared.start()
+            ClipboardMonitor.shared.start()
+        } else {
+            print("[TypeFlow-InputIsolation] AppMonitor/ClipboardMonitor startup disabled mode=\(inputIsolationMode.label)")
+        }
         NSApp.servicesProvider = TypeFlowServicesProvider()
         NSUpdateDynamicServices()
         
@@ -59,8 +70,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Request screen capture permission after a delay when application is finished launching
         // and main window is active.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-            ScreenContextManager.shared.checkAndRequestPermission()
+        if inputIsolationMode.allowAncillaryStartup {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                ScreenContextManager.shared.checkAndRequestPermission()
+            }
+        } else {
+            print("[TypeFlow-InputIsolation] screen permission/OCR startup disabled mode=\(inputIsolationMode.label)")
         }
     }
 

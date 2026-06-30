@@ -1,5 +1,173 @@
 import Cocoa
 
+enum TextBeforeCaretSource: String {
+    case axValue = "AXValue"
+    case axSelectedText = "AXSelectedText"
+    case axStringForRange = "AXStringForRange"
+    case keystrokeBufferFallback = "keystrokeBufferFallback"
+    case providedText = "providedText"
+    case none = "none"
+}
+
+struct TextBeforeCaretSnapshot {
+    let text: String
+    let source: TextBeforeCaretSource
+}
+
+enum InputIsolationMode: String {
+    case normal
+    case modeA = "A"
+    case modeB = "B"
+    case modeC = "C"
+    case modeD = "D"
+    case modeE = "E"
+    case modeF = "F"
+
+    static let current: InputIsolationMode = {
+        let args = ProcessInfo.processInfo.arguments
+        let envMode = ProcessInfo.processInfo.environment["TF_INPUT_MODE"]
+        let argMode = args.compactMap { arg -> String? in
+            if arg.hasPrefix("--tf-input-mode=") {
+                return String(arg.dropFirst("--tf-input-mode=".count))
+            }
+            if arg.hasPrefix("-tfInputMode=") {
+                return String(arg.dropFirst("-tfInputMode=".count))
+            }
+            return nil
+        }.last
+
+        let rawMode = (argMode ?? envMode ?? "").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        return InputIsolationMode(rawValue: rawMode) ?? .normal
+    }()
+
+    var isDiagnostic: Bool { self != .normal }
+    var label: String { self == .normal ? "normal" : rawValue }
+
+    var installObserverTap: Bool {
+        switch self {
+        case .normal, .modeB, .modeD, .modeE, .modeF: return true
+        case .modeA, .modeC: return false
+        }
+    }
+
+    var installAcceptTapAtLaunch: Bool {
+        switch self {
+        case .modeC: return true
+        case .normal, .modeA, .modeB, .modeD, .modeE, .modeF: return false
+        }
+    }
+
+    var acceptTapPassThroughOnly: Bool { self == .modeC }
+    var observerTapPassThroughOnly: Bool { self == .modeB || self == .modeD }
+    var allowObserverProcessing: Bool { self == .normal || self == .modeE || self == .modeF }
+    var allowAXObserver: Bool { self == .normal || self == .modeD || self == .modeE || self == .modeF }
+    var allowFocusAuditAXPolling: Bool { self == .normal || self == .modeD || self == .modeE || self == .modeF }
+    var allowOverlay: Bool { self == .normal || self == .modeE || self == .modeF }
+    var allowGeneration: Bool { self == .normal || self == .modeE || self == .modeF }
+    var allowAncillaryStartup: Bool { self == .normal || self == .modeE || self == .modeF }
+    var allowTextInjectorTapChecks: Bool { self == .normal || self == .modeE || self == .modeF }
+    var prewarmTextInjector: Bool { self == .normal || self == .modeE || self == .modeF }
+    var allowDynamicAcceptTap: Bool { self == .normal || self == .modeE || self == .modeF }
+
+    var summary: String {
+        "mode=\(label) observerTapInstalled=\(installObserverTap) observerTapLocation=cgSessionEventTap observerTapOptions=listenOnly acceptTapInstalledAtLaunch=\(installAcceptTapAtLaunch) acceptTapLocation=cgSessionEventTap acceptTapOptions=defaultTap acceptTapPassThroughOnly=\(acceptTapPassThroughOnly) observerPassThroughOnly=\(observerTapPassThroughOnly) axObserverAllowed=\(allowAXObserver) axPollingAllowed=\(allowFocusAuditAXPolling) overlayAllowed=\(allowOverlay) generationAllowed=\(allowGeneration) ancillaryStartupAllowed=\(allowAncillaryStartup)"
+    }
+}
+
+final class InputCriticalSection {
+    static let shared = InputCriticalSection()
+
+    private let lock = NSLock()
+    private var downKeys: [Int64: String] = [:]
+    private var pendingSafeCallbacks: [() -> Void] = []
+    private let flushDelay: TimeInterval = 0.02
+
+    private init() {}
+
+    var isActive: Bool {
+        lock.lock()
+        let active = !downKeys.isEmpty
+        lock.unlock()
+        return active
+    }
+
+    func begin(keyCode: Int64, chars: String) {
+        let label = chars.isEmpty ? "keyCode=\(keyCode)" : chars
+        lock.lock()
+        downKeys[keyCode] = label
+        let depth = downKeys.count
+        lock.unlock()
+
+        print("[InputCriticalSection] keyDown \(label) -> begin depth=\(depth)")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.forceEndIfStillDown(keyCode: keyCode, chars: label)
+        }
+    }
+
+    func end(keyCode: Int64, chars: String) {
+        let label = chars.isEmpty ? "keyCode=\(keyCode)" : chars
+        var callbacks: [() -> Void] = []
+
+        lock.lock()
+        downKeys.removeValue(forKey: keyCode)
+        let depth = downKeys.count
+        if depth == 0 {
+            callbacks = pendingSafeCallbacks
+            pendingSafeCallbacks.removeAll()
+        }
+        lock.unlock()
+
+        print("[InputCriticalSection] keyUp \(label) -> end depth=\(depth)")
+
+        guard !callbacks.isEmpty else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + flushDelay) {
+            print("[InputCriticalSection] flushed/deferred overlay update after keyUp callbacks=\(callbacks.count)")
+            callbacks.forEach { $0() }
+        }
+    }
+
+    func runWhenSafe(_ callback: @escaping () -> Void) {
+        var runNow = false
+
+        lock.lock()
+        if downKeys.isEmpty {
+            runNow = true
+        } else {
+            pendingSafeCallbacks.append(callback)
+        }
+        lock.unlock()
+
+        if runNow {
+            DispatchQueue.main.async(execute: callback)
+        }
+    }
+
+    private func forceEndIfStillDown(keyCode: Int64, chars: String) {
+        var callbacks: [() -> Void] = []
+        var didForce = false
+
+        lock.lock()
+        if downKeys.removeValue(forKey: keyCode) != nil {
+            didForce = true
+            if downKeys.isEmpty {
+                callbacks = pendingSafeCallbacks
+                pendingSafeCallbacks.removeAll()
+            }
+        }
+        lock.unlock()
+
+        guard didForce else { return }
+        print("[InputCriticalSection] key \(chars) force-ended after timeout")
+
+        guard !callbacks.isEmpty else { return }
+        DispatchQueue.main.async {
+            print("[InputCriticalSection] flushed/deferred overlay update after forced end callbacks=\(callbacks.count)")
+            callbacks.forEach { $0() }
+        }
+    }
+}
+
 class AccessibilityMonitor {
     var observerTap: CFMachPort?
     var observerRunLoopSource: CFRunLoopSource?
@@ -19,10 +187,384 @@ class AccessibilityMonitor {
     // event-handling work from the main run loop and the LLM pipeline queues,
     // ensuring the event tap thread returns instantly and macOS never drops events.
     private let tapQueue = DispatchQueue(label: "com.cotyper.tapCallback", qos: .userInteractive)
+    private let inputAuditQueue = DispatchQueue(label: "com.cotyper.inputAudit", qos: .utility)
     private var contextFetchWorkItem: DispatchWorkItem?
+    private let pendingNormalKeyLock = NSLock()
+    private struct PendingPrintableKey {
+        let keyCode: Int64
+        let chars: String
+        let oldBuffer: String
+        let event: CGEvent
+        let keyDownTimestamp: UInt64
+    }
+    private var pendingPrintableKeys: [Int64: PendingPrintableKey] = [:]
     
     private var lastDeletedWord: String?
     private var isBackspacing = false
+
+    private func contextAuditPreview(_ text: String, limit: Int = 180) -> String {
+        let escaped = text
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        if escaped.count <= limit { return escaped }
+        return "..." + String(escaped.suffix(limit))
+    }
+
+    private func logContextAudit(_ message: String) {
+        print("[TypeFlow-ContextAudit] \(message)")
+    }
+
+    private func escapedForInputAudit(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\t", with: "\\t")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "'", with: "\\'")
+    }
+
+    private func unicodeString(from event: CGEvent) -> String {
+        var actualLength = 0
+        var unicodeChars = [UniChar](repeating: 0, count: 16)
+        event.keyboardGetUnicodeString(maxStringLength: 16, actualStringLength: &actualLength, unicodeString: &unicodeChars)
+        guard actualLength > 0 else { return "" }
+        return String(utf16CodeUnits: unicodeChars, count: actualLength)
+    }
+
+    private func eventTypeName(_ type: CGEventType) -> String {
+        switch type {
+        case .keyDown: return "keyDown"
+        case .keyUp: return "keyUp"
+        default: return "\(type.rawValue)"
+        }
+    }
+
+    private func enqueueInputAudit(
+        tap: String,
+        type: CGEventType,
+        event: CGEvent,
+        action: String,
+        matchedShortcut: Bool,
+        originalReturned: Bool,
+        callbackStart: CFAbsoluteTime,
+        completionActive: Bool,
+        overlayVisible: Bool,
+        currentCompletionNonEmpty: Bool,
+        modified: Bool = false,
+        reposted: Bool = false,
+        syntheticEmitted: Bool = false
+    ) {
+        guard type == .keyDown || type == .keyUp else { return }
+
+        let callbackDurationMs = (CFAbsoluteTimeGetCurrent() - callbackStart) * 1000.0
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let characters = unicodeString(from: event)
+        let charactersIgnoringModifiers = characters
+        let modifiers = String(event.flags.rawValue, radix: 16)
+        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        let timestamp = event.timestamp
+        let eventType = eventTypeName(type)
+        let swallowed = !originalReturned
+        let focusedPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        let textInjectorRecent = InputIsolationMode.current.allowTextInjectorTapChecks
+            ? TextInjector.shared.syntheticEventWithinLast(milliseconds: 500)
+            : false
+
+        inputAuditQueue.async { [weak self] in
+            guard let self = self else { return }
+            print("[TypeFlow-InputAudit] tap=\(tap) eventType=\(eventType) keyCode=\(keyCode) chars='\(self.escapedForInputAudit(characters))' charsIgnoringModifiers='\(self.escapedForInputAudit(charactersIgnoringModifiers))' modifiers=0x\(modifiers) isARepeat=\(isRepeat) timestamp=\(timestamp) focusedPID=\(focusedPID) action=\(action) completionActive=\(completionActive) overlayVisible=\(overlayVisible) currentCompletionNonEmpty=\(currentCompletionNonEmpty) matchedShortcut=\(matchedShortcut) modified=\(modified) swallowed=\(swallowed) reposted=\(reposted) originalReturned=\(originalReturned) syntheticEmitted=\(syntheticEmitted) textInjectorWithin500ms=\(textInjectorRecent) callbackDurationMs=\(String(format: "%.3f", callbackDurationMs))")
+        }
+    }
+
+    private func focusedElementAuditSummary() -> String {
+        let systemWideElement = AXUIElementCreateSystemWide()
+        var focusedElement: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+        guard err == .success, let element = focusedElement else {
+            return "err=\(err.rawValue)"
+        }
+
+        let axElement = element as! AXUIElement
+        var pid: pid_t = 0
+        AXUIElementGetPid(axElement, &pid)
+
+        func attr(_ name: CFString) -> String {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(axElement, name, &value) == .success, let value else {
+                return ""
+            }
+            return String(describing: value)
+        }
+
+        let role = attr(kAXRoleAttribute as CFString)
+        let subrole = attr(kAXSubroleAttribute as CFString)
+        let title = attr(kAXTitleAttribute as CFString)
+        let rolePart = role.isEmpty ? "unknown" : role
+        let subrolePart = subrole.isEmpty ? "none" : subrole
+        let titlePart = title.isEmpty ? "none" : contextAuditPreview(title, limit: 80)
+        return "pid=\(pid) role='\(escapedForInputAudit(rolePart))' subrole='\(escapedForInputAudit(subrolePart))' title='\(escapedForInputAudit(titlePart))'"
+    }
+
+    private func focusedEditableElementState() -> (pid: pid_t, role: String, subrole: String, isEditable: Bool)? {
+        let systemWideElement = AXUIElementCreateSystemWide()
+        var focusedElement: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+        guard err == .success, let element = focusedElement else { return nil }
+
+        let axElement = element as! AXUIElement
+        var pid: pid_t = 0
+        AXUIElementGetPid(axElement, &pid)
+
+        func attr(_ name: CFString) -> String {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(axElement, name, &value) == .success, let value else {
+                return ""
+            }
+            return String(describing: value)
+        }
+
+        let role = attr(kAXRoleAttribute as CFString)
+        let subrole = attr(kAXSubroleAttribute as CFString)
+        return (pid, role, subrole, isEditableAXRole(role: role, subrole: subrole))
+    }
+
+    private func isEditableAXRole(role: String, subrole: String) -> Bool {
+        let explicitEditableRoles: Set<String> = [
+            "AXTextArea",
+            "AXTextField",
+            "AXComboBox"
+        ]
+
+        if explicitEditableRoles.contains(role) { return true }
+        if role.localizedCaseInsensitiveContains("Text") && role != "AXStaticText" { return true }
+        if subrole.localizedCaseInsensitiveContains("Text") && subrole != "AXStaticText" { return true }
+        return false
+    }
+
+    private func resolveDeferredIntraAppFocusChange(observedPID: pid_t) {
+        let expectedPID = observedPID != 0 ? observedPID : activeFocusPID
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        let focusedState = focusedEditableElementState()
+        let focusedAX = focusedElementAuditSummary()
+
+        if frontmostPID == expectedPID,
+           let focusedState,
+           focusedState.pid == expectedPID,
+           focusedState.isEditable {
+            print("[InputCriticalSection] deferred AX focus change discarded after keyUp: same editable target focusedAX={\(focusedAX)}")
+            return
+        }
+
+        print("[InputCriticalSection] deferred AX focus change applied after keyUp: real focus target changed frontmostPID=\(frontmostPID) expectedPID=\(expectedPID) focusedAX={\(focusedAX)}")
+        if !CompletionManager.shared.isRewrite && !CompletionManager.shared.isSmartReply {
+            CompletionManager.shared.cancelInflightTasks()
+            CompletionManager.shared.hideOverlay()
+            CompletionManager.shared.clearCompletion()
+        }
+        clearKeystrokeBuffer()
+    }
+
+    private func enqueueFocusAudit(label: String, type: CGEventType, event: CGEvent, delay: TimeInterval = 0) {
+        guard InputIsolationMode.current.allowFocusAuditAXPolling else { return }
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        guard keyCode == 15 else { return }
+        let eventType = eventTypeName(type)
+        let timestamp = event.timestamp
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self else { return }
+            let focusedPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+            let focusedApp = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
+            let focusedAX = self.focusedElementAuditSummary()
+            let overlay = CompletionManager.shared.overlayWindowController?.focusAuditSummary() ?? "overlayController=nil"
+            let textInjectorRecent = InputIsolationMode.current.allowTextInjectorTapChecks
+                ? TextInjector.shared.syntheticEventWithinLast(milliseconds: 500)
+                : false
+            print("[TypeFlow-InputAudit] focusSnapshot=\(label) eventType=\(eventType) keyCode=\(keyCode) timestamp=\(timestamp) focusedPID=\(focusedPID) focusedApp='\(self.escapedForInputAudit(focusedApp))' focusedAX={\(focusedAX)} overlay={\(overlay)} textInjectorWithin500ms=\(textInjectorRecent)")
+        }
+    }
+
+    private func isOrdinaryPrintableKey(type: CGEventType, event: CGEvent, keyCode: Int64) -> Bool {
+        guard type == .keyDown || type == .keyUp else { return false }
+        if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return false }
+
+        let flags = event.flags
+        if !flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty {
+            return false
+        }
+
+        let controlKeys: Set<Int64> = [36, 48, 51, 53, 76, 115, 116, 119, 121, 123, 124, 125, 126]
+        if controlKeys.contains(keyCode) { return false }
+
+        let characters = unicodeString(from: event)
+        guard !characters.isEmpty else { return false }
+        return characters.unicodeScalars.contains { scalar in
+            !CharacterSet.controlCharacters.contains(scalar)
+        }
+    }
+
+    private func hasPendingPrintableKeys() -> Bool {
+        pendingNormalKeyLock.lock()
+        let hasPending = !pendingPrintableKeys.isEmpty
+        pendingNormalKeyLock.unlock()
+        return hasPending
+    }
+
+    private func rememberPendingNormalKeyDown(keyCode: Int64, chars: String, event: CGEvent) {
+        pendingNormalKeyLock.lock()
+        pendingPrintableKeys[keyCode] = PendingPrintableKey(
+            keyCode: keyCode,
+            chars: chars,
+            oldBuffer: keystrokeBuffer,
+            event: event,
+            keyDownTimestamp: event.timestamp
+        )
+        pendingNormalKeyLock.unlock()
+    }
+
+    private func pendingNormalKeyDown(keyCode: Int64) -> PendingPrintableKey? {
+        pendingNormalKeyLock.lock()
+        let pending = pendingPrintableKeys[keyCode]
+        pendingNormalKeyLock.unlock()
+        return pending
+    }
+
+    private func clearPendingNormalKeyDown(keyCode: Int64) {
+        pendingNormalKeyLock.lock()
+        pendingPrintableKeys.removeValue(forKey: keyCode)
+        pendingNormalKeyLock.unlock()
+    }
+
+    private func reconcilePendingPrintableKey(_ pending: PendingPrintableKey) {
+        let axSnapshot = getTextBeforeCaretSnapshot()
+        let axAfterKeyUp = axSnapshot?.text ?? ""
+        let oldBuffer = pending.oldBuffer
+        let pendingChar = pending.chars
+        let expectedBuffer = oldBuffer + pendingChar
+
+        let sourceIsAuthoritative = axSnapshot?.source != .keystrokeBufferFallback && axSnapshot?.source != .none
+        let axContainsPending = !axAfterKeyUp.isEmpty && (
+            axAfterKeyUp.hasSuffix(expectedBuffer) ||
+            axAfterKeyUp == expectedBuffer ||
+            (axAfterKeyUp.hasSuffix(pendingChar) && axAfterKeyUp.count >= expectedBuffer.count)
+        )
+
+        let decision: String
+        if sourceIsAuthoritative && axContainsPending {
+            let canonicalSuffix = axAfterKeyUp.count > 150 ? String(axAfterKeyUp.suffix(150)) : axAfterKeyUp
+            keystrokeBuffer = canonicalSuffix
+            decision = "usedAXAlreadyContainsPending"
+        } else if sourceIsAuthoritative && !axContainsPending {
+            keystrokeBuffer = expectedBuffer.count > 150 ? String(expectedBuffer.suffix(150)) : expectedBuffer
+            decision = "appendedPendingFallback"
+            print("[InputBufferReconcile] pending key not reflected in AX; using provisional fallback")
+        } else {
+            keystrokeBuffer = expectedBuffer.count > 150 ? String(expectedBuffer.suffix(150)) : expectedBuffer
+            decision = "deferredBecauseAXUncertain"
+        }
+
+        print("[InputBufferReconcile] oldBuffer='\(contextAuditPreview(oldBuffer))' pendingChar='\(contextAuditPreview(pendingChar))' axBeforeKeyUp='not-read-in-callback' axAfterKeyUp='\(contextAuditPreview(axAfterKeyUp))' decision=\(decision) newBuffer='\(contextAuditPreview(keystrokeBuffer))'")
+        clearPendingNormalKeyDown(keyCode: pending.keyCode)
+    }
+
+    private func processObservedKeyDown(keyCode: Int64, event asyncEvent: CGEvent, skipPrintableAppend: Bool = false) {
+        if keyCode == 51 || keyCode == 36 {
+            print("[TypeFlow-Debug] Backspace/Return key detected: clearing and cancelling.")
+            DispatchQueue.main.async {
+                if !CompletionManager.shared.isRewrite && !CompletionManager.shared.isSmartReply {
+                    CompletionManager.shared.clearCompletion()
+                }
+            }
+        }
+
+        // Check matchesPrefix first for all keys, including Space (keyCode 49) and Punctuation
+        var matchesPrefix = false
+        var typedCharString = ""
+        if let ghost = CompletionManager.shared.currentCompletion, !ghost.isEmpty {
+            var actualLength = 0
+            var unicodeChars = [UniChar](repeating: 0, count: 16)
+            asyncEvent.keyboardGetUnicodeString(maxStringLength: 16, actualStringLength: &actualLength, unicodeString: &unicodeChars)
+            if actualLength > 0 {
+                let typedChar = String(utf16CodeUnits: unicodeChars, count: actualLength)
+                if !typedChar.isEmpty {
+                    typedCharString = typedChar
+                    let ghostFirst = String(ghost.prefix(1))
+                    if typedChar == ghostFirst {
+                        matchesPrefix = true
+                    }
+                }
+            }
+        }
+
+        if matchesPrefix {
+            handleKeystroke(keyCode: keyCode, event: asyncEvent, skipPrintableAppend: skipPrintableAppend)
+            let advanced = String(CompletionManager.shared.currentCompletion?.dropFirst() ?? "")
+            if advanced.isEmpty {
+                DispatchQueue.main.async {
+                    CompletionManager.shared.clearCompletion()
+                }
+            } else {
+                CompletionManager.shared.currentCompletion = advanced
+                DispatchQueue.main.async {
+                    let font = NSFont.systemFont(ofSize: 13, weight: .regular)
+                    let attrs = [NSAttributedString.Key.font: font]
+                    let shiftPx = (typedCharString as NSString).size(withAttributes: attrs).width
+                    CompletionManager.shared.overlayWindowController?.shiftOverlayX(by: shiftPx)
+                    CompletionManager.shared.overlayWindowController?.updateGhostText(advanced)
+                }
+            }
+            return // Match processed!
+        }
+
+        // Spacebar / Return Fast-Path
+        if keyCode == 49 || keyCode == 36 {
+            handleKeystroke(keyCode: keyCode, event: asyncEvent, skipPrintableAppend: skipPrintableAppend)
+            let bufferSnapshot = keystrokeBuffer
+
+            if keyCode == 49 {
+                if let correctionData = CompletionManager.shared.handleAsynchronousSpellcheck(bufferSnapshot: bufferSnapshot) {
+                    DispatchQueue.main.async {
+                        let exactLength = correctionData.misspelledLength + 1
+                        let delta = self.keystrokeBuffer.count - bufferSnapshot.count
+
+                        guard delta >= 0 else { return }
+
+                        let offsetFromEnd = exactLength + delta
+                        if self.keystrokeBuffer.count >= offsetFromEnd {
+                            let startIndex = self.keystrokeBuffer.index(self.keystrokeBuffer.endIndex, offsetBy: -offsetFromEnd)
+                            let endIndex = self.keystrokeBuffer.index(startIndex, offsetBy: exactLength)
+                            self.keystrokeBuffer.replaceSubrange(startIndex..<endIndex, with: correctionData.correction)
+                        } else {
+                            self.clearKeystrokeBuffer()
+                        }
+                    }
+                }
+            }
+
+            if let oldText = CompletionManager.shared.currentCompletion {
+                CompletionManager.shared.currentCompletion = nil
+                DispatchQueue.main.async {
+                    CompletionManager.shared.overlayWindowController?.updateGhostText(oldText, isStale: true)
+                }
+            }
+
+            triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: 0.0)
+            return
+        }
+
+        handleKeystroke(keyCode: keyCode, event: asyncEvent, skipPrintableAppend: skipPrintableAppend)
+        let bufferSnapshot = keystrokeBuffer
+        let isPunctuation = (keyCode == 43 || keyCode == 47)
+
+        if let oldText = CompletionManager.shared.currentCompletion {
+            CompletionManager.shared.currentCompletion = nil
+            DispatchQueue.main.async {
+                CompletionManager.shared.overlayWindowController?.updateGhostText(oldText, isStale: true)
+            }
+        }
+        let delay = isPunctuation ? 0.0 : 0.15
+        triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: delay)
+    }
     
     init(onCaretMoved: @escaping (CGRect) -> Void) {
         self.onCaretMoved = onCaretMoved
@@ -135,6 +677,16 @@ class AccessibilityMonitor {
                 }
             } else {
                 // Intra-app focus jitter (same PID)
+                if InputCriticalSection.shared.isActive {
+                    print("[InputCriticalSection] AXObserver focus change deferred because physical key is down pid=\(newPID)")
+                    InputCriticalSection.shared.runWhenSafe { [weak monitor = obj] in
+                        DispatchQueue.main.async {
+                            monitor?.resolveDeferredIntraAppFocusChange(observedPID: newPID)
+                        }
+                    }
+                    return
+                }
+
                 print("[TypeFlow-Debug] AXObserver: intra-app focus change (PID \(newPID)), clearing overlay & buffer")
                 DispatchQueue.main.async {
                     if !CompletionManager.shared.isRewrite && !CompletionManager.shared.isSmartReply {
@@ -182,6 +734,14 @@ class AccessibilityMonitor {
     /// definitive OS-level permission check: if it returns non-nil, we're trusted.
     func startWithRetry() {
         guard !isRunning else { return }
+
+        if InputIsolationMode.current == .modeA {
+            start()
+            if isRunning {
+                print("[TypeFlow] Accessibility monitor diagnostic no-tap mode started successfully.")
+            }
+            return
+        }
         
         let isAlreadyTrusted = AXIsProcessTrusted()
         if isAlreadyTrusted {
@@ -222,11 +782,124 @@ class AccessibilityMonitor {
         }
     }
     
-    private var isRunning: Bool { observerTap != nil }
+    private var diagnosticNoTapModeRunning = false
+    private var isRunning: Bool { diagnosticNoTapModeRunning || observerTap != nil || acceptTap != nil }
     var consumedKeyCodes: Set<Int64> = []
     var isExpandingAbbreviation = false
+
+    func setAcceptTapNeededForVisibleCompletion(_ needed: Bool, reason: String) {
+        guard InputIsolationMode.current.allowDynamicAcceptTap else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if needed {
+                self.installDynamicAcceptTapIfNeeded(reason: reason)
+            } else {
+                self.disableDynamicAcceptTapIfNeeded(reason: reason)
+            }
+        }
+    }
+
+    private func installDynamicAcceptTapIfNeeded(reason: String) {
+        guard acceptTap == nil else { return }
+
+        let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
+        acceptTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .tailAppendEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                let callbackStart = CFAbsoluteTimeGetCurrent()
+
+                if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
+                    return Unmanaged.passUnretained(event)
+                }
+
+                guard let monitor = refcon else { return Unmanaged.passUnretained(event) }
+                let obj = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor).takeUnretainedValue()
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                let currentCompletionNonEmpty = CompletionManager.shared.currentCompletion?.isEmpty == false
+                let hasVisibleCompletion = currentCompletionNonEmpty && CompletionManager.shared.isOverlayVisible
+
+                if type == .keyUp, obj.consumedKeyCodes.contains(keyCode) {
+                    obj.consumedKeyCodes.remove(keyCode)
+                    obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-accept-consumed-keyUp-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                    return nil
+                }
+
+                guard hasVisibleCompletion else {
+                    obj.setAcceptTapNeededForVisibleCompletion(false, reason: "dynamic-no-visible-completion")
+                    obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-no-completion-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                    return Unmanaged.passUnretained(event)
+                }
+
+                if obj.isOrdinaryPrintableKey(type: type, event: event, keyCode: keyCode) {
+                    DispatchQueue.main.async {
+                        CompletionManager.shared.clearCompletion()
+                    }
+                    obj.setAcceptTapNeededForVisibleCompletion(false, reason: "printable-key-dismissed-completion")
+                    obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-printable-dismissCompletion-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                    return Unmanaged.passUnretained(event)
+                }
+
+                if type == .keyDown && keyCode == 48 {
+                    if CompletionManager.shared.handleTabPressed() {
+                        obj.clearKeystrokeBuffer()
+                        obj.consumedKeyCodes.insert(keyCode)
+                        obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-tab-visible-completion-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                        return nil
+                    }
+                }
+
+                obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-inspected-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        )
+
+        guard let tap = acceptTap else {
+            print("[TypeFlow-InputAudit] acceptTap=dynamicCreateFailed enabled=false reason=\(reason)")
+            return
+        }
+
+        acceptRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), acceptRunLoopSource, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        print("[TypeFlow-InputAudit] acceptTap=dynamicCreated enabled=true location=cgSessionEventTap place=tailAppendEventTap options=defaultTap reason=\(reason)")
+    }
+
+    private func disableDynamicAcceptTapIfNeeded(reason: String) {
+        guard InputIsolationMode.current.allowDynamicAcceptTap, let tap = acceptTap else { return }
+        CGEvent.tapEnable(tap: tap, enable: false)
+        if let source = acceptRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        acceptTap = nil
+        acceptRunLoopSource = nil
+        consumedKeyCodes.removeAll()
+        print("[TypeFlow-InputAudit] acceptTap=dynamicDisabled enabled=false reason=\(reason)")
+    }
     
     func start() {
+        let inputMode = InputIsolationMode.current
+        print("[TypeFlow-InputIsolation] start \(inputMode.summary)")
+
+        if inputMode == .modeA {
+            diagnosticNoTapModeRunning = true
+            print("[TypeFlow-InputIsolation] Mode A active: no CGEvent taps installed; observerEnabled=false acceptEnabled=false axObserverAllowed=false overlayAllowed=false generationAllowed=false")
+            return
+        }
+
+        // Prewarm singletons that are consulted by the tap callbacks. A lazy
+        // init on the first physical key can delay the original key event just
+        // enough for macOS's press-and-hold accent detector to misclassify it.
+        if inputMode.prewarmTextInjector {
+            _ = TextInjector.shared
+        } else {
+            print("[TypeFlow-InputIsolation] TextInjector prewarm disabled mode=\(inputMode.label)")
+        }
+
         let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.rightMouseDown.rawValue)
         
         // 1. OBSERVER TAP (listenOnly): Tracks all keys asynchronously without blocking the system.
@@ -235,13 +908,21 @@ class AccessibilityMonitor {
         // a listenOnly tap there creates enough timing jitter to trigger the accent menu on 'R'.
         // .cgSessionEventTap runs AFTER the HID server has already committed the long-press timeout,
         // so listenOnly-at-session-head is safe for the keyboard at any typing speed.
-        observerTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .listenOnly,
-            eventsOfInterest: CGEventMask(eventMask),
-            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
+        if inputMode.installObserverTap {
+            observerTap = CGEvent.tapCreate(
+                tap: .cgSessionEventTap,
+                place: .headInsertEventTap,
+                options: .listenOnly,
+                eventsOfInterest: CGEventMask(eventMask),
+                callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                let callbackStart = CFAbsoluteTimeGetCurrent()
+                let diagnosticMode = InputIsolationMode.current
+
+                if diagnosticMode.allowTextInjectorTapChecks {
+                    if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
+                        return Unmanaged.passUnretained(event)
+                    }
+                } else if event.getIntegerValueField(.eventSourceUserData) == 9999 {
                     return Unmanaged.passUnretained(event)
                 }
                 
@@ -250,6 +931,14 @@ class AccessibilityMonitor {
                 if let monitor = refcon {
                     let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
                     let obj = unmanaged.takeUnretainedValue()
+
+                    if diagnosticMode.observerTapPassThroughOnly {
+                        obj.enqueueInputAudit(tap: "observer", type: type, event: event, action: "diagnostic-observer-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: false, overlayVisible: false, currentCompletionNonEmpty: false)
+                        if diagnosticMode.allowFocusAuditAXPolling {
+                            obj.enqueueFocusAudit(label: "diagnostic-observer-ax-poll", type: type, event: event)
+                        }
+                        return Unmanaged.passUnretained(event)
+                    }
                     
                     if type == .keyDown && keyCode == 48 && CompletionManager.shared.isOverlayVisible {
                         return Unmanaged.passUnretained(event)
@@ -270,136 +959,84 @@ class AccessibilityMonitor {
                     
                     if type == .keyDown {
                         // Suppressed: print("[TypeFlow] Observer keyDown detected: keyCode=\(keyCode)")
-                        
+
                         // Pass event processing to the background immediately.
                         // The tap callback MUST return without blocking — copy the event
                         // and hand it off to the dedicated serial tapQueue so the CGEvent
                         // tap thread is never waiting on locks, AX IPC, or LLM state.
                         guard let asyncEvent = event.copy() else {
+                            let currentCompletionNonEmpty = CompletionManager.shared.currentCompletion?.isEmpty == false
+                            obj.enqueueInputAudit(tap: "observer", type: type, event: event, action: "observed-copy-failed-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
                             return Unmanaged.passUnretained(event)
                         }
-                        
-                        obj.tapQueue.async {
-                            if keyCode == 51 || keyCode == 36 {
-                                print("[TypeFlow-Debug] Backspace/Return key detected: clearing and cancelling.")
-                                DispatchQueue.main.async {
-                                    if !CompletionManager.shared.isRewrite && !CompletionManager.shared.isSmartReply {
-                                        CompletionManager.shared.clearCompletion()
-                                    }
-                                }
-                            }
-                            
-                            // Check matchesPrefix first for all keys, including Space (keyCode 49) and Punctuation
-                            var matchesPrefix = false
-                            var typedCharString = ""
-                            if let ghost = CompletionManager.shared.currentCompletion, !ghost.isEmpty {
-                                var actualLength = 0
-                                var unicodeChars = [UniChar](repeating: 0, count: 16)
-                                asyncEvent.keyboardGetUnicodeString(maxStringLength: 16, actualStringLength: &actualLength, unicodeString: &unicodeChars)
-                                if actualLength > 0 {
-                                    let typedChar = String(utf16CodeUnits: unicodeChars, count: actualLength)
-                                    if !typedChar.isEmpty {
-                                        typedCharString = typedChar
-                                        let ghostFirst = String(ghost.prefix(1))
-                                        if typedChar == ghostFirst {
-                                            matchesPrefix = true
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            if matchesPrefix {
-                                obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
-                                let advanced = String(CompletionManager.shared.currentCompletion?.dropFirst() ?? "")
-                                if advanced.isEmpty {
-                                    DispatchQueue.main.async {
-                                        CompletionManager.shared.clearCompletion()
-                                    }
-                                } else {
-                                    CompletionManager.shared.currentCompletion = advanced
-                                    DispatchQueue.main.async {
-                                        let font = NSFont.systemFont(ofSize: 13, weight: .regular)
-                                        let attrs = [NSAttributedString.Key.font: font]
-                                        let shiftPx = (typedCharString as NSString).size(withAttributes: attrs).width
-                                        CompletionManager.shared.overlayWindowController?.shiftOverlayX(by: shiftPx)
-                                        CompletionManager.shared.overlayWindowController?.updateGhostText(advanced)
-                                    }
-                                    // Suppressed: print("[TypeFlow-Debug] AccessibilityMonitor matching...")
-                                }
-                                return // Match processed!
-                            }
-                            
-                            // Spacebar / Return Fast-Path
-                            if keyCode == 49 || keyCode == 36 {
-                                obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
-                                let bufferSnapshot = obj.keystrokeBuffer
-                                
-                                if keyCode == 49 {
-                                    if let correctionData = CompletionManager.shared.handleAsynchronousSpellcheck(bufferSnapshot: bufferSnapshot) {
-                                        DispatchQueue.main.async {
-                                            let exactLength = correctionData.misspelledLength + 1
-                                            let delta = obj.keystrokeBuffer.count - bufferSnapshot.count
-                                            
-                                            guard delta >= 0 else { return }
-                                            
-                                            let offsetFromEnd = exactLength + delta
-                                            if obj.keystrokeBuffer.count >= offsetFromEnd {
-                                                let startIndex = obj.keystrokeBuffer.index(obj.keystrokeBuffer.endIndex, offsetBy: -offsetFromEnd)
-                                                let endIndex = obj.keystrokeBuffer.index(startIndex, offsetBy: exactLength)
-                                                obj.keystrokeBuffer.replaceSubrange(startIndex..<endIndex, with: correctionData.correction)
-                                            } else {
-                                                obj.clearKeystrokeBuffer()
-                                            }
-                                        }
-                                    }
-                                }
-                                
-                                if let oldText = CompletionManager.shared.currentCompletion {
-                                    // Suppressed: print("[TypeFlow-Debug] AccessibilityMonitor diverging on Space/Return: dimming overlay")
-                                    CompletionManager.shared.currentCompletion = nil
-                                    DispatchQueue.main.async {
-                                        CompletionManager.shared.overlayWindowController?.updateGhostText(oldText, isStale: true)
-                                    }
-                                }
-                                
-                                obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: 0.0)
-                                return
-                            }
-                            
-                            obj.handleKeystroke(keyCode: keyCode, event: asyncEvent)
-                            let bufferSnapshot = obj.keystrokeBuffer
-                            let isPunctuation = (keyCode == 43 || keyCode == 47)
-                            
-                            if let oldText = CompletionManager.shared.currentCompletion {
-                                // Suppressed: print("[TypeFlow-Debug] AccessibilityMonitor diverging: dimming overlay")
-                                CompletionManager.shared.currentCompletion = nil
-                                DispatchQueue.main.async {
-                                    CompletionManager.shared.overlayWindowController?.updateGhostText(oldText, isStale: true)
-                                }
-                            }
-                            let delay = isPunctuation ? 0.0 : 0.15
-                            obj.triggerContextFetch(bufferSnapshot: bufferSnapshot, delay: delay)
+
+                        if obj.isOrdinaryPrintableKey(type: type, event: event, keyCode: keyCode) {
+                            let chars = obj.unicodeString(from: event)
+                            InputCriticalSection.shared.begin(keyCode: keyCode, chars: chars)
+                            obj.rememberPendingNormalKeyDown(keyCode: keyCode, chars: chars, event: asyncEvent)
+                            let currentCompletionNonEmpty = CompletionManager.shared.currentCompletion?.isEmpty == false
+                            obj.enqueueInputAudit(tap: "observer", type: type, event: event, action: "observed-deferredUntilKeyUp-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                            obj.enqueueFocusAudit(label: "keyDown-postReturn-beforeTypeFlowWork", type: type, event: event)
+                            return Unmanaged.passUnretained(event)
                         }
+
+                        obj.tapQueue.async {
+                            obj.processObservedKeyDown(keyCode: keyCode, event: asyncEvent)
+                        }
+                        let currentCompletionNonEmpty = CompletionManager.shared.currentCompletion?.isEmpty == false
+                        obj.enqueueInputAudit(tap: "observer", type: type, event: event, action: "observed-queued-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                    } else if type == .keyUp {
+                        if let pendingKeyDown = obj.pendingNormalKeyDown(keyCode: keyCode) {
+                            InputCriticalSection.shared.end(keyCode: keyCode, chars: obj.unicodeString(from: event))
+                            obj.tapQueue.async {
+                                obj.reconcilePendingPrintableKey(pendingKeyDown)
+                                obj.processObservedKeyDown(keyCode: keyCode, event: pendingKeyDown.event, skipPrintableAppend: true)
+                            }
+                        }
+                        let currentCompletionNonEmpty = CompletionManager.shared.currentCompletion?.isEmpty == false
+                        obj.enqueueInputAudit(tap: "observer", type: type, event: event, action: "observed-keyUp-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                        obj.enqueueFocusAudit(label: "keyUp-postReturn-afterTypeFlowWorkQueued", type: type, event: event)
+                        obj.enqueueFocusAudit(label: "keyUp-postReturn-plus100ms", type: type, event: event, delay: 0.1)
                     }
                 }
                 
                 return Unmanaged.passUnretained(event)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        )
+                },
+                userInfo: Unmanaged.passUnretained(self).toOpaque()
+            )
+        } else {
+            observerTap = nil
+            print("[TypeFlow-InputIsolation] observerTap not installed mode=\(inputMode.label)")
+        }
         
         // 2. ACCEPT TAP (defaultTap): Tightly scoped tap to consume acceptance keys and shortcuts.
         // Tail-appended so it runs AFTER the listenOnly observer has already classified the event.
         // Using .tailAppendEventTap means all other apps see the event first; we only intervene
         // when CompletionManager has a visible completion or a rewrite/smart-reply is active.
         // This is identical to Cotabby's InputMonitor two-tap architecture (PR #328 invariant).
-        acceptTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .tailAppendEventTap,
-            options: .defaultTap,
-            eventsOfInterest: CGEventMask(eventMask),
-            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
+        if inputMode.installAcceptTapAtLaunch {
+            acceptTap = CGEvent.tapCreate(
+                tap: .cgSessionEventTap,
+                place: .tailAppendEventTap,
+                options: .defaultTap,
+                eventsOfInterest: CGEventMask(eventMask),
+                callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                let callbackStart = CFAbsoluteTimeGetCurrent()
+                let diagnosticMode = InputIsolationMode.current
+                if diagnosticMode.acceptTapPassThroughOnly {
+                    if let monitor = refcon {
+                        let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
+                        let obj = unmanaged.takeUnretainedValue()
+                        obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "diagnostic-accept-noop-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: false, overlayVisible: false, currentCompletionNonEmpty: false)
+                    }
+                    return Unmanaged.passUnretained(event)
+                }
+
+                if diagnosticMode.allowTextInjectorTapChecks {
+                    if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
+                        return Unmanaged.passUnretained(event)
+                    }
+                } else if event.getIntegerValueField(.eventSourceUserData) == 9999 {
                     return Unmanaged.passUnretained(event)
                 }
                 
@@ -407,9 +1044,11 @@ class AccessibilityMonitor {
                 let flags = event.flags
                 
                 var isAbbreviationTrigger = false
+                var monitorObj: AccessibilityMonitor?
                 if let monitor = refcon {
                     let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
                     let obj = unmanaged.takeUnretainedValue()
+                    monitorObj = obj
                     if type == .keyDown {
                         if obj.isExpandingAbbreviation {
                             isAbbreviationTrigger = true
@@ -418,28 +1057,33 @@ class AccessibilityMonitor {
                     }
                 }
                 
-                let hasCompletion = CompletionManager.shared.currentCompletion != nil && !CompletionManager.shared.currentCompletion!.isEmpty
+                let isKeyEvent = type == .keyDown || type == .keyUp
+                let hasShortcutModifier = !flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty
+                let isTypeFlowControlKey = keyCode == 53 || keyCode == 48 || keyCode == 124
+                let wasPreviouslyConsumed = monitorObj?.consumedKeyCodes.contains(keyCode) ?? false
+                let shouldInspectForTypeFlowHandling = isKeyEvent && (isTypeFlowControlKey || hasShortcutModifier || isAbbreviationTrigger || wasPreviouslyConsumed)
+
+                // Fast path bypass for ordinary typing. This must apply even while
+                // a completion is active: normal character keys are observed by the
+                // listen-only tap, never processed by the swallowing/default tap.
+                if isKeyEvent && !shouldInspectForTypeFlowHandling {
+                    let currentCompletionNonEmpty = CompletionManager.shared.currentCompletion?.isEmpty == false
+                    monitorObj?.enqueueInputAudit(tap: "accept", type: type, event: event, action: "normal-key-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                    monitorObj?.enqueueFocusAudit(label: "accept-postReturn", type: type, event: event)
+                    return Unmanaged.passUnretained(event)
+                }
+
+                let hasCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
                 let isRewriteActive = CompletionManager.shared.isRewrite
                 let isSmartReplyActive = CompletionManager.shared.isSmartReply
                 
-                // Fast path bypass for normal typing (Fixes 'R' Key Accent Menu Hijack)
-                // Escape (53), Tab (48), Right Arrow (124) are potential shortcuts.
-                let isPotentialShortcut = keyCode == 53 || keyCode == 48 || keyCode == 124 ||
-                                          !flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty
-                                          
-                if !hasCompletion && !isRewriteActive && !isSmartReplyActive && !isPotentialShortcut && !isAbbreviationTrigger {
-                    return Unmanaged.passUnretained(event)
-                }
-                
-                if let monitor = refcon {
-                    let unmanaged = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor)
-                    let obj = unmanaged.takeUnretainedValue()
+                if let obj = monitorObj {
                     
                     if type == .keyDown || type == .keyUp {
                         // Only evaluate shortcut matches when at least one modifier key is
                         // held. A bare alphanumeric keypress (e.g. plain 'r') must NEVER
                         // be swallowed here regardless of the configured shortcut string.
-                        let hasAnyModifier = !flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty
+                        let hasAnyModifier = !flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty
                         
                         if hasAnyModifier {
                             // Rewrite Shortcut
@@ -448,6 +1092,7 @@ class AccessibilityMonitor {
                                     print("[TypeFlow] Intercepted Rewrite Shortcut (keyDown)")
                                     DispatchQueue.main.async { CompletionManager.shared.triggerRewrite() }
                                 }
+                                obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "rewrite-shortcut-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: hasCompletion, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: hasCompletion)
                                 return nil
                             }
                             
@@ -457,6 +1102,7 @@ class AccessibilityMonitor {
                                     print("[TypeFlow] Intercepted Smart Reply Shortcut (keyDown)")
                                     DispatchQueue.main.async { CompletionManager.shared.triggerSmartReply() }
                                 }
+                                obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "smart-reply-shortcut-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: hasCompletion, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: hasCompletion)
                                 return nil
                             }
                         }
@@ -469,6 +1115,7 @@ class AccessibilityMonitor {
                         let isDelimiterKey = keyCode == 49 || keyCode == 48 || keyCode == 43 || keyCode == 47
                         if isAbbreviationTrigger && isDelimiterKey {
                             obj.consumedKeyCodes.insert(keyCode)
+                            obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "abbreviation-delimiter-swallowed", matchedShortcut: false, originalReturned: false, callbackStart: callbackStart, completionActive: hasCompletion, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: hasCompletion)
                             return nil
                         } else if isAbbreviationTrigger {
                             // Stale flag from a race — clear it and fall through
@@ -479,14 +1126,16 @@ class AccessibilityMonitor {
                             if isRewriteActive || isSmartReplyActive {
                                 obj.consumedKeyCodes.removeAll() // clear any stale consumed keyCodes
                                 DispatchQueue.main.async { CompletionManager.shared.clearCompletion() }
+                                obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "escape-rewrite-smartReply-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: hasCompletion, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: hasCompletion)
                                 return nil
                             }
                         }
                         
-                        if keyCode == 48 && CompletionManager.shared.isOverlayVisible {
+                        if keyCode == 48 && CompletionManager.shared.isOverlayVisible && hasCompletion {
                             _ = CompletionManager.shared.handleTabPressed()
                             obj.clearKeystrokeBuffer()
                             obj.consumedKeyCodes.insert(keyCode)
+                            obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "tab-visible-completion-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: hasCompletion, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: hasCompletion)
                             return nil
                         }
                         
@@ -504,6 +1153,7 @@ class AccessibilityMonitor {
                         if shortcutConsumed {
                             obj.clearKeystrokeBuffer()
                             obj.consumedKeyCodes.insert(keyCode)
+                            obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "accept-shortcut-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: hasCompletion, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: hasCompletion)
                             return nil
                         }
                         
@@ -513,40 +1163,62 @@ class AccessibilityMonitor {
                         let isAcceptanceKey = keyCode == 48 || keyCode == 124 || keyCode == 53
                         if (isRewriteActive || isSmartReplyActive) && isAcceptanceKey {
                             obj.consumedKeyCodes.insert(keyCode)
+                            obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "rewrite-smartReply-control-key-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: hasCompletion, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: hasCompletion)
                             return nil
                         }
                     } else if type == .keyUp {
                         if obj.consumedKeyCodes.contains(keyCode) {
                             obj.consumedKeyCodes.remove(keyCode)
+                            obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "consumed-keyUp-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: hasCompletion, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: hasCompletion)
                             return nil
                         }
                     }
+
+                    obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "inspected-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: hasCompletion, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: hasCompletion)
                 }
                 
                 return Unmanaged.passUnretained(event)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        )
+                },
+                userInfo: Unmanaged.passUnretained(self).toOpaque()
+            )
+        } else {
+            acceptTap = nil
+            let reason = inputMode.allowDynamicAcceptTap ? "disabled-until-visible-non-empty-completion" : "mode-disabled"
+            print("[TypeFlow-InputIsolation] acceptTap not installed at launch mode=\(inputMode.label) reason=\(reason)")
+        }
         
         // Add BOTH taps to the run loop
         if let obsTap = observerTap {
             observerRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, obsTap, 0)
             CFRunLoopAddSource(CFRunLoopGetMain(), observerRunLoopSource, .commonModes)
             CGEvent.tapEnable(tap: obsTap, enable: true)
+            print("[TypeFlow-InputAudit] observerTap=created enabled=true location=cgSessionEventTap place=headInsertEventTap options=listenOnly mode=\(inputMode.label)")
+        } else {
+            print("[TypeFlow-InputAudit] observerTap=notInstalledOrFailed enabled=false mode=\(inputMode.label)")
         }
         
         if let accTap = acceptTap {
             acceptRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, accTap, 0)
             CFRunLoopAddSource(CFRunLoopGetMain(), acceptRunLoopSource, .commonModes)
             CGEvent.tapEnable(tap: accTap, enable: true)
+            print("[TypeFlow-InputAudit] acceptTap=created enabled=true location=cgSessionEventTap place=tailAppendEventTap options=defaultTap passThroughOnly=\(inputMode.acceptTapPassThroughOnly) mode=\(inputMode.label)")
+        } else {
+            print("[TypeFlow-InputAudit] acceptTap=notInstalledOrFailed enabled=false mode=\(inputMode.label)")
         }
         
-        if let app = NSWorkspace.shared.frontmostApplication {
+        if inputMode.allowAXObserver, let app = NSWorkspace.shared.frontmostApplication {
             self.setupActiveAppObserver(for: app.processIdentifier)
+        } else {
+            print("[TypeFlow-InputIsolation] AXObserver setup skipped mode=\(inputMode.label) allowed=\(inputMode.allowAXObserver)")
         }
     }
     
     private func triggerContextFetch(bufferSnapshot: String, delay: TimeInterval) {
+        guard InputIsolationMode.current.allowGeneration else {
+            print("[TypeFlow-InputIsolation] generation skipped mode=\(InputIsolationMode.current.label) triggerContextFetch bufferLen=\(bufferSnapshot.count)")
+            return
+        }
+
         contextFetchWorkItem?.cancel()
         
         let workItem = DispatchWorkItem { [weak self] in
@@ -713,8 +1385,26 @@ class AccessibilityMonitor {
     }
 
     func clearKeystrokeBuffer() {
+        if !keystrokeBuffer.isEmpty {
+            logContextAudit("clearKeystrokeBuffer oldLen=\(keystrokeBuffer.count) oldBuffer='\(contextAuditPreview(keystrokeBuffer))'")
+        }
         keystrokeBuffer = ""
         // Suppressed: print("[TypeFlow-Debug] Keystroke buffer cleared")
+    }
+
+    func synchronizeKeystrokeBuffer(withCanonicalText text: String, source: TextBeforeCaretSource) {
+        guard source != .keystrokeBufferFallback && source != .none else { return }
+
+        guard !hasPendingPrintableKeys() else {
+            logContextAudit("syncKeystrokeBuffer deferred source=\(source.rawValue) pendingPrintableKeys=true proposedLen=\(text.count) proposedBuffer='\(contextAuditPreview(text))' liveBufferLen=\(keystrokeBuffer.count) liveBuffer='\(contextAuditPreview(keystrokeBuffer))'")
+            return
+        }
+
+        let canonicalSuffix = text.count > 150 ? String(text.suffix(150)) : text
+        guard keystrokeBuffer != canonicalSuffix else { return }
+
+        logContextAudit("syncKeystrokeBuffer source=\(source.rawValue) oldLen=\(keystrokeBuffer.count) oldBuffer='\(contextAuditPreview(keystrokeBuffer))' newLen=\(canonicalSuffix.count) newBuffer='\(contextAuditPreview(canonicalSuffix))'")
+        keystrokeBuffer = canonicalSuffix
     }
     
     private func capKeystrokeBuffer() {
@@ -723,7 +1413,7 @@ class AccessibilityMonitor {
         }
     }
     
-    func handleKeystroke(keyCode: Int64, event: CGEvent) {
+    func handleKeystroke(keyCode: Int64, event: CGEvent, skipPrintableAppend: Bool = false) {
         // Navigation / Action keys that reset the buffer
         // 36: Return, 76: Enter (numpad), 53: Escape, 48: Tab
         // 123: Left, 124: Right, 125: Down, 126: Up
@@ -823,6 +1513,11 @@ class AccessibilityMonitor {
             clearKeystrokeBuffer()
             return
         }
+
+        if skipPrintableAppend {
+            logContextAudit("handleKeystroke appendSkipped keyCode=\(keyCode) keystrokeBufferLen=\(keystrokeBuffer.count) keystrokeBuffer='\(contextAuditPreview(keystrokeBuffer))'")
+            return
+        }
         
         // Extract Unicode characters from the event
         var characters: String = ""
@@ -838,18 +1533,26 @@ class AccessibilityMonitor {
             if !filtered.isEmpty {
                 keystrokeBuffer += filtered
                 capKeystrokeBuffer()
+                logContextAudit("handleKeystroke appended='\(contextAuditPreview(String(filtered)))' keyCode=\(keyCode) keystrokeBufferLen=\(keystrokeBuffer.count) keystrokeBuffer='\(contextAuditPreview(keystrokeBuffer))'")
                 // Suppressed: print("[TypeFlow-Debug] Typed: '\(filtered)', buffer is now '\(keystrokeBuffer)'")
             }
         }
     }
 
     func getTextBeforeCaret() -> String? {
+        return getTextBeforeCaretSnapshot()?.text
+    }
+
+    func getTextBeforeCaretSnapshot() -> TextBeforeCaretSnapshot? {
+        logContextAudit("getTextBeforeCaret start keystrokeBufferLen=\(keystrokeBuffer.count) liveBuffer='\(contextAuditPreview(keystrokeBuffer))'")
         guard let axElement = getFocusedElement() else {
             print("[TypeFlow-Debug] AX: No focused element found")
             if !keystrokeBuffer.isEmpty {
                 print("[TypeFlow-Debug] AX: Using buffer: '\(keystrokeBuffer.suffix(40))' (Len: \(keystrokeBuffer.count))")
-                return keystrokeBuffer
+                logContextAudit("getTextBeforeCaret method=keystrokeBuffer-noFocusedElement focusedTextLen=0 selectedTextLen=0 textBeforeCaretLen=\(keystrokeBuffer.count) textBeforeCaret='\(contextAuditPreview(keystrokeBuffer))'")
+                return TextBeforeCaretSnapshot(text: keystrokeBuffer, source: .keystrokeBufferFallback)
             }
+            logContextAudit("getTextBeforeCaret method=none-noFocusedElement focusedTextLen=0 selectedTextLen=0 textBeforeCaretLen=0")
             return nil
         }
         
@@ -880,7 +1583,8 @@ class AccessibilityMonitor {
                         let result = String(textBeforeCursor.suffix(1000))
                         if !result.isEmpty {
                             print("[TypeFlow-Debug] AX kAXValue: '\(result.suffix(40))' (Len: \(result.count))")
-                            return result
+                            logContextAudit("getTextBeforeCaret method=kAXValue focusedTextLen=\(fullText.count) selectedRangeLocation=\(range.location) selectedRangeLength=\(range.length) selectedTextLen=\(range.length) textBeforeCaretLen=\(result.count) focusedText='\(contextAuditPreview(fullText))' textBeforeCaret='\(contextAuditPreview(result))' liveBufferLen=\(keystrokeBuffer.count) liveBuffer='\(contextAuditPreview(keystrokeBuffer))'")
+                            return TextBeforeCaretSnapshot(text: result, source: .axValue)
                         }
                     }
                 }
@@ -894,7 +1598,8 @@ class AccessibilityMonitor {
            !selectedText.isEmpty {
             let result = String(selectedText.suffix(1000))
             print("[TypeFlow-Debug] AX kAXSelectedText: '\(result.suffix(40))' (Len: \(result.count))")
-            return result
+            logContextAudit("getTextBeforeCaret method=kAXSelectedText focusedTextLen=unknown selectedTextLen=\(selectedText.count) textBeforeCaretLen=\(result.count) textBeforeCaret='\(contextAuditPreview(result))' liveBufferLen=\(keystrokeBuffer.count) liveBuffer='\(contextAuditPreview(keystrokeBuffer))'")
+            return TextBeforeCaretSnapshot(text: result, source: .axSelectedText)
         }
         
         // --- Fallback 3: kAXStringForRangeParameterizedAttribute ---
@@ -915,7 +1620,8 @@ class AccessibilityMonitor {
                    let string = stringRef as? String,
                    !string.isEmpty {
                     print("[TypeFlow-Debug] AX kAXStringForRange: '\(string.suffix(40))' (Len: \(string.count))")
-                    return string
+                    logContextAudit("getTextBeforeCaret method=kAXStringForRange focusedTextLen=unknown selectedRangeLocation=\(range.location) selectedRangeLength=\(range.length) selectedTextLen=\(range.length) textBeforeCaretLen=\(string.count) textBeforeCaret='\(contextAuditPreview(string))' liveBufferLen=\(keystrokeBuffer.count) liveBuffer='\(contextAuditPreview(keystrokeBuffer))'")
+                    return TextBeforeCaretSnapshot(text: string, source: .axStringForRange)
                 }
             }
         }
@@ -923,10 +1629,12 @@ class AccessibilityMonitor {
         // --- Fallback 4: CGEvent keystroke buffer ---
         if !keystrokeBuffer.isEmpty {
             print("[TypeFlow-Debug] AX Fallback Buffer: '\(keystrokeBuffer.suffix(40))' (Len: \(keystrokeBuffer.count))")
-            return keystrokeBuffer
+            logContextAudit("getTextBeforeCaret method=keystrokeBuffer-axFallback focusedTextLen=unknown selectedTextLen=unknown textBeforeCaretLen=\(keystrokeBuffer.count) textBeforeCaret='\(contextAuditPreview(keystrokeBuffer))'")
+            return TextBeforeCaretSnapshot(text: keystrokeBuffer, source: .keystrokeBufferFallback)
         }
         
         print("[TypeFlow-Debug] AX: all extraction methods failed, active line is empty")
+        logContextAudit("getTextBeforeCaret method=none focusedTextLen=unknown selectedTextLen=unknown textBeforeCaretLen=0 liveBufferLen=0")
         return nil
     }
     

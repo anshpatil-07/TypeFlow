@@ -33,6 +33,18 @@ class PromptBuilder {
         }
     }
 
+    private func contextAuditPreview(_ text: String, limit: Int = 220) -> String {
+        let escaped = text
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        if escaped.count <= limit { return escaped }
+        return "..." + String(escaped.suffix(limit))
+    }
+
+    private func logContextAudit(_ message: String) {
+        print("[TypeFlow-ContextAudit] \(message)")
+    }
+
     // MARK: - Public API
 
     /// Builds the full prompt passed to the LLM for inline completion.
@@ -145,6 +157,7 @@ class PromptBuilder {
         // Include up to 4 preceding lines for paragraph-level context
         let previousLines = lines.dropLast().suffix(4).joined(separator: "\n")
         let activeLine = lines.last ?? ""
+        logContextAudit("PromptBuilder input textBeforeCaretLen=\(textBeforeCaret.count) textBeforeCaret='\(contextAuditPreview(textBeforeCaret))' liveBufferLen=\(liveBuffer.count) liveBuffer='\(contextAuditPreview(liveBuffer))' previousLinesLen=\(previousLines.count) activeLineLen=\(activeLine.count) activeLine='\(contextAuditPreview(activeLine))'")
 
         var suffix = ""
         if !previousLines.isEmpty {
@@ -159,11 +172,10 @@ class PromptBuilder {
             }
         }
 
+        // `textBeforeCaret` is canonicalized before it reaches PromptBuilder.
+        // Do not append `liveBuffer` here; doing so creates a second merge site
+        // and can duplicate or corrupt the cursor context.
         var finalActiveLine = activeLine
-        if !liveBuffer.isEmpty && finalActiveLine.hasSuffix(liveBuffer) {
-            finalActiveLine = String(finalActiveLine.dropLast(liveBuffer.count))
-        }
-        finalActiveLine += liveBuffer
 
         // Trim trailing whitespace so generation begins at a clean word boundary.
         // This is the BaseCompletionPromptRenderer.trimmingTrailingWhitespace() equivalent.
@@ -202,6 +214,7 @@ class PromptBuilder {
         }
 
         suffix += finalActiveLine
+        logContextAudit("PromptBuilder output suffixLen=\(suffix.count) finalActiveLineLen=\(finalActiveLine.count) requiresHealing=\(requiresHealing) suffix='\(contextAuditPreview(suffix))'")
         return (text: suffix, requiresHealing: requiresHealing)
     }
 

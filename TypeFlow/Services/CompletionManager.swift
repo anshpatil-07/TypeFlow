@@ -28,6 +28,123 @@ class CompletionManager: @unchecked Sendable {
     var isSuppressedUntilNextTyping = false
     private var lastBufferSnapshot: String = ""
     private var generationStartCaretText: String = ""
+    private let resultOwnershipLock = NSLock()
+    private var latestResultRequestID: UInt64 = 0
+    private var staleCompletedGenerationDiscardCount: UInt64 = 0
+    private var staleVisibleUpdateAttemptCount: UInt64 = 0
+
+    private struct ResultOwnershipSnapshot {
+        let latestResultRequestID: UInt64
+        let generationResultRequestID: UInt64
+        let workID: UInt64
+        let currentWorkID: UInt64
+        let staleCompletedGenerationDiscardCount: UInt64
+        let staleVisibleUpdateAttemptCount: UInt64
+    }
+
+    private struct PredictionSnapshot {
+        let rawTextBeforeCaret: String
+        let source: TextBeforeCaretSource
+        let liveBuffer: String
+    }
+
+    private struct CanonicalPredictionContext {
+        let canonicalTextBeforeCaret: String
+        let liveBufferForPrompt: String
+        let didAppendLiveBuffer: Bool
+        let appendReason: String
+
+        var activeLine: String {
+            canonicalTextBeforeCaret.components(separatedBy: .newlines).last ?? ""
+        }
+    }
+
+    private func contextAuditPreview(_ text: String, limit: Int = 220) -> String {
+        let escaped = text
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        if escaped.count <= limit { return escaped }
+        return "..." + String(escaped.suffix(limit))
+    }
+
+    private func logContextAudit(_ message: String) {
+        print("[TypeFlow-ContextAudit] \(message)")
+    }
+
+    private func canonicalizePredictionSnapshot(_ snapshot: PredictionSnapshot) -> CanonicalPredictionContext {
+        let rawText = snapshot.rawTextBeforeCaret
+        let liveBuffer = snapshot.liveBuffer
+
+        var canonicalText = rawText
+        var didAppend = false
+        var reason = ""
+
+        switch snapshot.source {
+        case .keystrokeBufferFallback:
+            reason = "source is keystrokeBufferFallback; fallback is already complete best-known cursor text"
+        case .providedText:
+            reason = "source is providedText; explicit caller text is already canonical"
+        case .none:
+            if rawText.isEmpty && !liveBuffer.isEmpty {
+                canonicalText = liveBuffer
+                reason = "no AX text; using liveBuffer as canonical fallback"
+            } else {
+                reason = "no source text available"
+            }
+        case .axValue, .axSelectedText, .axStringForRange:
+            if liveBuffer.isEmpty {
+                reason = "AX text available; no liveBuffer to reconcile"
+            } else if rawText.hasSuffix(liveBuffer) {
+                reason = "AX text already contains liveBuffer suffix"
+            } else if rawText.isEmpty {
+                canonicalText = liveBuffer
+                didAppend = true
+                reason = "AX text empty; liveBuffer becomes canonical cursor text"
+            } else if liveBuffer.hasPrefix(rawText) {
+                canonicalText = liveBuffer
+                didAppend = true
+                reason = "liveBuffer extends the complete AX text"
+            } else {
+                let lines = rawText.components(separatedBy: .newlines)
+                let activeLine = lines.last ?? ""
+                if !activeLine.isEmpty && liveBuffer.hasPrefix(activeLine) {
+                    let previousLines = lines.dropLast().joined(separator: "\n")
+                    canonicalText = previousLines.isEmpty ? liveBuffer : previousLines + "\n" + liveBuffer
+                    didAppend = true
+                    reason = "liveBuffer extends AX active line"
+                } else {
+                    reason = "AX text and liveBuffer do not have a provable suffix relationship; no append"
+                }
+            }
+        }
+
+        let context = CanonicalPredictionContext(
+            canonicalTextBeforeCaret: canonicalText,
+            liveBufferForPrompt: "",
+            didAppendLiveBuffer: didAppend,
+            appendReason: reason
+        )
+
+        print("""
+        [Context Canonicalization Audit]
+        AX source/method: \(snapshot.source.rawValue)
+        raw textBeforeCaret: '\(contextAuditPreview(rawText))'
+        raw liveBuffer: '\(contextAuditPreview(liveBuffer))'
+        didAppendLiveBuffer: \(didAppend)
+        append reason: \(reason)
+        canonicalTextBeforeCaret: '\(contextAuditPreview(canonicalText))'
+        activeLine sent to prompt: '\(contextAuditPreview(context.activeLine))'
+        """)
+
+        return context
+    }
+
+    private func syncFallbackBufferIfAuthoritative(_ context: CanonicalPredictionContext, source: TextBeforeCaretSource) {
+        accessibilityMonitor?.synchronizeKeystrokeBuffer(
+            withCanonicalText: context.canonicalTextBeforeCaret,
+            source: source
+        )
+    }
     
     var isRewrite: Bool {
         return activeRewritePID != nil || activeRewriteText != nil
@@ -35,6 +152,104 @@ class CompletionManager: @unchecked Sendable {
     
     var isSmartReply: Bool {
         return activeSmartReplyPID != nil
+    }
+
+    private func beginResultRequest(activeLine: String) -> UInt64 {
+        resultOwnershipLock.lock()
+        latestResultRequestID &+= 1
+        let requestID = latestResultRequestID
+        resultOwnershipLock.unlock()
+
+        print("[TypeFlow-Debug] Stage1A: result request #\(requestID) started for '\(activeLine.suffix(40))'")
+        logStage1ACounters(context: "begin-request", generationResultRequestID: requestID, workID: workController.currentWorkID)
+        return requestID
+    }
+
+    private func invalidateGenerationResults(reason: String, bufferSnapshot: String) {
+        resultOwnershipLock.lock()
+        latestResultRequestID &+= 1
+        let requestID = latestResultRequestID
+        resultOwnershipLock.unlock()
+
+        print("[TypeFlow-Debug] Stage1A: result ownership advanced to #\(requestID) (\(reason)) for '\(bufferSnapshot.suffix(40))'")
+        logStage1ACounters(context: "ownership-advanced-\(reason)", generationResultRequestID: requestID, workID: workController.currentWorkID)
+    }
+
+    private func isLatestResultRequest(_ requestID: UInt64) -> Bool {
+        resultOwnershipLock.lock()
+        defer { resultOwnershipLock.unlock() }
+        return requestID == latestResultRequestID
+    }
+
+    private func isGenerationResultCurrent(requestID: UInt64, workID: UInt64) -> Bool {
+        return workController.isCurrent(workID) && isLatestResultRequest(requestID)
+    }
+
+    private func shouldRenderGenerationResult(requestID: UInt64, workID: UInt64, source: String) -> Bool {
+        guard isGenerationResultCurrent(requestID: requestID, workID: workID) else {
+            logRenderDecision(allowed: false, requestID: requestID, workID: workID, source: source)
+            recordStaleVisibleUpdateAttempt(requestID: requestID, workID: workID, source: source)
+            return false
+        }
+        logRenderDecision(allowed: true, requestID: requestID, workID: workID, source: source)
+        return true
+    }
+
+    private func shouldRenderOwnedResult(requestID: UInt64, workID: UInt64, source: String) -> Bool {
+        guard isLatestResultRequest(requestID) else {
+            logRenderDecision(allowed: false, requestID: requestID, workID: workID, source: source)
+            recordStaleVisibleUpdateAttempt(requestID: requestID, workID: workID, source: source)
+            return false
+        }
+        logRenderDecision(allowed: true, requestID: requestID, workID: workID, source: source)
+        return true
+    }
+
+    private func makeResultOwnershipSnapshot(requestID: UInt64, workID: UInt64) -> ResultOwnershipSnapshot {
+        let currentWorkID = workController.currentWorkID
+        resultOwnershipLock.lock()
+        let snapshot = ResultOwnershipSnapshot(
+            latestResultRequestID: latestResultRequestID,
+            generationResultRequestID: requestID,
+            workID: workID,
+            currentWorkID: currentWorkID,
+            staleCompletedGenerationDiscardCount: staleCompletedGenerationDiscardCount,
+            staleVisibleUpdateAttemptCount: staleVisibleUpdateAttemptCount
+        )
+        resultOwnershipLock.unlock()
+        return snapshot
+    }
+
+    private func logRenderDecision(allowed: Bool, requestID: UInt64, workID: UInt64, source: String) {
+        let snapshot = makeResultOwnershipSnapshot(requestID: requestID, workID: workID)
+        print("[TypeFlow-Debug] Stage1A: render attempt \(allowed ? "ALLOWED" : "BLOCKED") from \(source) — latestResultRequestID=\(snapshot.latestResultRequestID), generationResultRequestID=\(snapshot.generationResultRequestID), workID=\(snapshot.workID), currentWorkID=\(snapshot.currentWorkID), staleCompletedDiscards=\(snapshot.staleCompletedGenerationDiscardCount), staleVisibleBlocks=\(snapshot.staleVisibleUpdateAttemptCount)")
+    }
+
+    private func logStage1ACounters(context: String, generationResultRequestID: UInt64, workID: UInt64) {
+        let snapshot = makeResultOwnershipSnapshot(requestID: generationResultRequestID, workID: workID)
+        print("[TypeFlow-Debug] Stage1A: counters after \(context) — latestResultRequestID=\(snapshot.latestResultRequestID), generationResultRequestID=\(snapshot.generationResultRequestID), workID=\(snapshot.workID), currentWorkID=\(snapshot.currentWorkID), staleCompletedDiscards=\(snapshot.staleCompletedGenerationDiscardCount), staleVisibleBlocks=\(snapshot.staleVisibleUpdateAttemptCount)")
+    }
+
+    private func recordStaleCompletedGenerationDiscard(requestID: UInt64, workID: UInt64) {
+        resultOwnershipLock.lock()
+        staleCompletedGenerationDiscardCount &+= 1
+        let discardCount = staleCompletedGenerationDiscardCount
+        let latestID = latestResultRequestID
+        resultOwnershipLock.unlock()
+
+        print("[TypeFlow-Debug] Stage1A: discarded completed stale generation request #\(requestID) (latest #\(latestID), workID \(workID)). Total stale completed discards: \(discardCount)")
+        logStage1ACounters(context: "stale-completed-discard", generationResultRequestID: requestID, workID: workID)
+    }
+
+    private func recordStaleVisibleUpdateAttempt(requestID: UInt64, workID: UInt64, source: String) {
+        resultOwnershipLock.lock()
+        staleVisibleUpdateAttemptCount &+= 1
+        let attemptCount = staleVisibleUpdateAttemptCount
+        let latestID = latestResultRequestID
+        resultOwnershipLock.unlock()
+
+        print("[TypeFlow-Debug] Stage1A: blocked stale visible update from \(source) for request #\(requestID) (latest #\(latestID), workID \(workID)). Total blocked visible attempts: \(attemptCount)")
+        logStage1ACounters(context: "stale-visible-block-\(source)", generationResultRequestID: requestID, workID: workID)
     }
     
     private init() {
@@ -236,6 +451,7 @@ class CompletionManager: @unchecked Sendable {
     func onTextChanged(bufferFallback: String = "") {
         if isRewrite || isSmartReply { return }
         // Suppressed: print("[TypeFlow-Debug] onTextChanged called")
+        invalidateGenerationResults(reason: "text-changed", bufferSnapshot: bufferFallback)
         
         if currentCompletion != nil && !currentCompletion!.isEmpty {
             print("[TypeFlow-Debug] onTextChanged: ignoring clear command because an active completion is present.")
@@ -449,10 +665,16 @@ class CompletionManager: @unchecked Sendable {
             // workController manages the current work ID and will cancel its own tasks.
             
             if let providedText = text {
-                self.continueGeneration(activeLine: providedText, keystrokeBuffer: "")
+                logContextAudit("triggerGeneration source=providedText providedTextLen=\(providedText.count) providedText='\(contextAuditPreview(providedText))' liveBufferLen=0")
+                let snapshot = PredictionSnapshot(rawTextBeforeCaret: providedText, source: .providedText, liveBuffer: "")
+                self.continueGeneration(snapshot: snapshot)
             } else {
                 // We MUST fetch AX text on a background thread because kAXValue polling is extremely expensive.
-                let axText = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
+                let textSnapshot = self.accessibilityMonitor?.getTextBeforeCaretSnapshot()
+                let axText = textSnapshot?.text ?? ""
+                let axSource = textSnapshot?.source ?? .none
+                let bufferAfterAX = self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                logContextAudit("triggerGeneration afterAX axSource=\(axSource.rawValue) axTextLen=\(axText.count) axText='\(contextAuditPreview(axText))' keystrokeBufferLen=\(bufferAfterAX.count) keystrokeBuffer='\(contextAuditPreview(bufferAfterAX))'")
                 
                 let isBrowser = ["zen", "safari", "chrome", "brave", "edge", "arc", "firefox"].contains {
                     NSWorkspace.shared.frontmostApplication?.localizedName?.lowercased().contains($0) == true ||
@@ -465,31 +687,54 @@ class CompletionManager: @unchecked Sendable {
                             DispatchQueue.main.async {
                                 // Append this OCR text to the === Screen Context === payload
                                 ScreenContextManager.shared.latestScreenText = ocrText
-                                let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
                                 let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                                self.continueGeneration(activeLine: finalLine, keystrokeBuffer: liveBuffer)
+                                let snapshot = PredictionSnapshot(
+                                    rawTextBeforeCaret: !axText.isEmpty ? axText : liveBuffer,
+                                    source: !axText.isEmpty ? axSource : .keystrokeBufferFallback,
+                                    liveBuffer: liveBuffer
+                                )
+                                let finalLine = snapshot.rawTextBeforeCaret
+                                self.logContextAudit("triggerGeneration dispatch viaBrowserOCR finalLineSource=\(snapshot.source.rawValue) axTextLen=\(axText.count) liveBufferLen=\(liveBuffer.count) finalLineLen=\(finalLine.count) finalLine='\(self.contextAuditPreview(finalLine))' liveBuffer='\(self.contextAuditPreview(liveBuffer))' ocrLen=\(ocrText.count)")
+                                self.continueGeneration(snapshot: snapshot)
                             }
                         } else {
                             DispatchQueue.main.async {
-                                let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
                                 let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                                self.continueGeneration(activeLine: finalLine, keystrokeBuffer: liveBuffer)
+                                let snapshot = PredictionSnapshot(
+                                    rawTextBeforeCaret: !axText.isEmpty ? axText : liveBuffer,
+                                    source: !axText.isEmpty ? axSource : .keystrokeBufferFallback,
+                                    liveBuffer: liveBuffer
+                                )
+                                let finalLine = snapshot.rawTextBeforeCaret
+                                self.logContextAudit("triggerGeneration dispatch viaBrowserNoOCR finalLineSource=\(snapshot.source.rawValue) axTextLen=\(axText.count) liveBufferLen=\(liveBuffer.count) finalLineLen=\(finalLine.count) finalLine='\(self.contextAuditPreview(finalLine))' liveBuffer='\(self.contextAuditPreview(liveBuffer))'")
+                                self.continueGeneration(snapshot: snapshot)
                             }
                         }
                     }
                 } else {
-                    let finalLine = !axText.isEmpty ? axText : self.accessibilityMonitor?.keystrokeBuffer ?? ""
                     let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                    let snapshot = PredictionSnapshot(
+                        rawTextBeforeCaret: !axText.isEmpty ? axText : liveBuffer,
+                        source: !axText.isEmpty ? axSource : .keystrokeBufferFallback,
+                        liveBuffer: liveBuffer
+                    )
+                    let finalLine = snapshot.rawTextBeforeCaret
                     
                     DispatchQueue.main.async {
-                        self.continueGeneration(activeLine: finalLine, keystrokeBuffer: liveBuffer)
+                        self.logContextAudit("triggerGeneration dispatch direct finalLineSource=\(snapshot.source.rawValue) axTextLen=\(axText.count) liveBufferLen=\(liveBuffer.count) finalLineLen=\(finalLine.count) finalLine='\(self.contextAuditPreview(finalLine))' liveBuffer='\(self.contextAuditPreview(liveBuffer))'")
+                        self.continueGeneration(snapshot: snapshot)
                     }
                 }
             }
         }
     }
     
-    private func continueGeneration(activeLine: String, keystrokeBuffer: String) {
+    private func continueGeneration(snapshot: PredictionSnapshot) {
+        let canonicalContext = canonicalizePredictionSnapshot(snapshot)
+        syncFallbackBufferIfAuthoritative(canonicalContext, source: snapshot.source)
+        let activeLine = canonicalContext.canonicalTextBeforeCaret
+        let keystrokeBuffer = snapshot.liveBuffer
+        logContextAudit("continueGeneration input source=\(snapshot.source.rawValue) canonicalTextLen=\(activeLine.count) canonicalText='\(contextAuditPreview(activeLine))' rawTextLen=\(snapshot.rawTextBeforeCaret.count) liveBufferLen=\(keystrokeBuffer.count) liveBuffer='\(contextAuditPreview(keystrokeBuffer))'")
         guard !activeLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             print("[TypeFlow-Debug] Active line is empty, skipping generation.")
             return
@@ -522,27 +767,13 @@ class CompletionManager: @unchecked Sendable {
         }
         activeSnippetKey = nil
         
-        // ── Prompt Deduplication Guard ───────────────────────────────────────
-        // When the Accessibility API successfully extracts text before the caret,
-        // it is the definitive ground truth for the current field state. We must
-        // NOT append the internal keystroke buffer to it: the AX text already
-        // contains everything the user typed. The buffer is only used as a fallback
-        // when AX extraction returns empty (e.g. sandboxed apps that block kAXValue).
-        // Grafting the buffer onto the AX string was the root cause of the echoing
-        // bug logged as: "Dispatching LLM generation for: 'the quick fox jumped the quick fox jumped'"
-        let fullActiveLine: String
-        let effectiveLiveBuffer: String
-        if !activeLine.isEmpty {
-            // AX text is available — use it exclusively, no buffer appended.
-            fullActiveLine = activeLine
-            effectiveLiveBuffer = ""
-        } else {
-            // AX unavailable — fall back to the keystroke buffer as both sources.
-            fullActiveLine = keystrokeBuffer
-            effectiveLiveBuffer = keystrokeBuffer
-        }
+        let fullActiveLine = canonicalContext.canonicalTextBeforeCaret
+        let effectiveLiveBuffer = canonicalContext.liveBufferForPrompt
+        logContextAudit("continueGeneration resolved source=\(snapshot.source.rawValue) didAppendLiveBuffer=\(canonicalContext.didAppendLiveBuffer) appendReason='\(canonicalContext.appendReason)' textBeforeCaretLen=\(fullActiveLine.count) textBeforeCaret='\(contextAuditPreview(fullActiveLine))' effectiveLiveBufferLen=\(effectiveLiveBuffer.count) effectiveLiveBuffer='\(contextAuditPreview(effectiveLiveBuffer))' originalRawTextLen=\(snapshot.rawTextBeforeCaret.count) originalLiveBufferLen=\(keystrokeBuffer.count)")
         
         self.generationStartCaretText = fullActiveLine
+        let resultRequestID = beginResultRequest(activeLine: fullActiveLine)
+        let generationStartText = fullActiveLine
         
         // Explicitly cancel any inflight task before creating a new one.
         let workID = workController.currentWorkID
@@ -572,12 +803,12 @@ class CompletionManager: @unchecked Sendable {
                 liveBuffer: effectiveLiveBuffer,
                 onStream: { [weak self] partialText in
                     guard let self = self else { return }
-                    guard self.workController.isCurrent(workID) else { return }
+                    guard self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) else { return }
                     
                     let currentAX = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
                     let currentLine = !currentAX.isEmpty ? currentAX : (self.accessibilityMonitor?.keystrokeBuffer ?? "")
                     
-                    let startText = self.generationStartCaretText
+                    let startText = generationStartText
                     var typedSinceStart = ""
                     if currentLine.hasPrefix(startText) {
                         typedSinceStart = String(currentLine.dropFirst(startText.count))
@@ -588,8 +819,10 @@ class CompletionManager: @unchecked Sendable {
                     
                     if !processed.hasPrefix(typedSinceStart) && !typedSinceStart.hasPrefix(processed) {
                         print("[TypeFlow-Debug] Contradiction detected! processed: '\(processed)', typedSinceStart: '\(typedSinceStart)'. Cancelling task.")
+                        guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream-contradiction") else { return }
                         self.workController.cancelAll()
                         DispatchQueue.main.async {
+                            guard self.shouldRenderOwnedResult(requestID: resultRequestID, workID: workID, source: "stream-contradiction-main") else { return }
                             self.overlayWindowController?.updateText("")
                             self.onTextChanged(bufferFallback: currentLine)
                         }
@@ -606,8 +839,10 @@ class CompletionManager: @unchecked Sendable {
                     if remainder.contains("\n") {
                         if let newlineRange = remainder.range(of: "\n") {
                             let truncated = String(remainder[..<newlineRange.lowerBound])
+                            guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream-newline") else { return }
                             self.workController.cancelAll()
                             DispatchQueue.main.async {
+                                guard self.shouldRenderOwnedResult(requestID: resultRequestID, workID: workID, source: "stream-newline-main") else { return }
                                 self.currentCompletion = truncated
                                 if !truncated.isEmpty {
                                     if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
@@ -622,9 +857,10 @@ class CompletionManager: @unchecked Sendable {
                         }
                     }
                     
-                    guard self.workController.isCurrent(workID) else { return }
+                    guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream") else { return }
                     
                     DispatchQueue.main.async {
+                        guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream-main") else { return }
                         self.currentCompletion = remainder
                         if !remainder.isEmpty {
                             if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
@@ -638,7 +874,10 @@ class CompletionManager: @unchecked Sendable {
                 }
             )
             print("[TypeFlow-Debug] Raw model output: '\(completion.prefix(40))'")
-            if Task.isCancelled || !self.workController.isCurrent(workID) {
+            if Task.isCancelled || !self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) {
+                if !self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) {
+                    self.recordStaleCompletedGenerationDiscard(requestID: resultRequestID, workID: workID)
+                }
                 print("[TypeFlow-Debug] Task was cancelled or stale work ID, ignoring output.")
                 return 
             }
@@ -646,7 +885,7 @@ class CompletionManager: @unchecked Sendable {
             let currentAX = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
             let currentLine = !currentAX.isEmpty ? currentAX : (self.accessibilityMonitor?.keystrokeBuffer ?? "")
             
-            let startText = self.generationStartCaretText
+            let startText = generationStartText
             var typedSinceStart = ""
             if currentLine.hasPrefix(startText) {
                 typedSinceStart = String(currentLine.dropFirst(startText.count))
@@ -656,8 +895,10 @@ class CompletionManager: @unchecked Sendable {
             processedCompletion = self.stripMarkdown(processedCompletion)
             
             if !processedCompletion.hasPrefix(typedSinceStart) && !typedSinceStart.hasPrefix(processedCompletion) {
+                guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "final-contradiction") else { return }
                 self.workController.cancelAll()
                 DispatchQueue.main.async {
+                    guard self.shouldRenderOwnedResult(requestID: resultRequestID, workID: workID, source: "final-contradiction-main") else { return }
                     self.overlayWindowController?.updateText("")
                     self.onTextChanged(bufferFallback: currentLine)
                 }
@@ -680,9 +921,10 @@ class CompletionManager: @unchecked Sendable {
             
             print("[TypeFlow-Debug] Processed completion: '\(finalRemainder.prefix(40))'")
             
-            if Task.isCancelled || !self.workController.isCurrent(workID) { return }
+            if Task.isCancelled || !self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "final") { return }
             
             DispatchQueue.main.async {
+                guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "final-main") else { return }
                 self.currentCompletion = finalRemainder
                 if !finalRemainder.isEmpty {
                     UsageStatsManager.shared.recordCompletionShown()
@@ -1023,6 +1265,7 @@ class CompletionManager: @unchecked Sendable {
     }
 
     func clearCompletion(hideUI: Bool = true) {
+        accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "clearCompletion")
         currentCompletion = nil
         activeSpellCorrection = nil
         activeSnippetKey = nil

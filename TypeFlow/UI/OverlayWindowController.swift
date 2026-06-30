@@ -175,6 +175,16 @@ class OverlayWindow: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
+    override func becomeKey() {
+        print("[TypeFlow-InputAudit] overlayWindowEvent=becomeKey visible=\(isVisible) key=\(isKeyWindow) main=\(isMainWindow)")
+        super.becomeKey()
+    }
+
+    override func becomeMain() {
+        print("[TypeFlow-InputAudit] overlayWindowEvent=becomeMain visible=\(isVisible) key=\(isKeyWindow) main=\(isMainWindow)")
+        super.becomeMain()
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let keyCode = event.keyCode
         if keyCode == 48 { // Tab
@@ -746,6 +756,18 @@ private struct GhostKeycap: View {
 // ─── Window Controller ────────────────────────────────────────────────────────
 
 class OverlayWindowController: NSWindowController {
+    private enum PendingOverlayMutation {
+        case updateText(
+            text: String,
+            isSpellCorrection: Bool,
+            isRewrite: Bool,
+            isLoading: Bool,
+            isSmartReply: Bool,
+            smartReplyOptions: [String]
+        )
+        case updateGhostText(text: String, isStale: Bool)
+    }
+
     var overlayWindow: OverlayWindow!
     private let completionModel = CompletionModel()
     private var lastCaretRect = CGRect.zero
@@ -761,6 +783,10 @@ class OverlayWindowController: NSWindowController {
     
     private var lastFocusedPID: pid_t = 0
     private var focusSessionKey: UInt64 = 0
+    private var pendingMoveOverlayRect: CGRect?
+    private var pendingShiftOverlayX: CGFloat = 0
+    private var pendingOverlayMutation: PendingOverlayMutation?
+    private var isDeferredOverlayFlushScheduled = false
 
     init() {
         overlayWindow = OverlayWindow(
@@ -814,13 +840,111 @@ class OverlayWindowController: NSWindowController {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func moveOverlay(to rect: CGRect) {
+    func focusAuditSummary() -> String {
+        let appActive = NSApp.isActive
+        let keyWindowIsOverlay = NSApp.keyWindow === overlayWindow
+        let mainWindowIsOverlay = NSApp.mainWindow === overlayWindow
+        return "visible=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow) appActive=\(appActive) keyWindowIsOverlay=\(keyWindowIsOverlay) mainWindowIsOverlay=\(mainWindowIsOverlay)"
+    }
+
+    private func scheduleDeferredOverlayFlush() {
+        guard !isDeferredOverlayFlushScheduled else { return }
+        isDeferredOverlayFlushScheduled = true
+
+        InputCriticalSection.shared.runWhenSafe { [weak self] in
+            self?.flushDeferredOverlayMutation()
+        }
+    }
+
+    private func deferMoveOverlayIfNeeded(to rect: CGRect) -> Bool {
+        guard InputCriticalSection.shared.isActive else { return false }
+        pendingMoveOverlayRect = rect
+        print("[InputCriticalSection] overlay update blocked/deferred because physical key is down action=moveOverlay")
+        scheduleDeferredOverlayFlush()
+        return true
+    }
+
+    private func deferShiftOverlayIfNeeded(by points: CGFloat) -> Bool {
+        guard InputCriticalSection.shared.isActive else { return false }
+        pendingShiftOverlayX += points
+        print("[InputCriticalSection] overlay update blocked/deferred because physical key is down action=shiftOverlayX points=\(String(format: "%.2f", points))")
+        scheduleDeferredOverlayFlush()
+        return true
+    }
+
+    private func deferOverlayMutationIfNeeded(_ mutation: PendingOverlayMutation, action: String) -> Bool {
+        guard InputCriticalSection.shared.isActive else { return false }
+        pendingOverlayMutation = mutation
+        print("[InputCriticalSection] overlay update blocked/deferred because physical key is down action=\(action)")
+        scheduleDeferredOverlayFlush()
+        return true
+    }
+
+    private func flushDeferredOverlayMutation() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.lastCaretRect = rect
-            self.updateFocusSessionKeyIfNeeded()
-            self.repositionWindow()
+
+            if InputCriticalSection.shared.isActive {
+                self.isDeferredOverlayFlushScheduled = false
+                self.scheduleDeferredOverlayFlush()
+                return
+            }
+
+            let moveRect = self.pendingMoveOverlayRect
+            let shiftX = self.pendingShiftOverlayX
+            let mutation = self.pendingOverlayMutation
+
+            self.pendingMoveOverlayRect = nil
+            self.pendingShiftOverlayX = 0
+            self.pendingOverlayMutation = nil
+            self.isDeferredOverlayFlushScheduled = false
+
+            guard moveRect != nil || shiftX != 0 || mutation != nil else { return }
+            print("[InputCriticalSection] flushed/deferred overlay update after keyUp move=\(moveRect != nil) shift=\(shiftX != 0) mutation=\(mutation != nil)")
+
+            if let moveRect {
+                self.applyMoveOverlay(to: moveRect)
+            }
+
+            if shiftX != 0 {
+                self.applyShiftOverlayX(by: shiftX)
+            }
+
+            switch mutation {
+            case .updateText(let text, let isSpellCorrection, let isRewrite, let isLoading, let isSmartReply, let smartReplyOptions):
+                self.applyUpdateText(
+                    text,
+                    isSpellCorrection: isSpellCorrection,
+                    isRewrite: isRewrite,
+                    isLoading: isLoading,
+                    isSmartReply: isSmartReply,
+                    smartReplyOptions: smartReplyOptions
+                )
+            case .updateGhostText(let text, let isStale):
+                self.applyUpdateGhostText(text, isStale: isStale)
+            case .none:
+                break
+            }
         }
+    }
+
+    func moveOverlay(to rect: CGRect) {
+        guard InputIsolationMode.current.allowOverlay else {
+            print("[TypeFlow-InputIsolation] overlay/window mutation blocked mode=\(InputIsolationMode.current.label) action=moveOverlay")
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard !self.deferMoveOverlayIfNeeded(to: rect) else { return }
+            self.applyMoveOverlay(to: rect)
+        }
+    }
+
+    private func applyMoveOverlay(to rect: CGRect) {
+        lastCaretRect = rect
+        updateFocusSessionKeyIfNeeded()
+        repositionWindow()
     }
 
     private func updateFocusSessionKeyIfNeeded() {
@@ -1005,6 +1129,23 @@ class OverlayWindowController: NSWindowController {
     }
 
     func shiftOverlayX(by points: CGFloat) {
+        guard InputIsolationMode.current.allowOverlay else {
+            print("[TypeFlow-InputIsolation] overlay/window mutation blocked mode=\(InputIsolationMode.current.label) action=shiftOverlayX")
+            return
+        }
+
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.shiftOverlayX(by: points)
+            }
+            return
+        }
+
+        guard !deferShiftOverlayIfNeeded(by: points) else { return }
+        applyShiftOverlayX(by: points)
+    }
+
+    private func applyShiftOverlayX(by points: CGFloat) {
         guard overlayWindow.isVisible else { return }
         lastCaretRect.origin.x += points
         if var geom = lastGeometry {
@@ -1016,12 +1157,35 @@ class OverlayWindowController: NSWindowController {
     }
 
     func updateGhostText(_ newText: String, isStale: Bool = false) {
+        guard InputIsolationMode.current.allowOverlay else {
+            print("[TypeFlow-InputIsolation] overlay/window mutation blocked mode=\(InputIsolationMode.current.label) action=updateGhostText")
+            return
+        }
+
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.updateGhostText(newText, isStale: isStale)
+            }
+            return
+        }
+
+        let mutation = PendingOverlayMutation.updateGhostText(text: newText, isStale: isStale)
+        guard !deferOverlayMutationIfNeeded(mutation, action: "updateGhostText") else { return }
+        applyUpdateGhostText(newText, isStale: isStale)
+    }
+
+    private func applyUpdateGhostText(_ newText: String, isStale: Bool = false) {
         completionModel.text = newText
         
         guard !newText.isEmpty else {
+            CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "updateGhostText-empty")
+            print("[TypeFlow-InputAudit] overlayWindowEvent=orderOut source=updateGhostText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
             overlayWindow.orderOut(nil)
             return
         }
+
+        let hasActiveCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
+        CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(hasActiveCompletion && !isStale, reason: isStale ? "updateGhostText-stale" : "updateGhostText-active")
         
         if var geom = lastGeometry {
             let font = lastInlineRenderFont ?? NSFont.systemFont(ofSize: lastInlineFontSize ?? 13)
@@ -1072,22 +1236,58 @@ class OverlayWindowController: NSWindowController {
                     isLoading: Bool = false,
                     isSmartReply: Bool = false,
                     smartReplyOptions: [String] = []) {
+        guard InputIsolationMode.current.allowOverlay else {
+            print("[TypeFlow-InputIsolation] overlay/window mutation blocked mode=\(InputIsolationMode.current.label) action=updateText")
+            return
+        }
+
         // Suppressed: print("[TypeFlow-Debug] OverlayWindowController updateText '\(newText.prefix(40))' ...")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.completionModel.isSpellCorrection = isSpellCorrection
-            self.completionModel.isRewrite = isRewrite
-            self.completionModel.isLoading = isLoading
-            self.completionModel.isSmartReply = isSmartReply
-            self.completionModel.smartReplyOptions = smartReplyOptions
-            self.completionModel.text = newText
-            
-            if newText.isEmpty && !isLoading && smartReplyOptions.isEmpty {
-                self.overlayWindow.orderOut(nil)
-            } else {
-                self.repositionWindow()
-                self.overlayWindow.orderFront(nil)
-            }
+            let mutation = PendingOverlayMutation.updateText(
+                text: newText,
+                isSpellCorrection: isSpellCorrection,
+                isRewrite: isRewrite,
+                isLoading: isLoading,
+                isSmartReply: isSmartReply,
+                smartReplyOptions: smartReplyOptions
+            )
+            guard !self.deferOverlayMutationIfNeeded(mutation, action: "updateText") else { return }
+            self.applyUpdateText(
+                newText,
+                isSpellCorrection: isSpellCorrection,
+                isRewrite: isRewrite,
+                isLoading: isLoading,
+                isSmartReply: isSmartReply,
+                smartReplyOptions: smartReplyOptions
+            )
+        }
+    }
+
+    private func applyUpdateText(_ newText: String,
+                                 isSpellCorrection: Bool = false,
+                                 isRewrite: Bool = false,
+                                 isLoading: Bool = false,
+                                 isSmartReply: Bool = false,
+                                 smartReplyOptions: [String] = []) {
+        completionModel.isSpellCorrection = isSpellCorrection
+        completionModel.isRewrite = isRewrite
+        completionModel.isLoading = isLoading
+        completionModel.isSmartReply = isSmartReply
+        completionModel.smartReplyOptions = smartReplyOptions
+        completionModel.text = newText
+
+        if newText.isEmpty && !isLoading && smartReplyOptions.isEmpty {
+            CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "updateText-empty")
+            print("[TypeFlow-InputAudit] overlayWindowEvent=orderOut source=updateText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
+            overlayWindow.orderOut(nil)
+        } else {
+            repositionWindow()
+            print("[TypeFlow-InputAudit] overlayWindowEvent=orderFront source=updateText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
+            overlayWindow.orderFront(nil)
+            let hasActiveCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
+            let shouldEnableAcceptTap = hasActiveCompletion && !newText.isEmpty && !isLoading && smartReplyOptions.isEmpty
+            CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(shouldEnableAcceptTap, reason: "updateText-visible")
         }
     }
 
