@@ -1215,26 +1215,29 @@ class AccessibilityMonitor {
             return
         }
 
+        let inputTime = LatencyInstrumentation.shared.recordInputEvent(bufferLen: bufferSnapshot.count, delay: 0)
+        print("[DebounceAudit] no AccessibilityMonitor debounce before CompletionManager debounce")
+        if delay > 0 {
+            print("[DebounceAudit] AccessibilityMonitor delay bypassed oldDelayMs=\(Int(delay * 1000))")
+        }
         contextFetchWorkItem?.cancel()
         
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
+            LatencyInstrumentation.shared.contextFetchStart(inputTime: inputTime, bufferLen: bufferSnapshot.count)
             // NOTE: Caret rect is intentionally NOT fetched here.
             // getCurrentCaretRect() is a heavy AX IPC call. Executing it on every
             // keystroke was causing "Significant Energy" warnings and AXTextMarker spam.
             // Caret position is now only fetched once, immediately before showing the overlay.
             DispatchQueue.main.async {
                 CompletionManager.shared.onTextChanged(bufferFallback: bufferSnapshot)
+                LatencyInstrumentation.shared.contextFetchEnd(bufferLen: bufferSnapshot.count)
             }
         }
         
         contextFetchWorkItem = workItem
         
-        if delay > 0 {
-            processingQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
-        } else {
-            processingQueue.async(execute: workItem)
-        }
+        processingQueue.async(execute: workItem)
     }
     
     func stop() {

@@ -1315,6 +1315,7 @@ class OverlayWindowController: NSWindowController {
                 overlayWindow.setFrame(frame.integral, display: true)
             }
             logRenderReplace(text: newText)
+            LatencyInstrumentation.shared.renderApplied(textLen: newText.count, source: "updateGhostText")
         }
     }
 
@@ -1374,6 +1375,7 @@ class OverlayWindowController: NSWindowController {
             repositionWindow()
             print("[TypeFlow-InputAudit] overlayWindowEvent=orderFront source=updateText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
             overlayWindow.orderFront(nil)
+            LatencyInstrumentation.shared.renderApplied(textLen: newText.count, source: "updateText")
             let hasActiveCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
             let shouldEnableAcceptTap = hasActiveCompletion && !newText.isEmpty && !isLoading && smartReplyOptions.isEmpty
             CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(shouldEnableAcceptTap, reason: "updateText-visible")

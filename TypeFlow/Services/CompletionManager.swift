@@ -1,5 +1,340 @@
 import Cocoa
 
+final class LatencyInstrumentation: @unchecked Sendable {
+    static let shared = LatencyInstrumentation()
+
+    private struct Metrics {
+        var requestID: UInt64?
+        var workID: UInt64
+        var inputEventTime: CFAbsoluteTime?
+        var onTextChangedTime: CFAbsoluteTime?
+        var debounceScheduledTime: CFAbsoluteTime?
+        var debounceFiredTime: CFAbsoluteTime?
+        var generationRequestedTime: CFAbsoluteTime?
+        var contextStartTime: CFAbsoluteTime?
+        var contextEndTime: CFAbsoluteTime?
+        var axStartTime: CFAbsoluteTime?
+        var axEndTime: CFAbsoluteTime?
+        var ocrStartTime: CFAbsoluteTime?
+        var ocrEndTime: CFAbsoluteTime?
+        var promptStartTime: CFAbsoluteTime?
+        var promptEndTime: CFAbsoluteTime?
+        var llamaStartTime: CFAbsoluteTime?
+        var firstTokenTime: CFAbsoluteTime?
+        var firstUsableTime: CFAbsoluteTime?
+        var renderRequestedTime: CFAbsoluteTime?
+        var renderAppliedTime: CFAbsoluteTime?
+        var cancellationRequestedTime: CFAbsoluteTime?
+        var startTime: CFAbsoluteTime?
+        var cancelledSummaryLogged = false
+        var successSummaryLogged = false
+        var abortedByStage1B = false
+    }
+
+    private let lock = NSLock()
+    private var latestInputTime: CFAbsoluteTime?
+    private var latestContextStartTime: CFAbsoluteTime?
+    private var latestContextEndTime: CFAbsoluteTime?
+    private var latestOnTextChangedTime: CFAbsoluteTime?
+    private var latestDebouncedWorkID: UInt64?
+    private var metricsByWorkID: [UInt64: Metrics] = [:]
+    private var workIDByRequestID: [UInt64: UInt64] = [:]
+    private var pendingRenderRequestID: UInt64?
+
+    private func now() -> CFAbsoluteTime { CFAbsoluteTimeGetCurrent() }
+
+    private func idString(_ value: UInt64?) -> String {
+        guard let value else { return "nil" }
+        return String(value)
+    }
+
+    private func ms(_ start: CFAbsoluteTime?, _ end: CFAbsoluteTime?) -> String {
+        guard let start, let end else { return "nil" }
+        return String(format: "%.1f", (end - start) * 1000.0)
+    }
+
+    private func log(_ message: String) {
+        print("[Latency] \(message)")
+    }
+
+    func recordInputEvent(bufferLen: Int, delay: TimeInterval) -> CFAbsoluteTime {
+        let t = now()
+        lock.lock()
+        latestInputTime = t
+        lock.unlock()
+        log("input event bufferLen=\(bufferLen) contextDelayMs=\(String(format: "%.1f", delay * 1000.0))")
+        return t
+    }
+
+    func contextFetchStart(inputTime: CFAbsoluteTime?, bufferLen: Int) {
+        let t = now()
+        lock.lock()
+        latestInputTime = inputTime ?? latestInputTime ?? t
+        latestContextStartTime = t
+        lock.unlock()
+        log("context fetch start bufferLen=\(bufferLen)")
+    }
+
+    func contextFetchEnd(bufferLen: Int) {
+        let t = now()
+        lock.lock()
+        latestContextEndTime = t
+        if let workID = latestDebouncedWorkID {
+            var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+            metrics.contextEndTime = t
+            metricsByWorkID[workID] = metrics
+        }
+        lock.unlock()
+        log("context fetch end bufferLen=\(bufferLen)")
+    }
+
+    func onTextChanged(bufferLen: Int) {
+        let t = now()
+        lock.lock()
+        latestInputTime = latestInputTime ?? t
+        latestOnTextChangedTime = t
+        lock.unlock()
+        log("onTextChanged bufferLen=\(bufferLen)")
+    }
+
+    func debounceScheduled(workID: UInt64, delayMs: Int) {
+        let t = now()
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        metrics.inputEventTime = latestInputTime
+        metrics.contextStartTime = latestContextStartTime
+        metrics.contextEndTime = latestContextEndTime.flatMap { endTime in
+            guard let startTime = latestContextStartTime, endTime >= startTime else { return nil }
+            return endTime
+        }
+        metrics.onTextChangedTime = latestOnTextChangedTime ?? t
+        metrics.debounceScheduledTime = t
+        latestDebouncedWorkID = workID
+        metricsByWorkID[workID] = metrics
+        lock.unlock()
+        log("debounce scheduled workID=\(workID) delayMs=\(delayMs)")
+    }
+
+    func debounceFired(workID: UInt64) {
+        let t = now()
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        metrics.debounceFiredTime = t
+        metricsByWorkID[workID] = metrics
+        lock.unlock()
+        log("debounce fired workID=\(workID)")
+    }
+
+    func generationRequested(workID: UInt64?) {
+        let t = now()
+        guard let workID else {
+            log("generation requested workID=nil")
+            return
+        }
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        metrics.generationRequestedTime = t
+        metricsByWorkID[workID] = metrics
+        lock.unlock()
+        log("generation requested workID=\(workID)")
+    }
+
+    func axFetchStart(workID: UInt64?) {
+        let t = now()
+        if let workID {
+            lock.lock()
+            var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+            metrics.axStartTime = t
+            metricsByWorkID[workID] = metrics
+            lock.unlock()
+        }
+        log("AX fetch start workID=\(idString(workID))")
+    }
+
+    func axFetchEnd(workID: UInt64?, source: String, textLen: Int) {
+        let t = now()
+        if let workID {
+            lock.lock()
+            var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+            metrics.axEndTime = t
+            metricsByWorkID[workID] = metrics
+            lock.unlock()
+        }
+        log("AX fetch end workID=\(idString(workID)) source=\(source) textLen=\(textLen)")
+    }
+
+    func ocrStart(workID: UInt64?) {
+        let t = now()
+        if let workID {
+            lock.lock()
+            var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+            metrics.ocrStartTime = t
+            metricsByWorkID[workID] = metrics
+            lock.unlock()
+        }
+        log("OCR/context extras start workID=\(idString(workID))")
+    }
+
+    func ocrEnd(workID: UInt64?, textLen: Int) {
+        let t = now()
+        if let workID {
+            lock.lock()
+            var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+            metrics.ocrEndTime = t
+            metricsByWorkID[workID] = metrics
+            lock.unlock()
+        }
+        log("OCR/context extras end workID=\(idString(workID)) textLen=\(textLen)")
+    }
+
+    func requestStarted(requestID: UInt64, workID: UInt64) {
+        let t = now()
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        metrics.requestID = requestID
+        metrics.startTime = metrics.startTime ?? t
+        workIDByRequestID[requestID] = workID
+        metricsByWorkID[workID] = metrics
+        lock.unlock()
+        log("request started requestID=\(requestID) workID=\(workID)")
+    }
+
+    func promptBuildStart(requestID: UInt64?, workID: UInt64?) {
+        let t = now()
+        guard let workID else {
+            log("prompt build start requestID=\(idString(requestID)) workID=nil")
+            return
+        }
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        metrics.promptStartTime = t
+        metricsByWorkID[workID] = metrics
+        lock.unlock()
+        log("prompt build start requestID=\(idString(requestID)) workID=\(workID)")
+    }
+
+    func promptBuildEnd(requestID: UInt64?, workID: UInt64?) {
+        let t = now()
+        if let workID {
+            lock.lock()
+            var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+            metrics.promptEndTime = t
+            metricsByWorkID[workID] = metrics
+            lock.unlock()
+        }
+        log("prompt build end requestID=\(idString(requestID)) workID=\(idString(workID))")
+    }
+
+    func llamaGenerationStart(requestID: UInt64?, workID: UInt64?) {
+        let t = now()
+        if let workID {
+            lock.lock()
+            var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+            metrics.llamaStartTime = t
+            metricsByWorkID[workID] = metrics
+            lock.unlock()
+        }
+        log("llama generation start requestID=\(idString(requestID)) workID=\(idString(workID))")
+    }
+
+    func firstToken(requestID: UInt64?, workID: UInt64?) {
+        let t = now()
+        guard let workID else { return }
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        let shouldLog = metrics.firstTokenTime == nil
+        if shouldLog {
+            metrics.firstTokenTime = t
+            metricsByWorkID[workID] = metrics
+        }
+        lock.unlock()
+        if shouldLog {
+            log("first token requestID=\(idString(requestID)) workID=\(workID)")
+        }
+    }
+
+    func firstUsable(requestID: UInt64, workID: UInt64, textLen: Int) {
+        let t = now()
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        let shouldLog = metrics.firstUsableTime == nil
+        if shouldLog {
+            metrics.firstUsableTime = t
+            metricsByWorkID[workID] = metrics
+        }
+        lock.unlock()
+        if shouldLog {
+            log("first usable completion requestID=\(requestID) workID=\(workID) textLen=\(textLen)")
+        }
+    }
+
+    func renderRequested(requestID: UInt64, workID: UInt64, source: String, textLen: Int) {
+        let t = now()
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        if metrics.renderRequestedTime == nil {
+            metrics.renderRequestedTime = t
+        }
+        pendingRenderRequestID = requestID
+        metricsByWorkID[workID] = metrics
+        lock.unlock()
+        log("overlay render requested requestID=\(requestID) workID=\(workID) source=\(source) textLen=\(textLen)")
+    }
+
+    func renderApplied(textLen: Int, source: String) {
+        let t = now()
+        var summary: String?
+        lock.lock()
+        if let requestID = pendingRenderRequestID,
+           let workID = workIDByRequestID[requestID],
+           var metrics = metricsByWorkID[workID] {
+            if metrics.renderAppliedTime == nil {
+                metrics.renderAppliedTime = t
+                metricsByWorkID[workID] = metrics
+                summary = successSummary(for: metrics)
+            }
+            pendingRenderRequestID = nil
+        }
+        lock.unlock()
+        log("overlay render applied source=\(source) textLen=\(textLen)")
+        if let summary { print(summary) }
+    }
+
+    func cancellationRequested(requestID: UInt64, workID: UInt64, abortedByStage1B: Bool) {
+        let t = now()
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        metrics.cancellationRequestedTime = metrics.cancellationRequestedTime ?? t
+        metrics.abortedByStage1B = abortedByStage1B
+        metricsByWorkID[workID] = metrics
+        lock.unlock()
+    }
+
+    func cancelled(requestID: UInt64, workID: UInt64, abortedByStage1B: Bool) {
+        let t = now()
+        var summary: String?
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        metrics.abortedByStage1B = metrics.abortedByStage1B || abortedByStage1B
+        if !metrics.cancelledSummaryLogged {
+            metrics.cancelledSummaryLogged = true
+            metricsByWorkID[workID] = metrics
+            let start = metrics.startTime ?? metrics.generationRequestedTime ?? metrics.debounceFiredTime ?? metrics.inputEventTime ?? t
+            let lifetime = (t - start) * 1000.0
+            summary = "[LatencySummary] requestID=\(requestID) workID=\(workID) cancelled=true lifetimeMs=\(String(format: "%.1f", lifetime)) abortedByStage1B=\(metrics.abortedByStage1B)"
+        } else {
+            metricsByWorkID[workID] = metrics
+        }
+        lock.unlock()
+        if let summary { print(summary) }
+    }
+
+    private func successSummary(for metrics: Metrics) -> String {
+        let requestID = metrics.requestID ?? 0
+        return "[LatencySummary] requestID=\(requestID) workID=\(metrics.workID) inputToDebounceMs=\(ms(metrics.inputEventTime, metrics.debounceFiredTime)) contextMs=\(ms(metrics.contextStartTime, metrics.contextEndTime)) axMs=\(ms(metrics.axStartTime, metrics.axEndTime)) ocrMs=\(ms(metrics.ocrStartTime, metrics.ocrEndTime)) promptMs=\(ms(metrics.promptStartTime, metrics.promptEndTime)) llamaFirstTokenMs=\(ms(metrics.llamaStartTime, metrics.firstTokenTime)) llamaFirstUsableMs=\(ms(metrics.llamaStartTime, metrics.firstUsableTime)) renderMs=\(ms(metrics.renderRequestedTime, metrics.renderAppliedTime)) totalPauseToVisibleMs=\(ms(metrics.inputEventTime, metrics.renderAppliedTime))"
+    }
+}
+
 class CompletionManager: @unchecked Sendable {
     static let shared = CompletionManager()
     
@@ -16,7 +351,6 @@ class CompletionManager: @unchecked Sendable {
     /// Tracks the timestamp of the most recent keystroke for adaptive debounce.
     private var lastKeystrokeTime: Date = .distantPast
     
-    private var pendingCompletionRequest: String?
     private var activeSpellCorrection: (misspelled: String, corrected: String)?
     private var activeSnippetKey: String?
     var activeRewriteText: String?
@@ -28,6 +362,13 @@ class CompletionManager: @unchecked Sendable {
     var isSuppressedUntilNextTyping = false
     private var lastBufferSnapshot: String = ""
     private var generationStartCaretText: String = ""
+    private let debounceAuditLock = NSLock()
+    private var pendingDebounceText: String?
+    private var pendingDebounceTextHash: String?
+    private var debounceTextHashByWorkID: [UInt64: String] = [:]
+    private var debounceTextByWorkID: [UInt64: String] = [:]
+    private var activeGenerationDebounceText: String?
+    private var duplicateDebounceSkipCount: UInt64 = 0
     private let resultOwnershipLock = NSLock()
     private var latestResultRequestID: UInt64 = 0
     private var staleCompletedGenerationDiscardCount: UInt64 = 0
@@ -261,6 +602,7 @@ class CompletionManager: @unchecked Sendable {
         generationCancellationLock.unlock()
 
         if let previousToken, previousToken !== token, previousToken.requestCancellation(reason: "new-generation") {
+            LatencyInstrumentation.shared.cancellationRequested(requestID: previousToken.requestID, workID: previousToken.workID, abortedByStage1B: true)
             print("[Stage1B] cancellation requested oldRequestID=\(previousToken.requestID) reason=new-generation")
         }
         print("[Stage1B] new generation started with fresh cancellation token requestID=\(token.requestID)")
@@ -281,25 +623,100 @@ class CompletionManager: @unchecked Sendable {
 
         guard let token else { return }
         if token.requestCancellation(reason: reason) {
+            LatencyInstrumentation.shared.cancellationRequested(requestID: token.requestID, workID: token.workID, abortedByStage1B: true)
             print("[Stage1B] cancellation requested oldRequestID=\(token.requestID) reason=\(reason)")
         }
     }
     
-    private init() {
-        NotificationCenter.default.addObserver(
-            forName: Notification.Name("TypeFlowModelLoadingStateChanged"),
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            guard let self = self else { return }
-            if let isLoading = notification.object as? Bool, !isLoading {
-                if let pending = self.pendingCompletionRequest {
-                    print("[TypeFlow-Debug] Model finished loading. Firing pending completion request: '\(pending)'")
-                    self.pendingCompletionRequest = nil
-                    self.triggerGeneration(with: pending)
-                }
-            }
+    private init() {}
+
+    private func debounceAuditHash(_ text: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
         }
+        return String(format: "%016llx", hash)
+    }
+
+    private func debounceAuditTextChanged(_ text: String) -> (textHash: String, shouldSkip: Bool) {
+        let textHash = debounceAuditHash(text)
+        let timestamp = String(format: "%.6f", CFAbsoluteTimeGetCurrent())
+        print("[DebounceAudit] textChanged received textHash=\(textHash) timestamp=\(timestamp)")
+
+        debounceAuditLock.lock()
+        let isPendingDuplicate = pendingDebounceText == text
+        let isActiveGenerationText = activeGenerationDebounceText == text
+        debounceAuditLock.unlock()
+        let isRunningDuplicate = isActiveGenerationText && workController.isGenerationRunning
+        if isPendingDuplicate || isRunningDuplicate {
+            debounceAuditLock.lock()
+            duplicateDebounceSkipCount &+= 1
+            let count = duplicateDebounceSkipCount
+            debounceAuditLock.unlock()
+            print("[DebounceAudit] skipped duplicate textHash=\(textHash) count=\(count)")
+            return (textHash, true)
+        }
+        return (textHash, false)
+    }
+
+    private func debounceAuditPendingBeforeSchedule() -> Bool {
+        debounceAuditLock.lock()
+        defer { debounceAuditLock.unlock() }
+        return pendingDebounceText != nil
+    }
+
+    private func debounceAuditScheduled(text: String, textHash: String, workID: UInt64, delayMs: Int) {
+        debounceAuditLock.lock()
+        pendingDebounceText = text
+        pendingDebounceTextHash = textHash
+        debounceTextByWorkID[workID] = text
+        debounceTextHashByWorkID[workID] = textHash
+        debounceAuditLock.unlock()
+        print("[DebounceAudit] scheduled owner=CompletionManager delayMs=\(delayMs) textHash=\(textHash) workID=\(workID)")
+    }
+
+    private func debounceAuditMarkFired(workID: UInt64) -> String? {
+        debounceAuditLock.lock()
+        let text = debounceTextByWorkID[workID]
+        let textHash = debounceTextHashByWorkID[workID] ?? pendingDebounceTextHash
+        if let text {
+            activeGenerationDebounceText = text
+        }
+        if pendingDebounceText == text {
+            pendingDebounceText = nil
+            pendingDebounceTextHash = nil
+        }
+        debounceAuditLock.unlock()
+        return textHash
+    }
+
+    private func debounceAuditFired(requestID: UInt64, workID: UInt64) {
+        debounceAuditLock.lock()
+        let textHash = debounceTextHashByWorkID[workID] ?? debounceAuditHash(generationStartCaretText)
+        debounceAuditLock.unlock()
+        print("[DebounceAudit] fired requestID=\(requestID) textHash=\(textHash) workID=\(workID)")
+    }
+
+    private func debounceAuditGenerationFinished(workID: UInt64) {
+        debounceAuditLock.lock()
+        if let text = debounceTextByWorkID[workID], activeGenerationDebounceText == text {
+            activeGenerationDebounceText = nil
+        }
+        debounceTextByWorkID.removeValue(forKey: workID)
+        debounceTextHashByWorkID.removeValue(forKey: workID)
+        debounceAuditLock.unlock()
+    }
+
+    private func debounceAuditReset(reason: String) {
+        debounceAuditLock.lock()
+        pendingDebounceText = nil
+        pendingDebounceTextHash = nil
+        debounceTextByWorkID.removeAll()
+        debounceTextHashByWorkID.removeAll()
+        activeGenerationDebounceText = nil
+        debounceAuditLock.unlock()
+        print("[DebounceAudit] reset reason=\(reason)")
     }
     
     func setup(accessibilityMonitor: AccessibilityMonitor, overlayWindowController: OverlayWindowController) {
@@ -483,6 +900,11 @@ class CompletionManager: @unchecked Sendable {
     
     func onTextChanged(bufferFallback: String = "") {
         if isRewrite || isSmartReply { return }
+        LatencyInstrumentation.shared.onTextChanged(bufferLen: bufferFallback.count)
+        let debounceAudit = debounceAuditTextChanged(bufferFallback)
+        if debounceAudit.shouldSkip {
+            return
+        }
         // Suppressed: print("[TypeFlow-Debug] onTextChanged called")
         invalidateGenerationResults(reason: "text-changed", bufferSnapshot: bufferFallback)
         requestActiveGenerationAbort(reason: "new-input")
@@ -546,6 +968,9 @@ class CompletionManager: @unchecked Sendable {
         lastBufferSnapshot = bufferFallback
         
         // Clear existing completion state immediately when user types, but leave UI visible
+        if debounceAuditPendingBeforeSchedule() {
+            print("[DebounceAudit] cancelled previous debounce reason=newer-text")
+        }
         clearCompletion(hideUI: false)
 
         
@@ -671,19 +1096,25 @@ class CompletionManager: @unchecked Sendable {
         
         NotificationCenter.default.post(name: Notification.Name("UserDidType"), object: nil)
         
-        workController.replaceDebouncedWork(delayMilliseconds: Int(debounceInterval * 1000)) { [weak self] _ in
+        let debounceDelayMs = Int(debounceInterval * 1000)
+        let scheduledWorkID = workController.replaceDebouncedWork(delayMilliseconds: debounceDelayMs) { [weak self] workID in
+            _ = self?.debounceAuditMarkFired(workID: workID)
+            LatencyInstrumentation.shared.debounceFired(workID: workID)
             print("[TypeFlow-Debug] Debounce timer fired!")
-            self?.triggerGeneration()
+            self?.triggerGeneration(workID: workID)
         }
+        debounceAuditScheduled(text: bufferFallback, textHash: debounceAudit.textHash, workID: scheduledWorkID, delayMs: debounceDelayMs)
+        LatencyInstrumentation.shared.debounceScheduled(workID: scheduledWorkID, delayMs: debounceDelayMs)
     }
     
-    private func triggerGeneration(with text: String? = nil) {
+    private func triggerGeneration(with text: String? = nil, workID: UInt64? = nil) {
         guard SettingsManager.shared.enableAutocomplete else {
             print("[TypeFlow-Debug] triggerGeneration: Autocomplete disabled, skipping.")
             return
         }
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             guard let self = self else { return }
+            LatencyInstrumentation.shared.generationRequested(workID: workID)
             
             if self.isSuppressedUntilNextTyping {
                 print("[TypeFlow-Debug] triggerGeneration aborted due to isSuppressedUntilNextTyping.")
@@ -699,9 +1130,11 @@ class CompletionManager: @unchecked Sendable {
                 self.continueGeneration(snapshot: snapshot)
             } else {
                 // We MUST fetch AX text on a background thread because kAXValue polling is extremely expensive.
+                LatencyInstrumentation.shared.axFetchStart(workID: workID)
                 let textSnapshot = self.accessibilityMonitor?.getTextBeforeCaretSnapshot()
                 let axText = textSnapshot?.text ?? ""
                 let axSource = textSnapshot?.source ?? .none
+                LatencyInstrumentation.shared.axFetchEnd(workID: workID, source: axSource.rawValue, textLen: axText.count)
                 let bufferAfterAX = self.accessibilityMonitor?.keystrokeBuffer ?? ""
                 logContextAudit("triggerGeneration afterAX axSource=\(axSource.rawValue) axTextLen=\(axText.count) axText='\(contextAuditPreview(axText))' keystrokeBufferLen=\(bufferAfterAX.count) keystrokeBuffer='\(contextAuditPreview(bufferAfterAX))'")
                 
@@ -712,7 +1145,9 @@ class CompletionManager: @unchecked Sendable {
                 
                 if axText.count < 100 && isBrowser {
                     Task {
+                        LatencyInstrumentation.shared.ocrStart(workID: workID)
                         if let ocrText = await ScreenContextManager.shared.performRapidBrowserOCR() {
+                            LatencyInstrumentation.shared.ocrEnd(workID: workID, textLen: ocrText.count)
                             DispatchQueue.main.async {
                                 // Append this OCR text to the === Screen Context === payload
                                 ScreenContextManager.shared.latestScreenText = ocrText
@@ -727,6 +1162,7 @@ class CompletionManager: @unchecked Sendable {
                                 self.continueGeneration(snapshot: snapshot)
                             }
                         } else {
+                            LatencyInstrumentation.shared.ocrEnd(workID: workID, textLen: 0)
                             DispatchQueue.main.async {
                                 let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
                                 let snapshot = PredictionSnapshot(
@@ -806,6 +1242,8 @@ class CompletionManager: @unchecked Sendable {
         
         // Explicitly cancel any inflight task before creating a new one.
         let workID = workController.currentWorkID
+        LatencyInstrumentation.shared.requestStarted(requestID: resultRequestID, workID: workID)
+        debounceAuditFired(requestID: resultRequestID, workID: workID)
         let generationCancellationToken = LlamaGenerationCancellationToken(requestID: resultRequestID, workID: workID)
         installGenerationCancellationToken(generationCancellationToken)
         print("[Stage1B] generation started requestID=\(resultRequestID) workID=\(workID)")
@@ -814,20 +1252,12 @@ class CompletionManager: @unchecked Sendable {
             guard let self = self else { return }
             defer {
                 self.clearGenerationCancellationTokenIfCurrent(generationCancellationToken)
+                self.debounceAuditGenerationFinished(workID: workID)
                 self.workController.setGenerationFinished()
             }
             
             // If this task was cancelled while waiting, abort early
             if Task.isCancelled || !self.workController.isCurrent(workID) { return }
-            
-            let modelReady = await LLMEngine.shared.isModelReady
-            if !modelReady {
-                print("[TypeFlow-Debug] Model is not ready yet. Queuing request: '\(fullActiveLine)'")
-                await MainActor.run {
-                    self.pendingCompletionRequest = activeLine
-                }
-                return
-            }
             
             if Task.isCancelled { return }
             
@@ -841,6 +1271,7 @@ class CompletionManager: @unchecked Sendable {
                         if generationCancellationToken.shouldLogStreamSuppression() {
                             print("[Stage1B] stale/cancelled stream token suppressed requestID=\(resultRequestID)")
                         }
+                        LatencyInstrumentation.shared.cancelled(requestID: resultRequestID, workID: workID, abortedByStage1B: true)
                         return
                     }
                     guard self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) else { return }
@@ -880,6 +1311,10 @@ class CompletionManager: @unchecked Sendable {
                         if let newlineRange = remainder.range(of: "\n") {
                             let truncated = String(remainder[..<newlineRange.lowerBound])
                             guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream-newline") else { return }
+                            if !truncated.isEmpty {
+                                LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: truncated.count)
+                                LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "stream-newline", textLen: truncated.count)
+                            }
                             self.workController.cancelAll()
                             DispatchQueue.main.async {
                                 guard self.shouldRenderOwnedResult(requestID: resultRequestID, workID: workID, source: "stream-newline-main") else { return }
@@ -898,6 +1333,10 @@ class CompletionManager: @unchecked Sendable {
                     }
                     
                     guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream") else { return }
+                    if !remainder.isEmpty {
+                        LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: remainder.count)
+                        LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "stream", textLen: remainder.count)
+                    }
                     
                     DispatchQueue.main.async {
                         guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream-main") else { return }
@@ -917,6 +1356,7 @@ class CompletionManager: @unchecked Sendable {
                 if generationCancellationToken.shouldLogCancellationExit() {
                     print("[Stage1B] generation exited cancelled requestID=\(resultRequestID)")
                 }
+                LatencyInstrumentation.shared.cancelled(requestID: resultRequestID, workID: workID, abortedByStage1B: true)
                 return
             }
             print("[TypeFlow-Debug] Raw model output: '\(completion.prefix(40))'")
@@ -968,6 +1408,10 @@ class CompletionManager: @unchecked Sendable {
             print("[TypeFlow-Debug] Processed completion: '\(finalRemainder.prefix(40))'")
             
             if Task.isCancelled || !self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "final") { return }
+            if !finalRemainder.isEmpty {
+                LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: finalRemainder.count)
+                LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "final", textLen: finalRemainder.count)
+            }
             
             DispatchQueue.main.async {
                 guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "final-main") else { return }
@@ -1300,6 +1744,7 @@ class CompletionManager: @unchecked Sendable {
     func cancelInflightTasks() {
         requestActiveGenerationAbort(reason: "cancel-inflight")
         workController.cancelAll()
+        debounceAuditReset(reason: "cancel-inflight")
         rewriteTask?.cancel()
     }
     
