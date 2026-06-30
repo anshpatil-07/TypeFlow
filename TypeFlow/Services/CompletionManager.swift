@@ -369,6 +369,10 @@ class CompletionManager: @unchecked Sendable {
     private var debounceTextByWorkID: [UInt64: String] = [:]
     private var activeGenerationDebounceText: String?
     private var duplicateDebounceSkipCount: UInt64 = 0
+    private let axHotPathLock = NSLock()
+    private var axHotPathGetTextGenerationCount: UInt64 = 0
+    private var axHotPathGetTextStreamCount: UInt64 = 0
+    private var axHotPathGetTextRenderCount: UInt64 = 0
     private let resultOwnershipLock = NSLock()
     private var latestResultRequestID: UInt64 = 0
     private var staleCompletedGenerationDiscardCount: UInt64 = 0
@@ -399,6 +403,80 @@ class CompletionManager: @unchecked Sendable {
 
         var activeLine: String {
             canonicalTextBeforeCaret.components(separatedBy: .newlines).last ?? ""
+        }
+    }
+
+    private final class GenerationRequestSnapshot: @unchecked Sendable {
+        let requestID: UInt64
+        let workID: UInt64
+        let canonicalTextBeforeCaret: String
+        let source: TextBeforeCaretSource
+        let textHash: String
+
+        private let lock = NSLock()
+        private var cachedCaretRect: CGRect?
+        private var attemptedCaretCapture = false
+        private var didLogStreamNoAX = false
+        private var didLogSkippedStreamAX = false
+        private var didLogFinalNoAX = false
+
+        init(
+            requestID: UInt64,
+            workID: UInt64,
+            canonicalTextBeforeCaret: String,
+            source: TextBeforeCaretSource,
+            textHash: String
+        ) {
+            self.requestID = requestID
+            self.workID = workID
+            self.canonicalTextBeforeCaret = canonicalTextBeforeCaret
+            self.source = source
+            self.textHash = textHash
+        }
+
+        func resolveCaretRect(using monitor: AccessibilityMonitor?) -> (rect: CGRect?, cached: Bool) {
+            lock.lock()
+            if let cachedCaretRect {
+                lock.unlock()
+                return (cachedCaretRect, true)
+            }
+            if attemptedCaretCapture {
+                lock.unlock()
+                return (nil, false)
+            }
+            attemptedCaretCapture = true
+            lock.unlock()
+
+            let rect = monitor?.getCurrentCaretRect()
+
+            lock.lock()
+            cachedCaretRect = rect
+            lock.unlock()
+            return (rect, false)
+        }
+
+        func shouldLogStreamNoAX() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !didLogStreamNoAX else { return false }
+            didLogStreamNoAX = true
+            return true
+        }
+
+        func shouldLogSkippedStreamAX() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !didLogSkippedStreamAX else { return false }
+            didLogSkippedStreamAX = true
+            return true
+        }
+
+        func shouldLogFinalNoAX() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !didLogFinalNoAX else { return false }
+            didLogFinalNoAX = true
+            return true
         }
     }
 
@@ -717,6 +795,56 @@ class CompletionManager: @unchecked Sendable {
         activeGenerationDebounceText = nil
         debounceAuditLock.unlock()
         print("[DebounceAudit] reset reason=\(reason)")
+    }
+
+    private func recordAXHotPathGetTextRead(phase: String) {
+        axHotPathLock.lock()
+        switch phase {
+        case "generation":
+            axHotPathGetTextGenerationCount &+= 1
+        case "stream":
+            axHotPathGetTextStreamCount &+= 1
+        case "render":
+            axHotPathGetTextRenderCount &+= 1
+        default:
+            break
+        }
+        let generation = axHotPathGetTextGenerationCount
+        let stream = axHotPathGetTextStreamCount
+        let render = axHotPathGetTextRenderCount
+        axHotPathLock.unlock()
+        print("[AXHotPath] getTextBeforeCaret count generation=\(generation) stream=\(stream) render=\(render)")
+    }
+
+    private func logAXHotPathCounts() {
+        axHotPathLock.lock()
+        let generation = axHotPathGetTextGenerationCount
+        let stream = axHotPathGetTextStreamCount
+        let render = axHotPathGetTextRenderCount
+        axHotPathLock.unlock()
+        print("[AXHotPath] getTextBeforeCaret count generation=\(generation) stream=\(stream) render=\(render)")
+    }
+
+    private func applyAutocompleteOverlayText(
+        _ text: String,
+        requestSnapshot: GenerationRequestSnapshot,
+        source: String,
+        recordShown: Bool = false
+    ) {
+        currentCompletion = text
+        if !text.isEmpty {
+            if recordShown {
+                UsageStatsManager.shared.recordCompletionShown()
+            }
+            let geometry = requestSnapshot.resolveCaretRect(using: accessibilityMonitor)
+            print("[AXHotPath] overlay geometry used cached=\(geometry.cached) requestID=\(requestSnapshot.requestID) source=\(source)")
+            if let rect = geometry.rect {
+                overlayWindowController?.moveOverlay(to: rect)
+            }
+            overlayWindowController?.updateText(text)
+        } else {
+            overlayWindowController?.updateText("")
+        }
     }
     
     func setup(accessibilityMonitor: AccessibilityMonitor, overlayWindowController: OverlayWindowController) {
@@ -1131,6 +1259,7 @@ class CompletionManager: @unchecked Sendable {
             } else {
                 // We MUST fetch AX text on a background thread because kAXValue polling is extremely expensive.
                 LatencyInstrumentation.shared.axFetchStart(workID: workID)
+                self.recordAXHotPathGetTextRead(phase: "generation")
                 let textSnapshot = self.accessibilityMonitor?.getTextBeforeCaretSnapshot()
                 let axText = textSnapshot?.text ?? ""
                 let axSource = textSnapshot?.source ?? .none
@@ -1244,6 +1373,15 @@ class CompletionManager: @unchecked Sendable {
         let workID = workController.currentWorkID
         LatencyInstrumentation.shared.requestStarted(requestID: resultRequestID, workID: workID)
         debounceAuditFired(requestID: resultRequestID, workID: workID)
+        let requestSnapshot = GenerationRequestSnapshot(
+            requestID: resultRequestID,
+            workID: workID,
+            canonicalTextBeforeCaret: fullActiveLine,
+            source: snapshot.source,
+            textHash: debounceAuditHash(fullActiveLine)
+        )
+        print("[AXHotPath] generation snapshot captured requestID=\(resultRequestID) textHash=\(requestSnapshot.textHash) source=\(snapshot.source.rawValue)")
+        logAXHotPathCounts()
         let generationCancellationToken = LlamaGenerationCancellationToken(requestID: resultRequestID, workID: workID)
         installGenerationCancellationToken(generationCancellationToken)
         print("[Stage1B] generation started requestID=\(resultRequestID) workID=\(workID)")
@@ -1273,35 +1411,25 @@ class CompletionManager: @unchecked Sendable {
                         }
                         LatencyInstrumentation.shared.cancelled(requestID: resultRequestID, workID: workID, abortedByStage1B: true)
                         return
-                    }
-                    guard self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) else { return }
-                    
-                    let currentAX = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
-                    let currentLine = !currentAX.isEmpty ? currentAX : (self.accessibilityMonitor?.keystrokeBuffer ?? "")
-                    
-                    let startText = generationStartText
-                    var typedSinceStart = ""
-                    if currentLine.hasPrefix(startText) {
-                        typedSinceStart = String(currentLine.dropFirst(startText.count))
-                    }
-                    
-                    var processed = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: partialText)
-                    processed = self.stripMarkdown(processed)
-                    
-                    if !processed.hasPrefix(typedSinceStart) && !typedSinceStart.hasPrefix(processed) {
-                        print("[TypeFlow-Debug] Contradiction detected! processed: '\(processed)', typedSinceStart: '\(typedSinceStart)'. Cancelling task.")
-                        guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream-contradiction") else { return }
-                        self.workController.cancelAll()
-                        DispatchQueue.main.async {
-                            guard self.shouldRenderOwnedResult(requestID: resultRequestID, workID: workID, source: "stream-contradiction-main") else { return }
-                            self.overlayWindowController?.updateText("")
-                            self.onTextChanged(bufferFallback: currentLine)
-                        }
-                        return
-                    }
-                    
-                    let remainder: String
-                    if processed.hasPrefix(typedSinceStart) {
+	                    }
+	                    guard self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) else { return }
+
+	                    if requestSnapshot.shouldLogStreamNoAX() {
+	                        print("[AXHotPath] stream validation used snapshot/noAX requestID=\(resultRequestID)")
+	                    }
+	                    if requestSnapshot.shouldLogSkippedStreamAX() {
+	                        print("[AXHotPath] skipped AX read during stream requestID=\(resultRequestID)")
+	                        self.logAXHotPathCounts()
+	                    }
+
+	                    let startText = generationStartText
+	                    let typedSinceStart = ""
+	                    
+	                    var processed = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: partialText)
+	                    processed = self.stripMarkdown(processed)
+	                    
+	                    let remainder: String
+	                    if processed.hasPrefix(typedSinceStart) {
                         remainder = String(processed.dropFirst(typedSinceStart.count))
                     } else {
                         remainder = ""
@@ -1315,21 +1443,13 @@ class CompletionManager: @unchecked Sendable {
                                 LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: truncated.count)
                                 LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "stream-newline", textLen: truncated.count)
                             }
-                            self.workController.cancelAll()
-                            DispatchQueue.main.async {
-                                guard self.shouldRenderOwnedResult(requestID: resultRequestID, workID: workID, source: "stream-newline-main") else { return }
-                                self.currentCompletion = truncated
-                                if !truncated.isEmpty {
-                                    if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
-                                        self.overlayWindowController?.moveOverlay(to: rect)
-                                    }
-                                    self.overlayWindowController?.updateText(truncated)
-                                } else {
-                                    self.overlayWindowController?.updateText("")
-                                }
-                            }
-                            return
-                        }
+	                            self.workController.cancelAll()
+	                            DispatchQueue.main.async {
+	                                guard self.shouldRenderOwnedResult(requestID: resultRequestID, workID: workID, source: "stream-newline-main") else { return }
+	                                self.applyAutocompleteOverlayText(truncated, requestSnapshot: requestSnapshot, source: "stream-newline")
+	                            }
+	                            return
+	                        }
                     }
                     
                     guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream") else { return }
@@ -1337,20 +1457,12 @@ class CompletionManager: @unchecked Sendable {
                         LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: remainder.count)
                         LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "stream", textLen: remainder.count)
                     }
-                    
-                    DispatchQueue.main.async {
-                        guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream-main") else { return }
-                        self.currentCompletion = remainder
-                        if !remainder.isEmpty {
-                            if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
-                                self.overlayWindowController?.moveOverlay(to: rect)
-                            }
-                            self.overlayWindowController?.updateText(remainder)
-                        } else {
-                            self.overlayWindowController?.updateText("")
-                        }
-                    }
-                }
+	                    
+	                    DispatchQueue.main.async {
+	                        guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream-main") else { return }
+	                        self.applyAutocompleteOverlayText(remainder, requestSnapshot: requestSnapshot, source: "stream")
+	                    }
+	                }
             )
             if generationCancellationToken.isCancelled {
                 if generationCancellationToken.shouldLogCancellationExit() {
@@ -1366,33 +1478,21 @@ class CompletionManager: @unchecked Sendable {
                 }
                 print("[TypeFlow-Debug] Task was cancelled or stale work ID, ignoring output.")
                 return 
-            }
-            
-            let currentAX = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
-            let currentLine = !currentAX.isEmpty ? currentAX : (self.accessibilityMonitor?.keystrokeBuffer ?? "")
-            
-            let startText = generationStartText
-            var typedSinceStart = ""
-            if currentLine.hasPrefix(startText) {
-                typedSinceStart = String(currentLine.dropFirst(startText.count))
-            }
-            
-            var processedCompletion = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: completion)
-            processedCompletion = self.stripMarkdown(processedCompletion)
-            
-            if !processedCompletion.hasPrefix(typedSinceStart) && !typedSinceStart.hasPrefix(processedCompletion) {
-                guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "final-contradiction") else { return }
-                self.workController.cancelAll()
-                DispatchQueue.main.async {
-                    guard self.shouldRenderOwnedResult(requestID: resultRequestID, workID: workID, source: "final-contradiction-main") else { return }
-                    self.overlayWindowController?.updateText("")
-                    self.onTextChanged(bufferFallback: currentLine)
-                }
-                return
-            }
-            
-            let remainder: String
-            if processedCompletion.hasPrefix(typedSinceStart) {
+	            }
+
+	            if requestSnapshot.shouldLogFinalNoAX() {
+	                print("[AXHotPath] final validation noAX requestID=\(resultRequestID)")
+	                self.logAXHotPathCounts()
+	            }
+
+	            let startText = generationStartText
+	            let typedSinceStart = ""
+	            
+	            var processedCompletion = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: completion)
+	            processedCompletion = self.stripMarkdown(processedCompletion)
+	            
+	            let remainder: String
+	            if processedCompletion.hasPrefix(typedSinceStart) {
                 remainder = String(processedCompletion.dropFirst(typedSinceStart.count))
             } else {
                 remainder = ""
@@ -1412,27 +1512,13 @@ class CompletionManager: @unchecked Sendable {
                 LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: finalRemainder.count)
                 LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "final", textLen: finalRemainder.count)
             }
-            
-            DispatchQueue.main.async {
-                guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "final-main") else { return }
-                self.currentCompletion = finalRemainder
-                if !finalRemainder.isEmpty {
-                    UsageStatsManager.shared.recordCompletionShown()
-                    if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
-                        // Suppressed: print("[TypeFlow-Debug] Telling overlay to move to caret rect: \(rect)")
-                        self.overlayWindowController?.moveOverlay(to: rect)
-                    } else {
-                        // Suppressed: print("[TypeFlow-Debug] Caret rect was nil, NOT moving overlay!")
-                    }
-                    // Suppressed: print("[TypeFlow-Debug] Telling overlay to update text to: '\(finalRemainder)'")
-                    self.overlayWindowController?.updateText(finalRemainder)
-                } else {
-                    // Suppressed: print("[TypeFlow-Debug] Processed completion was empty, hiding overlay.")
-                    self.overlayWindowController?.updateText("")
-                }
-            }
-        }
-    }
+	            
+	            DispatchQueue.main.async {
+	                guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "final-main") else { return }
+	                self.applyAutocompleteOverlayText(finalRemainder, requestSnapshot: requestSnapshot, source: "final", recordShown: !finalRemainder.isEmpty)
+	            }
+	        }
+	    }
     
     /// Rewrite modes for the three popover buttons.
     enum RewriteMode {
