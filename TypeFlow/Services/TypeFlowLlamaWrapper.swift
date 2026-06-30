@@ -7,7 +7,10 @@ final class LlamaGenerationCancellationToken: @unchecked Sendable {
 
     private let lock = NSLock()
     private var cancelled = false
+    private var cancellationRequestLogged = false
     private var abortCallbackLogged = false
+    private var cancellationExitLogged = false
+    private var streamSuppressionLogged = false
 
     init(requestID: UInt64, workID: UInt64) {
         self.requestID = requestID
@@ -21,12 +24,35 @@ final class LlamaGenerationCancellationToken: @unchecked Sendable {
     }
 
     @discardableResult
-    func requestCancellation() -> Bool {
+    func requestCancellation(reason _: String? = nil) -> Bool {
         lock.lock()
-        let wasAlreadyCancelled = cancelled
+        let shouldLog = !cancellationRequestLogged
         cancelled = true
+        if shouldLog {
+            cancellationRequestLogged = true
+        }
         lock.unlock()
-        return !wasAlreadyCancelled
+        return shouldLog
+    }
+
+    func shouldLogCancellationExit() -> Bool {
+        lock.lock()
+        let shouldLog = !cancellationExitLogged
+        if shouldLog {
+            cancellationExitLogged = true
+        }
+        lock.unlock()
+        return shouldLog
+    }
+
+    func shouldLogStreamSuppression() -> Bool {
+        lock.lock()
+        let shouldLog = !streamSuppressionLogged
+        if shouldLog {
+            streamSuppressionLogged = true
+        }
+        lock.unlock()
+        return shouldLog
     }
 
     func shouldAbortFromCallback() -> Bool {

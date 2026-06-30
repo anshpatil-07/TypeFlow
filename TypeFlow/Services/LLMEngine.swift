@@ -108,7 +108,8 @@ actor LLMEngine {
                 cancellationToken: cancellationToken,
                 onPartialRawText: { partialText in
                     if cancellationToken?.isCancelled == true {
-                        if let requestID = cancellationToken?.requestID {
+                        if let requestID = cancellationToken?.requestID,
+                           cancellationToken?.shouldLogStreamSuppression() == true {
                             print("[Stage1B] stale/cancelled stream token suppressed requestID=\(requestID)")
                         }
                         return
@@ -125,7 +126,8 @@ actor LLMEngine {
             return trimmedResult
             
         } catch is CancellationError {
-            if let requestID = cancellationToken?.requestID {
+            if let requestID = cancellationToken?.requestID,
+               cancellationToken?.shouldLogCancellationExit() == true {
                 print("[Stage1B] generation exited cancelled requestID=\(requestID)")
             }
             return ""

@@ -260,7 +260,7 @@ class CompletionManager: @unchecked Sendable {
         activeGenerationCancellationToken = token
         generationCancellationLock.unlock()
 
-        if let previousToken, previousToken !== token, previousToken.requestCancellation() {
+        if let previousToken, previousToken !== token, previousToken.requestCancellation(reason: "new-generation") {
             print("[Stage1B] cancellation requested oldRequestID=\(previousToken.requestID) reason=new-generation")
         }
         print("[Stage1B] new generation started with fresh cancellation token requestID=\(token.requestID)")
@@ -280,7 +280,7 @@ class CompletionManager: @unchecked Sendable {
         generationCancellationLock.unlock()
 
         guard let token else { return }
-        if token.requestCancellation() {
+        if token.requestCancellation(reason: reason) {
             print("[Stage1B] cancellation requested oldRequestID=\(token.requestID) reason=\(reason)")
         }
     }
@@ -838,7 +838,9 @@ class CompletionManager: @unchecked Sendable {
                 onStream: { [weak self] partialText in
                     guard let self = self else { return }
                     guard !generationCancellationToken.isCancelled else {
-                        print("[Stage1B] stale/cancelled stream token suppressed requestID=\(resultRequestID)")
+                        if generationCancellationToken.shouldLogStreamSuppression() {
+                            print("[Stage1B] stale/cancelled stream token suppressed requestID=\(resultRequestID)")
+                        }
                         return
                     }
                     guard self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) else { return }
@@ -912,7 +914,9 @@ class CompletionManager: @unchecked Sendable {
                 }
             )
             if generationCancellationToken.isCancelled {
-                print("[Stage1B] generation exited cancelled requestID=\(resultRequestID)")
+                if generationCancellationToken.shouldLogCancellationExit() {
+                    print("[Stage1B] generation exited cancelled requestID=\(resultRequestID)")
+                }
                 return
             }
             print("[TypeFlow-Debug] Raw model output: '\(completion.prefix(40))'")
