@@ -766,6 +766,7 @@ class OverlayWindowController: NSWindowController {
             smartReplyOptions: [String]
         )
         case updateGhostText(text: String, isStale: Bool)
+        case replaceGhostTextAfterAcceptance(inserted: String, remainder: String, source: String)
     }
 
     var overlayWindow: OverlayWindow!
@@ -787,6 +788,50 @@ class OverlayWindowController: NSWindowController {
     private var pendingShiftOverlayX: CGFloat = 0
     private var pendingOverlayMutation: PendingOverlayMutation?
     private var isDeferredOverlayFlushScheduled = false
+
+    private func overlaySubviewCount() -> Int {
+        func countSubviews(in view: NSView?) -> Int {
+            guard let view = view else { return 0 }
+            return view.subviews.count + view.subviews.reduce(0) { $0 + countSubviews(in: $1) }
+        }
+        return countSubviews(in: overlayWindow.contentView)
+    }
+
+    private func overlayLayerCount() -> Int {
+        func countLayers(in layer: CALayer?) -> Int {
+            guard let layer = layer else { return 0 }
+            let sublayers = layer.sublayers ?? []
+            return sublayers.count + sublayers.reduce(0) { $0 + countLayers(in: $1) }
+        }
+        return countLayers(in: overlayWindow.contentView?.layer)
+    }
+
+    private func clearAllRenderedGhostText(resetGeometry: Bool = false, clearPendingMutations: Bool = false) {
+        let oldLayerCount = overlayLayerCount()
+        let oldSubviewCount = overlaySubviewCount()
+        print("[OverlayRender] clearAllRenderedGhostText oldLayerCount=\(oldLayerCount) oldSubviewCount=\(oldSubviewCount)")
+
+        overlayWindow.contentView?.layer?.sublayers?.forEach { $0.removeFromSuperlayer() }
+        overlayWindow.contentView?.subviews.forEach { $0.removeFromSuperview() }
+        overlayWindow.contentView = nil
+        inlineHostingView = nil
+        completionOverlayHostingView = nil
+
+        if resetGeometry {
+            lastGeometry = nil
+        }
+
+        pendingShiftOverlayX = 0
+        if clearPendingMutations {
+            pendingMoveOverlayRect = nil
+            pendingOverlayMutation = nil
+            isDeferredOverlayFlushScheduled = false
+        }
+    }
+
+    private func logRenderReplace(text: String) {
+        print("[OverlayRender] renderReplace text='\(text)' layerCountAfter=\(overlayLayerCount()) subviewCountAfter=\(overlaySubviewCount())")
+    }
 
     init() {
         overlayWindow = OverlayWindow(
@@ -874,6 +919,10 @@ class OverlayWindowController: NSWindowController {
 
     private func deferOverlayMutationIfNeeded(_ mutation: PendingOverlayMutation, action: String) -> Bool {
         guard InputCriticalSection.shared.isActive else { return false }
+        if pendingShiftOverlayX != 0 {
+            print("[OverlayRender] prevented additive overlay render")
+        }
+        pendingShiftOverlayX = 0
         pendingOverlayMutation = mutation
         print("[InputCriticalSection] overlay update blocked/deferred because physical key is down action=\(action)")
         scheduleDeferredOverlayFlush()
@@ -891,8 +940,11 @@ class OverlayWindowController: NSWindowController {
             }
 
             let moveRect = self.pendingMoveOverlayRect
-            let shiftX = self.pendingShiftOverlayX
             let mutation = self.pendingOverlayMutation
+            let shiftX = mutation == nil ? self.pendingShiftOverlayX : 0
+            if mutation != nil && self.pendingShiftOverlayX != 0 {
+                print("[OverlayRender] prevented additive overlay render")
+            }
 
             self.pendingMoveOverlayRect = nil
             self.pendingShiftOverlayX = 0
@@ -922,6 +974,8 @@ class OverlayWindowController: NSWindowController {
                 )
             case .updateGhostText(let text, let isStale):
                 self.applyUpdateGhostText(text, isStale: isStale)
+            case .replaceGhostTextAfterAcceptance(let inserted, let remainder, let source):
+                self.applyReplaceGhostTextAfterAcceptance(inserted: inserted, remainder: remainder, source: source)
             case .none:
                 break
             }
@@ -959,6 +1013,7 @@ class OverlayWindowController: NSWindowController {
         guard !completionModel.text.isEmpty || completionModel.isLoading || (!completionModel.smartReplyOptions.isEmpty && completionModel.isSmartReply) else { return }
 
         let useSwiftUIOverlay = completionModel.isRewrite || completionModel.isSmartReply || completionModel.isLoading
+        clearAllRenderedGhostText()
         
         if useSwiftUIOverlay {
             // Rewrite, smart reply, or loading spinner mode
@@ -1000,10 +1055,8 @@ class OverlayWindowController: NSWindowController {
                 height: windowHeight
             )
             
-            if completionOverlayHostingView == nil {
-                let hv = NSHostingView(rootView: CompletionOverlayView(model: completionModel))
-                completionOverlayHostingView = hv
-            }
+            let hv = NSHostingView(rootView: CompletionOverlayView(model: completionModel))
+            completionOverlayHostingView = hv
             
             if overlayWindow.contentView !== completionOverlayHostingView {
                 overlayWindow.contentView = completionOverlayHostingView
@@ -1011,6 +1064,7 @@ class OverlayWindowController: NSWindowController {
             
             overlayWindow.ignoresMouseEvents = !((completionModel.isLoading && completionModel.isRewrite) || (completionModel.isSmartReply && !completionModel.smartReplyOptions.isEmpty))
             overlayWindow.setFrame(newFrame, display: true)
+            logRenderReplace(text: completionModel.text)
         } else {
             // Normal inline ghost text rendering mode
             var resolvedStyle: ResolvedFieldStyle? = nil
@@ -1104,12 +1158,8 @@ class OverlayWindowController: NSWindowController {
                 isCorrection: geom.isCorrection
             )
             
-            if let existing = inlineHostingView {
-                existing.rootView = rootView
-            } else {
-                let fresh = NSHostingView(rootView: rootView)
-                inlineHostingView = fresh
-            }
+            let fresh = NSHostingView(rootView: rootView)
+            inlineHostingView = fresh
             
             if overlayWindow.contentView !== inlineHostingView {
                 overlayWindow.contentView = inlineHostingView
@@ -1125,6 +1175,7 @@ class OverlayWindowController: NSWindowController {
                 return
             }
             overlayWindow.setFrame(frame.integral, display: true)
+            logRenderReplace(text: completionModel.text)
         }
     }
 
@@ -1156,6 +1207,43 @@ class OverlayWindowController: NSWindowController {
         overlayWindow.setFrameOrigin(f.origin)
     }
 
+    func replaceGhostTextAfterAcceptance(inserted: String, remainder: String, source: String = "tabAccept") {
+        guard InputIsolationMode.current.allowOverlay else {
+            print("[TypeFlow-InputIsolation] overlay/window mutation blocked mode=\(InputIsolationMode.current.label) action=replaceGhostTextAfterAcceptance")
+            return
+        }
+
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.replaceGhostTextAfterAcceptance(inserted: inserted, remainder: remainder, source: source)
+            }
+            return
+        }
+
+        let mutation = PendingOverlayMutation.replaceGhostTextAfterAcceptance(inserted: inserted, remainder: remainder, source: source)
+        guard !deferOverlayMutationIfNeeded(mutation, action: "replaceGhostTextAfterAcceptance") else { return }
+        applyReplaceGhostTextAfterAcceptance(inserted: inserted, remainder: remainder, source: source)
+    }
+
+    private func applyReplaceGhostTextAfterAcceptance(inserted: String, remainder: String, source: String) {
+        if source == "tabAccept" {
+            print("[OverlayRender] tabAccept recomputeRemainderFromScratch inserted='\(inserted)' remainder='\(remainder)'")
+        }
+
+        let font = lastInlineRenderFont ?? NSFont.systemFont(ofSize: lastInlineFontSize ?? 13, weight: .regular)
+        let attrs = [NSAttributedString.Key.font: font]
+        let shiftPx = (inserted as NSString).size(withAttributes: attrs).width
+        lastCaretRect.origin.x += shiftPx
+        if let geom = lastGeometry {
+            lastGeometry = geom.withCaretRect(geom.caretRect.offsetBy(dx: shiftPx, dy: 0))
+        }
+
+        if remainder.isEmpty {
+            print("[OverlayRender] hideBecauseEmptyRemainder")
+        }
+        applyUpdateGhostText(remainder)
+    }
+
     func updateGhostText(_ newText: String, isStale: Bool = false) {
         guard InputIsolationMode.current.allowOverlay else {
             print("[TypeFlow-InputIsolation] overlay/window mutation blocked mode=\(InputIsolationMode.current.label) action=updateGhostText")
@@ -1178,6 +1266,7 @@ class OverlayWindowController: NSWindowController {
         completionModel.text = newText
         
         guard !newText.isEmpty else {
+            clearAllRenderedGhostText(resetGeometry: true, clearPendingMutations: true)
             CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "updateGhostText-empty")
             print("[TypeFlow-InputAudit] overlayWindowEvent=orderOut source=updateGhostText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
             overlayWindow.orderOut(nil)
@@ -1187,7 +1276,9 @@ class OverlayWindowController: NSWindowController {
         let hasActiveCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
         CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(hasActiveCompletion && !isStale, reason: isStale ? "updateGhostText-stale" : "updateGhostText-active")
         
-        if var geom = lastGeometry {
+        clearAllRenderedGhostText()
+
+        if let geom = lastGeometry {
             let font = lastInlineRenderFont ?? NSFont.systemFont(ofSize: lastInlineFontSize ?? 13)
             let layout = GhostSuggestionLayout.make(
                 text: newText,
@@ -1209,12 +1300,8 @@ class OverlayWindowController: NSWindowController {
                 isCorrection: geom.isCorrection
             )
             
-            if let existing = inlineHostingView {
-                existing.rootView = rootView
-            } else {
-                let fresh = NSHostingView(rootView: rootView)
-                inlineHostingView = fresh
-            }
+            let fresh = NSHostingView(rootView: rootView)
+            inlineHostingView = fresh
             
             if overlayWindow.contentView !== inlineHostingView {
                 overlayWindow.contentView = inlineHostingView
@@ -1227,6 +1314,7 @@ class OverlayWindowController: NSWindowController {
             if AXHelper_rectHasFiniteComponents(frame) {
                 overlayWindow.setFrame(frame.integral, display: true)
             }
+            logRenderReplace(text: newText)
         }
     }
 
@@ -1278,6 +1366,7 @@ class OverlayWindowController: NSWindowController {
         completionModel.text = newText
 
         if newText.isEmpty && !isLoading && smartReplyOptions.isEmpty {
+            clearAllRenderedGhostText(resetGeometry: true, clearPendingMutations: true)
             CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "updateText-empty")
             print("[TypeFlow-InputAudit] overlayWindowEvent=orderOut source=updateText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
             overlayWindow.orderOut(nil)

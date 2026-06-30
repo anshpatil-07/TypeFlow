@@ -483,19 +483,14 @@ class CompletionManager: @unchecked Sendable {
                 let newChar = String(curr.last!)
                 let ghostFirst = String(ghost.prefix(1))
                 if newChar == ghostFirst {
-                    // Match — advance the ghost text by one character using optimistic UI shift
+                    // Match — advance the canonical ghost text and redraw the remainder.
                     let advanced = String(ghost.dropFirst())
                     lastBufferSnapshot = curr
                     if advanced.isEmpty {
                         clearCompletion()
                     } else {
                         currentCompletion = advanced
-                        // Estimate single-char pixel width and slide the window right instantly
-                        let font = NSFont.systemFont(ofSize: 13, weight: .regular)
-                        let attrs = [NSAttributedString.Key.font: font]
-                        let shiftPx = (newChar as NSString).size(withAttributes: attrs).width
-                        overlayWindowController?.shiftOverlayX(by: shiftPx)
-                        overlayWindowController?.updateGhostText(advanced)
+                        overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: newChar, remainder: advanced, source: "typedPrefix")
                         // Suppressed: print("[TypeFlow-Debug] DynamicInvalidation matched...")
                     }
                     return
@@ -1235,19 +1230,15 @@ class CompletionManager: @unchecked Sendable {
             TextInjector.shared.injectCharByChar(text: wordToInsert)
             
             if !remainder.isEmpty {
-                // Optimistic UI: instantly advance the overlay X by the pixel width of the
-                // accepted word so it tracks the caret without waiting for an AX round-trip.
-                let font = NSFont.systemFont(ofSize: 13, weight: .regular)
-                let attrs = [NSAttributedString.Key.font: font]
-                let shiftPx = (wordToInsert as NSString).size(withAttributes: attrs).width
                 currentCompletion = remainder
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
-                    self.overlayWindowController?.shiftOverlayX(by: shiftPx)
-                    self.overlayWindowController?.updateGhostText(remainder)
+                    self.overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: wordToInsert, remainder: remainder, source: "tabAccept")
                 }
-                print("[TypeFlow-Debug] Word-by-word Tab: injected '\(wordToInsert)', shifted \(String(format: "%.1f", shiftPx))px, remainder '\(remainder)' still shown")
+                print("[TypeFlow-Debug] Word-by-word Tab: injected '\(wordToInsert)', remainder '\(remainder)' still shown")
             } else {
+                print("[OverlayRender] tabAccept recomputeRemainderFromScratch inserted='\(wordToInsert)' remainder=''")
+                print("[OverlayRender] hideBecauseEmptyRemainder")
                 clearCompletion()
             }
             return true // We handled it

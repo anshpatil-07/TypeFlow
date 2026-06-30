@@ -506,11 +506,7 @@ class AccessibilityMonitor {
             } else {
                 CompletionManager.shared.currentCompletion = advanced
                 DispatchQueue.main.async {
-                    let font = NSFont.systemFont(ofSize: 13, weight: .regular)
-                    let attrs = [NSAttributedString.Key.font: font]
-                    let shiftPx = (typedCharString as NSString).size(withAttributes: attrs).width
-                    CompletionManager.shared.overlayWindowController?.shiftOverlayX(by: shiftPx)
-                    CompletionManager.shared.overlayWindowController?.updateGhostText(advanced)
+                    CompletionManager.shared.overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: typedCharString, remainder: advanced, source: "typedPrefix")
                 }
             }
             return // Match processed!
