@@ -32,6 +32,8 @@ class CompletionManager: @unchecked Sendable {
     private var latestResultRequestID: UInt64 = 0
     private var staleCompletedGenerationDiscardCount: UInt64 = 0
     private var staleVisibleUpdateAttemptCount: UInt64 = 0
+    private let generationCancellationLock = NSLock()
+    private var activeGenerationCancellationToken: LlamaGenerationCancellationToken?
 
     private struct ResultOwnershipSnapshot {
         let latestResultRequestID: UInt64
@@ -251,6 +253,37 @@ class CompletionManager: @unchecked Sendable {
         print("[TypeFlow-Debug] Stage1A: blocked stale visible update from \(source) for request #\(requestID) (latest #\(latestID), workID \(workID)). Total blocked visible attempts: \(attemptCount)")
         logStage1ACounters(context: "stale-visible-block-\(source)", generationResultRequestID: requestID, workID: workID)
     }
+
+    private func installGenerationCancellationToken(_ token: LlamaGenerationCancellationToken) {
+        generationCancellationLock.lock()
+        let previousToken = activeGenerationCancellationToken
+        activeGenerationCancellationToken = token
+        generationCancellationLock.unlock()
+
+        if let previousToken, previousToken !== token, previousToken.requestCancellation() {
+            print("[Stage1B] cancellation requested oldRequestID=\(previousToken.requestID) reason=new-generation")
+        }
+        print("[Stage1B] new generation started with fresh cancellation token requestID=\(token.requestID)")
+    }
+
+    private func clearGenerationCancellationTokenIfCurrent(_ token: LlamaGenerationCancellationToken) {
+        generationCancellationLock.lock()
+        if activeGenerationCancellationToken === token {
+            activeGenerationCancellationToken = nil
+        }
+        generationCancellationLock.unlock()
+    }
+
+    private func requestActiveGenerationAbort(reason: String) {
+        generationCancellationLock.lock()
+        let token = activeGenerationCancellationToken
+        generationCancellationLock.unlock()
+
+        guard let token else { return }
+        if token.requestCancellation() {
+            print("[Stage1B] cancellation requested oldRequestID=\(token.requestID) reason=\(reason)")
+        }
+    }
     
     private init() {
         NotificationCenter.default.addObserver(
@@ -452,6 +485,7 @@ class CompletionManager: @unchecked Sendable {
         if isRewrite || isSmartReply { return }
         // Suppressed: print("[TypeFlow-Debug] onTextChanged called")
         invalidateGenerationResults(reason: "text-changed", bufferSnapshot: bufferFallback)
+        requestActiveGenerationAbort(reason: "new-input")
         
         if currentCompletion != nil && !currentCompletion!.isEmpty {
             print("[TypeFlow-Debug] onTextChanged: ignoring clear command because an active completion is present.")
@@ -772,10 +806,14 @@ class CompletionManager: @unchecked Sendable {
         
         // Explicitly cancel any inflight task before creating a new one.
         let workID = workController.currentWorkID
+        let generationCancellationToken = LlamaGenerationCancellationToken(requestID: resultRequestID, workID: workID)
+        installGenerationCancellationToken(generationCancellationToken)
+        print("[Stage1B] generation started requestID=\(resultRequestID) workID=\(workID)")
         
         workController.replaceGenerationWork(for: workID) { [weak self] in
             guard let self = self else { return }
             defer {
+                self.clearGenerationCancellationTokenIfCurrent(generationCancellationToken)
                 self.workController.setGenerationFinished()
             }
             
@@ -796,8 +834,13 @@ class CompletionManager: @unchecked Sendable {
             let completion = await LLMEngine.shared.generateCompletion(
                 textBeforeCaret: fullActiveLine,
                 liveBuffer: effectiveLiveBuffer,
+                cancellationToken: generationCancellationToken,
                 onStream: { [weak self] partialText in
                     guard let self = self else { return }
+                    guard !generationCancellationToken.isCancelled else {
+                        print("[Stage1B] stale/cancelled stream token suppressed requestID=\(resultRequestID)")
+                        return
+                    }
                     guard self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) else { return }
                     
                     let currentAX = self.accessibilityMonitor?.getTextBeforeCaret() ?? ""
@@ -868,6 +911,10 @@ class CompletionManager: @unchecked Sendable {
                     }
                 }
             )
+            if generationCancellationToken.isCancelled {
+                print("[Stage1B] generation exited cancelled requestID=\(resultRequestID)")
+                return
+            }
             print("[TypeFlow-Debug] Raw model output: '\(completion.prefix(40))'")
             if Task.isCancelled || !self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) {
                 if !self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) {
@@ -1247,6 +1294,7 @@ class CompletionManager: @unchecked Sendable {
     }
     
     func cancelInflightTasks() {
+        requestActiveGenerationAbort(reason: "cancel-inflight")
         workController.cancelAll()
         rewriteTask?.cancel()
     }

@@ -73,6 +73,7 @@ actor LLMEngine {
     func generateCompletion(
         textBeforeCaret: String,
         liveBuffer: String,
+        cancellationToken: LlamaGenerationCancellationToken? = nil,
         onStream: (@Sendable (String) -> Void)? = nil
     ) async -> String {
         print("[TypeFlow-Debug] LLMEngine: generateCompletion called")
@@ -104,7 +105,14 @@ actor LLMEngine {
                 prompt: fullPrompt,
                 maxTokens: maxTokens,
                 temperature: temperature == 0.0 ? 0.2 : temperature,
+                cancellationToken: cancellationToken,
                 onPartialRawText: { partialText in
+                    if cancellationToken?.isCancelled == true {
+                        if let requestID = cancellationToken?.requestID {
+                            print("[Stage1B] stale/cancelled stream token suppressed requestID=\(requestID)")
+                        }
+                        return
+                    }
                     onStream?(partialText)
                 }
             )
@@ -116,6 +124,11 @@ actor LLMEngine {
             }
             return trimmedResult
             
+        } catch is CancellationError {
+            if let requestID = cancellationToken?.requestID {
+                print("[Stage1B] generation exited cancelled requestID=\(requestID)")
+            }
+            return ""
         } catch {
             print("[TypeFlow-Debug] LLMEngine: Generation failed: \(error)")
             return ""

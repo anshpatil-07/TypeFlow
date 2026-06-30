@@ -1,17 +1,62 @@
 import Foundation
 import LlamaSwift
 
+final class LlamaGenerationCancellationToken: @unchecked Sendable {
+    let requestID: UInt64
+    let workID: UInt64
+
+    private let lock = NSLock()
+    private var cancelled = false
+    private var abortCallbackLogged = false
+
+    init(requestID: UInt64, workID: UInt64) {
+        self.requestID = requestID
+        self.workID = workID
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    @discardableResult
+    func requestCancellation() -> Bool {
+        lock.lock()
+        let wasAlreadyCancelled = cancelled
+        cancelled = true
+        lock.unlock()
+        return !wasAlreadyCancelled
+    }
+
+    func shouldAbortFromCallback() -> Bool {
+        lock.lock()
+        let shouldAbort = cancelled
+        let shouldLog = shouldAbort && !abortCallbackLogged
+        if shouldLog {
+            abortCallbackLogged = true
+        }
+        lock.unlock()
+
+        if shouldLog {
+            print("[Stage1B] abort callback triggered requestID=\(requestID)")
+        }
+
+        return shouldAbort
+    }
+}
+
 // Global C-callback for cancellation
 private func abortCallback(data: UnsafeMutableRawPointer?) -> Bool {
     guard let data = data else { return false }
-    return data.assumingMemoryBound(to: Bool.self).pointee
+    let token = Unmanaged<LlamaGenerationCancellationToken>.fromOpaque(data).takeUnretainedValue()
+    return token.shouldAbortFromCallback()
 }
 
 actor TypeFlowLlamaWrapper {
     private var model: OpaquePointer?
     private var ctx: OpaquePointer?
     private var isLoaded = false
-    private var abortInFlight = false
     private var previousPromptTokens: [llama_token] = []
     private var currentCachePosition: Int32 = 0
     
@@ -120,6 +165,7 @@ actor TypeFlowLlamaWrapper {
         prompt: String,
         maxTokens: Int,
         temperature: Float,
+        cancellationToken: LlamaGenerationCancellationToken? = nil,
         onPartialRawText: (@Sendable (String) -> Void)? = nil
     ) throws -> String {
         guard isLoaded, let model = model, let ctx = ctx else {
@@ -128,10 +174,14 @@ actor TypeFlowLlamaWrapper {
         
         let vocab = llama_model_get_vocab(model)
         
-        // 1. Hardware Cancellation Binding
-        abortInFlight = false
-        withUnsafeMutablePointer(to: &abortInFlight) { ptr in
-            llama_set_abort_callback(ctx, abortCallback, ptr)
+        if let cancellationToken {
+            let tokenPointer = Unmanaged.passUnretained(cancellationToken).toOpaque()
+            llama_set_abort_callback(ctx, abortCallback, tokenPointer)
+        } else {
+            llama_set_abort_callback(ctx, nil, nil)
+        }
+        defer {
+            llama_set_abort_callback(ctx, nil, nil)
         }
         
         // 1.5 Tokenize Prompt & Smart Sequence Matching
@@ -168,10 +218,17 @@ actor TypeFlowLlamaWrapper {
         
         // 3. Initial Prompt Decode (only the un-cached remainder)
         if matchingLength < newPromptTokens.count {
+            if Task.isCancelled || cancellationToken?.isCancelled == true {
+                throw CancellationError()
+            }
+
             var remainderTokens = Array(newPromptTokens[matchingLength...])
             let batch = llama_batch_get_one(&remainderTokens, Int32(remainderTokens.count))
             
             if llama_decode(ctx, batch) != 0 {
+                if cancellationToken?.isCancelled == true {
+                    throw CancellationError()
+                }
                 throw NSError(domain: "TypeFlowLlamaWrapper", code: 5, userInfo: [NSLocalizedDescriptionKey: "llama_decode failed on prompt prefill"])
             }
         }
@@ -193,9 +250,9 @@ actor TypeFlowLlamaWrapper {
         // 5. Generation Loop
         for _ in 0..<maxTokens {
             // Hardware Cancellation: Check Swift concurrency state
-            if Task.isCancelled {
+            if Task.isCancelled || cancellationToken?.isCancelled == true {
                 // DO NOT call llama_kv_cache_seq_rm here! Just exit the thread execution.
-                break
+                throw CancellationError()
             }
             
             // Sample
@@ -243,6 +300,9 @@ actor TypeFlowLlamaWrapper {
                         onPartialRawText?(generatedText)
                         break
                     }
+                    if cancellationToken?.isCancelled == true {
+                        throw CancellationError()
+                    }
                     onPartialRawText?(generatedText)
                 }
             }
@@ -263,6 +323,9 @@ actor TypeFlowLlamaWrapper {
             let batch = llama_batch_get_one(&tokenArr, 1)
             
             if llama_decode(ctx, batch) != 0 {
+                if cancellationToken?.isCancelled == true {
+                    throw CancellationError()
+                }
                 break
             }
             
