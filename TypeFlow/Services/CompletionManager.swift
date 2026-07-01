@@ -1554,8 +1554,16 @@ class CompletionManager: @unchecked Sendable {
 	                    let startText = generationStartText
 	                    let typedSinceStart = ""
 	                    
-	                    var processed = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: partialText)
-	                    processed = self.stripMarkdown(processed)
+                        let contract = SuggestionInteractionState.canonicalizeContinuation(
+                            activeLine: startText,
+                            rawCompletion: self.stripMarkdown(partialText)
+                        )
+                        contract.log()
+                        print("[QualityAudit] streamUpdate requestID=\(resultRequestID) processed='\(self.qualityAuditPreview(contract.suggestion))' decision=\(contract.decision.rawValue) reason=\(contract.reason)")
+                        guard contract.isRenderable else {
+                            return
+                        }
+	                    let processed = contract.suggestion
 	                    
 	                    let remainder: String
 	                    if processed.hasPrefix(typedSinceStart) {
@@ -1631,8 +1639,24 @@ class CompletionManager: @unchecked Sendable {
 	            let startText = generationStartText
 	            let typedSinceStart = ""
 	            
-	            var processedCompletion = SuggestionInteractionState.sliceGeneratedSuffix(activeLine: startText, rawCompletion: completion)
-	            processedCompletion = self.stripMarkdown(processedCompletion)
+                let finalContract = SuggestionInteractionState.canonicalizeContinuation(
+                    activeLine: startText,
+                    rawCompletion: self.stripMarkdown(completion)
+                )
+                finalContract.log()
+                print("[QualityAudit] streamUpdate requestID=\(resultRequestID) processed='\(self.qualityAuditPreview(finalContract.suggestion))' decision=\(finalContract.decision.rawValue) reason=\(finalContract.reason)")
+                guard finalContract.isRenderable else {
+                    self.logQualityAudit(
+                        requestSnapshot: requestSnapshot,
+                        rawOutput: completion,
+                        processedOutput: finalContract.suggestion,
+                        finalSuggestion: "",
+                        phase: "final-rejected",
+                        force: true
+                    )
+                    return
+                }
+	            let processedCompletion = finalContract.suggestion
 	            
 	            let remainder: String
 	            if processedCompletion.hasPrefix(typedSinceStart) {
@@ -2179,27 +2203,243 @@ final class SuggestionWorkController: @unchecked Sendable {
 }
 
 struct SuggestionInteractionState {
+    enum ContinuationDecision: String {
+        case accepted
+        case rejected
+        case truncated
+    }
+
+    struct ContinuationContract {
+        let suggestion: String
+        let decision: ContinuationDecision
+        let reason: String
+        let mode: String
+        let rawCompletion: String
+        let activeLine: String
+        let partialWord: String
+        let preservedLeadingWhitespace: Bool
+        let removedDuplicatePrefix: String
+
+        var isRenderable: Bool {
+            return (decision == .accepted || decision == .truncated) && !suggestion.isEmpty
+        }
+
+        func log() {
+            print("[QualityContract] raw='\(Self.preview(rawCompletion))' activeLine='\(Self.preview(activeLine))' partialWord='\(Self.preview(partialWord))' mode=\(mode)")
+            print("[QualityContract] decision=\(decision.rawValue) reason=\(reason)")
+            print("[QualityContract] preservedLeadingWhitespace=\(preservedLeadingWhitespace)")
+            print("[QualityContract] removedDuplicatePrefix='\(Self.preview(removedDuplicatePrefix))'")
+            if reason == "pureOverlap" {
+                print("[QualityContract] rejectedPureOverlap")
+            }
+            if reason == "punctuationOnly" || reason == "whitespaceOnly" {
+                print("[QualityContract] rejectedPunctuationOnly")
+            }
+            if reason == "repeatedTokenLoop" {
+                print("[QualityContract] rejectedRepeatedTokenLoop")
+            }
+            print("[QualityContract] finalSuggestion='\(Self.preview(suggestion))'")
+        }
+
+        private static func preview(_ text: String, limit: Int = 220) -> String {
+            let escaped = text
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\n", with: "\\n")
+                .replacingOccurrences(of: "\t", with: "\\t")
+                .replacingOccurrences(of: "'", with: "\\'")
+            if escaped.count <= limit { return escaped }
+            return "..." + String(escaped.suffix(limit))
+        }
+    }
+
+    static func canonicalizeContinuation(activeLine: String, rawCompletion: String) -> ContinuationContract {
+        let partialWord = currentPartialWord(in: activeLine)
+        let mode: String
+        if activeLine.last?.isWhitespace == true {
+            mode = "afterSpace"
+        } else if partialWord.isEmpty {
+            mode = "midWord"
+        } else {
+            mode = "partialWord"
+        }
+
+        guard !rawCompletion.isEmpty else {
+            return makeContract("", .rejected, "empty", mode, rawCompletion, activeLine, partialWord, false, "")
+        }
+
+        let trimmedRaw = rawCompletion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRaw.isEmpty else {
+            return makeContract("", .rejected, "whitespaceOnly", mode, rawCompletion, activeLine, partialWord, false, "")
+        }
+        if isPunctuationOnly(trimmedRaw) {
+            return makeContract("", .rejected, "punctuationOnly", mode, rawCompletion, activeLine, partialWord, false, "")
+        }
+        if isPureOverlap(activeLine: activeLine, candidate: trimmedRaw) {
+            return makeContract("", .rejected, "pureOverlap", mode, rawCompletion, activeLine, partialWord, false, trimmedRaw)
+        }
+
+        var candidate = rawCompletion
+        var removedDuplicatePrefix = ""
+        var preservedLeadingWhitespace = candidate.first?.isWhitespace == true
+        let leadingWhitespace = String(candidate.prefix { $0.isWhitespace })
+        let withoutLeadingWhitespace = String(candidate.dropFirst(leadingWhitespace.count))
+
+        if !partialWord.isEmpty && withoutLeadingWhitespace.lowercased().hasPrefix(partialWord.lowercased()) {
+            let prefixEnd = withoutLeadingWhitespace.index(withoutLeadingWhitespace.startIndex, offsetBy: partialWord.count)
+            let novelSuffix = String(withoutLeadingWhitespace[prefixEnd...])
+            removedDuplicatePrefix = partialWord
+
+            if novelSuffix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return makeContract("", .rejected, "pureOverlap", mode, rawCompletion, activeLine, partialWord, false, removedDuplicatePrefix)
+            }
+
+            candidate = novelSuffix
+            preservedLeadingWhitespace = false
+        } else if !partialWord.isEmpty && candidate.first?.isWhitespace == true {
+            candidate = withoutLeadingWhitespace
+            preservedLeadingWhitespace = false
+        } else if activeLine.last?.isWhitespace == true && candidate.first?.isWhitespace == true {
+            candidate = withoutLeadingWhitespace
+            preservedLeadingWhitespace = false
+        }
+
+        candidate = truncateAtFirstNewline(candidate)
+
+        let loopCheck = removeRepeatedTokenLoop(from: candidate)
+        if loopCheck.rejected {
+            return makeContract("", .rejected, "repeatedTokenLoop", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
+        }
+        if loopCheck.truncated {
+            let truncated = loopCheck.text
+            if truncated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return makeContract("", .rejected, "repeatedTokenLoop", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
+            }
+            return makeContract(truncated, .truncated, "repeatedTokenLoop", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
+        }
+
+        if candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return makeContract("", .rejected, "empty", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
+        }
+        if isPunctuationOnly(candidate.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return makeContract("", .rejected, "punctuationOnly", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
+        }
+        if isPureOverlap(activeLine: activeLine, candidate: candidate.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return makeContract("", .rejected, "pureOverlap", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
+        }
+
+        return makeContract(candidate, .accepted, "validContinuation", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
+    }
+
     static func sliceGeneratedSuffix(activeLine: String, rawCompletion: String) -> String {
-        var processedCompletion = rawCompletion.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        let maxOverlap = min(activeLine.count, processedCompletion.count)
-        var overlapLength = 0
-        
-        if maxOverlap > 0 {
-            for i in stride(from: maxOverlap, through: 1, by: -1) {
-                let suffix = String(activeLine.suffix(i))
-                let prefix = String(processedCompletion.prefix(i))
-                if suffix == prefix {
-                    overlapLength = i
-                    break
-                }
+        return canonicalizeContinuation(activeLine: activeLine, rawCompletion: rawCompletion).suggestion
+    }
+
+    private static func makeContract(
+        _ suggestion: String,
+        _ decision: ContinuationDecision,
+        _ reason: String,
+        _ mode: String,
+        _ rawCompletion: String,
+        _ activeLine: String,
+        _ partialWord: String,
+        _ preservedLeadingWhitespace: Bool,
+        _ removedDuplicatePrefix: String
+    ) -> ContinuationContract {
+        ContinuationContract(
+            suggestion: suggestion,
+            decision: decision,
+            reason: reason,
+            mode: mode,
+            rawCompletion: rawCompletion,
+            activeLine: activeLine,
+            partialWord: partialWord,
+            preservedLeadingWhitespace: preservedLeadingWhitespace,
+            removedDuplicatePrefix: removedDuplicatePrefix
+        )
+    }
+
+    private static func currentPartialWord(in text: String) -> String {
+        let separators = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        let scalars = Array(text.unicodeScalars)
+        var suffixScalars: [UnicodeScalar] = []
+        for scalar in scalars.reversed() {
+            if separators.contains(scalar) { break }
+            suffixScalars.append(scalar)
+        }
+        return String(String.UnicodeScalarView(suffixScalars.reversed()))
+    }
+
+    private static func isPunctuationOnly(_ text: String) -> Bool {
+        let allowed = CharacterSet.punctuationCharacters
+            .union(.symbols)
+            .union(.whitespacesAndNewlines)
+        return !text.isEmpty && text.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private static func isPureOverlap(activeLine: String, candidate: String) -> Bool {
+        let normalizedActive = activeLine.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedCandidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedActive.isEmpty, !normalizedCandidate.isEmpty else { return false }
+        return normalizedActive.hasSuffix(normalizedCandidate)
+    }
+
+    private static func truncateAtFirstNewline(_ text: String) -> String {
+        guard let newlineRange = text.rangeOfCharacter(from: .newlines) else { return text }
+        return String(text[..<newlineRange.lowerBound])
+    }
+
+    private static func removeRepeatedTokenLoop(from text: String) -> (text: String, truncated: Bool, rejected: Bool) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isCompactRepeatedToken(trimmed) {
+            return ("", false, true)
+        }
+
+        let pattern = #"\b([\p{L}\p{N}_]+)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return (text, false, false)
+        }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        let matches = regex.matches(in: text, options: [], range: nsRange)
+        guard matches.count >= 3 else { return (text, false, false) }
+
+        var previousToken: String?
+        var repeatCount = 0
+        for match in matches {
+            guard let tokenRange = Range(match.range(at: 1), in: text) else { continue }
+            let token = String(text[tokenRange]).lowercased()
+            if token == previousToken {
+                repeatCount += 1
+            } else {
+                previousToken = token
+                repeatCount = 1
+            }
+
+            if repeatCount >= 2 {
+                return ("", false, true)
             }
         }
-        
-        if overlapLength > 0 {
-            processedCompletion = String(processedCompletion.dropFirst(overlapLength))
+
+        return (text, false, false)
+    }
+
+    private static func isCompactRepeatedToken(_ text: String) -> Bool {
+        guard text.count >= 4,
+              text.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)) == nil
+        else {
+            return false
         }
-        
-        return processedCompletion
+
+        let lower = text.lowercased()
+        for size in 1...(lower.count / 2) {
+            guard lower.count % size == 0 else { continue }
+            let end = lower.index(lower.startIndex, offsetBy: size)
+            let unit = String(lower[..<end])
+            guard unit.count >= 2 else { continue }
+            let repeated = String(repeating: unit, count: lower.count / size)
+            if repeated == lower {
+                return true
+            }
+        }
+        return false
     }
 }
