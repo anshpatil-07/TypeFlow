@@ -397,6 +397,8 @@ class CompletionManager: @unchecked Sendable {
     private var staleVisibleUpdateAttemptCount: UInt64 = 0
     private let generationCancellationLock = NSLock()
     private var activeGenerationCancellationToken: LlamaGenerationCancellationToken?
+    private let atomicGhostLock = NSLock()
+    private var atomicGhostVisibleApplyCountByRequestID: [UInt64: Int] = [:]
 
     private struct ResultOwnershipSnapshot {
         let latestResultRequestID: UInt64
@@ -505,6 +507,139 @@ class CompletionManager: @unchecked Sendable {
             guard !didLogQualityAudit else { return false }
             didLogQualityAudit = true
             return true
+        }
+    }
+
+    private final class AtomicGhostStreamBuffer: @unchecked Sendable {
+        struct Candidate {
+            let rawOutput: String
+            let suggestion: String
+            let mode: String
+            let reason: String
+            let createdAt: CFAbsoluteTime
+
+            var rawLen: Int { rawOutput.count }
+            var finalLen: Int { suggestion.count }
+        }
+
+        private let lock = NSLock()
+        private var accumulatedRawOutput = ""
+        private var lastLoggedBucket = -1
+        private var visibleReserved = false
+        private var stabilityWindowScheduled = false
+        private var latestStableCandidate: Candidate?
+        private var repeatedLoopBlocked = false
+        private var didLogSuppressedAfterVisible = false
+        private var didLogCancelledAfterVisible = false
+
+        func observe(partialRawOutput: String, requestID: UInt64) -> String {
+            let accumulatedChars: Int
+            let shouldLog: Bool
+            let accumulated: String
+
+            lock.lock()
+            if accumulatedRawOutput.isEmpty || partialRawOutput.hasPrefix(accumulatedRawOutput) {
+                accumulatedRawOutput = partialRawOutput
+            } else if accumulatedRawOutput.hasPrefix(partialRawOutput) {
+                // Older cumulative callback; keep the newer longer text.
+            } else {
+                accumulatedRawOutput += partialRawOutput
+            }
+
+            accumulatedChars = accumulatedRawOutput.count
+            accumulated = accumulatedRawOutput
+            let bucket = accumulatedChars == 0 ? 0 : accumulatedChars / 32
+            shouldLog = bucket != lastLoggedBucket
+            if shouldLog {
+                lastLoggedBucket = bucket
+            }
+            lock.unlock()
+
+            if shouldLog {
+                print("[AtomicGhost] suppressedStreamRender requestID=\(requestID) accumulatedChars=\(accumulatedChars)")
+            }
+            return accumulated
+        }
+
+        func finalRawOutput(engineOutput: String) -> String {
+            lock.lock()
+            let accumulated = accumulatedRawOutput
+            lock.unlock()
+
+            return engineOutput.isEmpty ? accumulated : engineOutput
+        }
+
+        func isVisibleReserved() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return visibleReserved
+        }
+
+        func reserveVisibleApply() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !visibleReserved else { return false }
+            visibleReserved = true
+            return true
+        }
+
+        func recordStableCandidate(_ candidate: Candidate) {
+            lock.lock()
+            latestStableCandidate = candidate
+            lock.unlock()
+        }
+
+        func latestCandidateForStabilityWindow() -> Candidate? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !visibleReserved, !repeatedLoopBlocked else { return nil }
+            return latestStableCandidate
+        }
+
+        func shouldScheduleStabilityWindow() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !visibleReserved, !stabilityWindowScheduled else { return false }
+            stabilityWindowScheduled = true
+            return true
+        }
+
+        func markRepeatedLoopBlockedBeforeVisible(requestID: UInt64) {
+            lock.lock()
+            let shouldLog = !repeatedLoopBlocked && !visibleReserved
+            repeatedLoopBlocked = true
+            latestStableCandidate = nil
+            lock.unlock()
+
+            if shouldLog {
+                print("[AtomicGhost] repeatedLoopBlockedBeforeVisible requestID=\(requestID)")
+            }
+        }
+
+        func logSuppressedAfterVisible(requestID: UInt64) {
+            lock.lock()
+            let shouldLog = visibleReserved && !didLogSuppressedAfterVisible
+            if shouldLog {
+                didLogSuppressedAfterVisible = true
+            }
+            lock.unlock()
+
+            if shouldLog {
+                print("[AtomicGhost] suppressedAfterVisible requestID=\(requestID)")
+            }
+        }
+
+        func logCancelledAfterVisible(requestID: UInt64) {
+            lock.lock()
+            let shouldLog = !didLogCancelledAfterVisible
+            if shouldLog {
+                didLogCancelledAfterVisible = true
+            }
+            lock.unlock()
+
+            if shouldLog {
+                print("[AtomicGhost] cancelledAfterVisible requestID=\(requestID)")
+            }
         }
     }
 
@@ -942,6 +1077,125 @@ class CompletionManager: @unchecked Sendable {
         let render = axHotPathGetTextRenderCount
         axHotPathLock.unlock()
         print("[AXHotPath] getTextBeforeCaret count generation=\(generation) stream=\(stream) render=\(render)")
+    }
+
+    func recordAtomicGhostVisibleApply(requestID: UInt64, textLen: Int) {
+        atomicGhostLock.lock()
+        let count = (atomicGhostVisibleApplyCountByRequestID[requestID] ?? 0) + 1
+        atomicGhostVisibleApplyCountByRequestID[requestID] = count
+        atomicGhostLock.unlock()
+
+        print("[AtomicGhost] visibleApply requestID=\(requestID) countForRequest=\(count) textLen=\(textLen)")
+        if count > 1 {
+            print("[AtomicGhost] progressiveRenderViolation requestID=\(requestID) countForRequest=\(count)")
+        }
+    }
+
+    private func resetAtomicGhostVisibleApplyCount(requestID: UInt64) {
+        atomicGhostLock.lock()
+        atomicGhostVisibleApplyCountByRequestID[requestID] = 0
+        atomicGhostLock.unlock()
+        print("[AtomicGhost] mode=earlyAtomic requestID=\(requestID)")
+    }
+
+    private func atomicGhostMode(for contract: SuggestionInteractionState.ContinuationContract) -> String {
+        return contract.mode == "partialWord" ? "midWord" : "afterSpace"
+    }
+
+    private func atomicGhostContainsCompleteWordBoundary(_ suggestion: String) -> Bool {
+        var hasWordCharacter = false
+        for character in suggestion {
+            if character.isLetter || character.isNumber {
+                hasWordCharacter = true
+            } else if hasWordCharacter && (character.isWhitespace || character.isPunctuation) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func atomicGhostCandidate(
+        rawOutput: String,
+        activeLine: String,
+        requestID: UInt64,
+        streamBuffer: AtomicGhostStreamBuffer,
+        phase: String
+    ) -> (candidate: AtomicGhostStreamBuffer.Candidate?, contract: SuggestionInteractionState.ContinuationContract) {
+        let contract = SuggestionInteractionState.canonicalizeContinuation(
+            activeLine: activeLine,
+            rawCompletion: stripMarkdown(rawOutput)
+        )
+
+        guard contract.reason != "repeatedTokenLoop" else {
+            streamBuffer.markRepeatedLoopBlockedBeforeVisible(requestID: requestID)
+            return (nil, contract)
+        }
+
+        guard contract.isRenderable else {
+            return (nil, contract)
+        }
+
+        var suggestion = contract.suggestion
+        if let newlineRange = suggestion.range(of: "\n") {
+            suggestion = String(suggestion[..<newlineRange.lowerBound])
+        }
+        guard !suggestion.isEmpty else {
+            return (nil, contract)
+        }
+
+        let mode = atomicGhostMode(for: contract)
+        let candidate = AtomicGhostStreamBuffer.Candidate(
+            rawOutput: rawOutput,
+            suggestion: suggestion,
+            mode: mode,
+            reason: contract.reason,
+            createdAt: CFAbsoluteTimeGetCurrent()
+        )
+        print("[AtomicGhost] \(phase) requestID=\(requestID) rawLen=\(candidate.rawLen) finalLen=\(candidate.finalLen) mode=\(mode) reason=\(candidate.reason)")
+        return (candidate, contract)
+    }
+
+    private func tryApplyAtomicGhostCandidate(
+        _ candidate: AtomicGhostStreamBuffer.Candidate,
+        requestSnapshot: GenerationRequestSnapshot,
+        streamBuffer: AtomicGhostStreamBuffer,
+        cancellationToken: LlamaGenerationCancellationToken,
+        source: String,
+        recordShown: Bool
+    ) {
+        let requestID = requestSnapshot.requestID
+        let workID = requestSnapshot.workID
+        guard !cancellationToken.isCancelled else { return }
+        guard shouldRenderGenerationResult(requestID: requestID, workID: workID, source: source) else { return }
+        guard streamBuffer.reserveVisibleApply() else {
+            streamBuffer.logSuppressedAfterVisible(requestID: requestID)
+            return
+        }
+
+        LatencyInstrumentation.shared.firstUsable(requestID: requestID, workID: workID, textLen: candidate.finalLen)
+        LatencyInstrumentation.shared.renderRequested(requestID: requestID, workID: workID, source: source, textLen: candidate.finalLen)
+
+        let elapsedMs = (CFAbsoluteTimeGetCurrent() - candidate.createdAt) * 1000.0
+        if source == "early" || source == "early-stable" {
+            print("[AtomicGhost] earlyVisibleApply requestID=\(requestID) elapsedMs=\(String(format: "%.1f", elapsedMs))")
+        } else {
+            print("[AtomicGhost] finalFallback requestID=\(requestID) elapsedMs=\(String(format: "%.1f", elapsedMs))")
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard self.shouldRenderGenerationResult(requestID: requestID, workID: workID, source: "\(source)-main") else { return }
+            self.applyAutocompleteOverlayText(
+                candidate.suggestion,
+                requestSnapshot: requestSnapshot,
+                source: source,
+                recordShown: recordShown
+            )
+        }
+
+        if source.hasPrefix("early") && cancellationToken.requestCancellation(reason: "atomic-visible-applied") {
+            streamBuffer.logCancelledAfterVisible(requestID: requestID)
+        }
     }
 
     private func logAXHotPathCounts() {
@@ -1514,6 +1768,8 @@ class CompletionManager: @unchecked Sendable {
         let generationCancellationToken = LlamaGenerationCancellationToken(requestID: resultRequestID, workID: workID)
         installGenerationCancellationToken(generationCancellationToken)
         print("[Stage1B] generation started requestID=\(resultRequestID) workID=\(workID)")
+        resetAtomicGhostVisibleApplyCount(requestID: resultRequestID)
+        let atomicGhostStreamBuffer = AtomicGhostStreamBuffer()
         
         workController.replaceGenerationWork(for: workID) { [weak self] in
             guard let self = self else { return }
@@ -1540,89 +1796,69 @@ class CompletionManager: @unchecked Sendable {
                         }
                         LatencyInstrumentation.shared.cancelled(requestID: resultRequestID, workID: workID, abortedByStage1B: true)
                         return
-	                    }
-	                    guard self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) else { return }
-
-	                    if requestSnapshot.shouldLogStreamNoAX() {
-	                        print("[AXHotPath] stream validation used snapshot/noAX requestID=\(resultRequestID)")
-	                    }
-	                    if requestSnapshot.shouldLogSkippedStreamAX() {
-	                        print("[AXHotPath] skipped AX read during stream requestID=\(resultRequestID)")
-	                        self.logAXHotPathCounts()
-	                    }
-
-	                    let startText = generationStartText
-	                    let typedSinceStart = ""
-	                    
-                        let contract = SuggestionInteractionState.canonicalizeContinuation(
-                            activeLine: startText,
-                            rawCompletion: self.stripMarkdown(partialText)
-                        )
-                        contract.log()
-                        print("[QualityAudit] streamUpdate requestID=\(resultRequestID) processed='\(self.qualityAuditPreview(contract.suggestion))' decision=\(contract.decision.rawValue) reason=\(contract.reason)")
-                        guard contract.isRenderable else {
-                            return
-                        }
-	                    let processed = contract.suggestion
-	                    
-	                    let remainder: String
-	                    if processed.hasPrefix(typedSinceStart) {
-                        remainder = String(processed.dropFirst(typedSinceStart.count))
-                    } else {
-                        remainder = ""
                     }
-                    
-                    if remainder.contains("\n") {
-                        if let newlineRange = remainder.range(of: "\n") {
-                            let truncated = String(remainder[..<newlineRange.lowerBound])
-                            guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream-newline") else { return }
-                            self.logQualityAudit(
-                                requestSnapshot: requestSnapshot,
-                                rawOutput: partialText,
-                                processedOutput: processed,
-                                finalSuggestion: truncated,
-                                phase: "stream-newline"
-                            )
-                            if !truncated.isEmpty {
-                                LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: truncated.count)
-                                LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "stream-newline", textLen: truncated.count)
-                            }
-	                            self.workController.cancelAll()
-	                            DispatchQueue.main.async {
-	                                guard self.shouldRenderOwnedResult(requestID: resultRequestID, workID: workID, source: "stream-newline-main") else { return }
-	                                self.applyAutocompleteOverlayText(truncated, requestSnapshot: requestSnapshot, source: "stream-newline")
-	                            }
-	                            return
-	                        }
+                    guard self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) else { return }
+                    if atomicGhostStreamBuffer.isVisibleReserved() {
+                        atomicGhostStreamBuffer.logSuppressedAfterVisible(requestID: resultRequestID)
+                        return
                     }
-                    
-                    guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream") else { return }
-                    self.logQualityAudit(
-                        requestSnapshot: requestSnapshot,
-                        rawOutput: partialText,
-                        processedOutput: processed,
-                        finalSuggestion: remainder,
-                        phase: "stream"
+
+                    let accumulatedRawOutput = atomicGhostStreamBuffer.observe(partialRawOutput: partialText, requestID: resultRequestID)
+                    let result = self.atomicGhostCandidate(
+                        rawOutput: accumulatedRawOutput,
+                        activeLine: generationStartText,
+                        requestID: resultRequestID,
+                        streamBuffer: atomicGhostStreamBuffer,
+                        phase: "earlyCandidate"
                     )
-                    if !remainder.isEmpty {
-                        LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: remainder.count)
-                        LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "stream", textLen: remainder.count)
+                    guard let candidate = result.candidate else { return }
+
+                    if candidate.mode == "midWord" || self.atomicGhostContainsCompleteWordBoundary(candidate.suggestion) {
+                        self.tryApplyAtomicGhostCandidate(
+                            candidate,
+                            requestSnapshot: requestSnapshot,
+                            streamBuffer: atomicGhostStreamBuffer,
+                            cancellationToken: generationCancellationToken,
+                            source: "early",
+                            recordShown: true
+                        )
+                    } else {
+                        atomicGhostStreamBuffer.recordStableCandidate(candidate)
+                        if atomicGhostStreamBuffer.shouldScheduleStabilityWindow() {
+                            DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.06) { [weak self] in
+                                guard let self = self else { return }
+                                guard self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) else { return }
+                                guard let stableCandidate = atomicGhostStreamBuffer.latestCandidateForStabilityWindow() else { return }
+                                self.tryApplyAtomicGhostCandidate(
+                                    stableCandidate,
+                                    requestSnapshot: requestSnapshot,
+                                    streamBuffer: atomicGhostStreamBuffer,
+                                    cancellationToken: generationCancellationToken,
+                                    source: "early-stable",
+                                    recordShown: true
+                                )
+                            }
+                        }
                     }
-	                    
-	                    DispatchQueue.main.async {
-	                        guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream-main") else { return }
-	                        self.applyAutocompleteOverlayText(remainder, requestSnapshot: requestSnapshot, source: "stream")
-	                    }
-	                }
+                }
             )
             if generationCancellationToken.isCancelled {
+                if atomicGhostStreamBuffer.isVisibleReserved() {
+                    atomicGhostStreamBuffer.logSuppressedAfterVisible(requestID: resultRequestID)
+                    return
+                }
                 if generationCancellationToken.shouldLogCancellationExit() {
                     print("[Stage1B] generation exited cancelled requestID=\(resultRequestID)")
                 }
                 LatencyInstrumentation.shared.cancelled(requestID: resultRequestID, workID: workID, abortedByStage1B: true)
                 return
             }
-            print("[TypeFlow-Debug] Raw model output: '\(completion.prefix(40))'")
+            if atomicGhostStreamBuffer.isVisibleReserved() {
+                atomicGhostStreamBuffer.logSuppressedAfterVisible(requestID: resultRequestID)
+                return
+            }
+            let finalRawOutput = atomicGhostStreamBuffer.finalRawOutput(engineOutput: completion)
+            print("[TypeFlow-Debug] Raw model output: '\(finalRawOutput.prefix(40))'")
             if Task.isCancelled || !self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) {
                 if !self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) {
                     self.recordStaleCompletedGenerationDiscard(requestID: resultRequestID, workID: workID)
@@ -1636,62 +1872,45 @@ class CompletionManager: @unchecked Sendable {
 	                self.logAXHotPathCounts()
 	            }
 
-	            let startText = generationStartText
-	            let typedSinceStart = ""
-	            
-                let finalContract = SuggestionInteractionState.canonicalizeContinuation(
-                    activeLine: startText,
-                    rawCompletion: self.stripMarkdown(completion)
+            let finalResult = self.atomicGhostCandidate(
+                rawOutput: finalRawOutput,
+                activeLine: generationStartText,
+                requestID: resultRequestID,
+                streamBuffer: atomicGhostStreamBuffer,
+                phase: "finalCandidate"
+            )
+            finalResult.contract.log()
+            print("[QualityAudit] finalUpdate requestID=\(resultRequestID) processed='\(self.qualityAuditPreview(finalResult.contract.suggestion))' decision=\(finalResult.contract.decision.rawValue) reason=\(finalResult.contract.reason)")
+
+            guard let finalCandidate = finalResult.candidate else {
+                self.logQualityAudit(
+                    requestSnapshot: requestSnapshot,
+                    rawOutput: finalRawOutput,
+                    processedOutput: finalResult.contract.suggestion,
+                    finalSuggestion: "",
+                    phase: "final-rejected",
+                    force: true
                 )
-                finalContract.log()
-                print("[QualityAudit] streamUpdate requestID=\(resultRequestID) processed='\(self.qualityAuditPreview(finalContract.suggestion))' decision=\(finalContract.decision.rawValue) reason=\(finalContract.reason)")
-                guard finalContract.isRenderable else {
-                    self.logQualityAudit(
-                        requestSnapshot: requestSnapshot,
-                        rawOutput: completion,
-                        processedOutput: finalContract.suggestion,
-                        finalSuggestion: "",
-                        phase: "final-rejected",
-                        force: true
-                    )
-                    return
-                }
-	            let processedCompletion = finalContract.suggestion
-	            
-	            let remainder: String
-	            if processedCompletion.hasPrefix(typedSinceStart) {
-                remainder = String(processedCompletion.dropFirst(typedSinceStart.count))
-            } else {
-                remainder = ""
+                return
             }
-            
-            var finalRemainder = remainder
-            if finalRemainder.contains("\n") {
-                if let newlineRange = finalRemainder.range(of: "\n") {
-                    finalRemainder = String(finalRemainder[..<newlineRange.lowerBound])
-                }
-            }
-            
-            print("[TypeFlow-Debug] Processed completion: '\(finalRemainder.prefix(40))'")
-            
-            if Task.isCancelled || !self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "final") { return }
+
+            print("[TypeFlow-Debug] Processed completion: '\(finalCandidate.suggestion.prefix(40))'")
             self.logQualityAudit(
                 requestSnapshot: requestSnapshot,
-                rawOutput: completion,
-                processedOutput: processedCompletion,
-                finalSuggestion: finalRemainder,
+                rawOutput: finalRawOutput,
+                processedOutput: finalResult.contract.suggestion,
+                finalSuggestion: finalCandidate.suggestion,
                 phase: "final",
-                force: finalRemainder.isEmpty
+                force: finalCandidate.suggestion.isEmpty
             )
-            if !finalRemainder.isEmpty {
-                LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: finalRemainder.count)
-                LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "final", textLen: finalRemainder.count)
-            }
-	            
-	            DispatchQueue.main.async {
-	                guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "final-main") else { return }
-	                self.applyAutocompleteOverlayText(finalRemainder, requestSnapshot: requestSnapshot, source: "final", recordShown: !finalRemainder.isEmpty)
-	            }
+            self.tryApplyAtomicGhostCandidate(
+                finalCandidate,
+                requestSnapshot: requestSnapshot,
+                streamBuffer: atomicGhostStreamBuffer,
+                cancellationToken: generationCancellationToken,
+                source: "final",
+                recordShown: !finalCandidate.suggestion.isEmpty
+            )
 	        }
 	    }
     

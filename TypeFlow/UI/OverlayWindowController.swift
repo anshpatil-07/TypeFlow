@@ -1365,6 +1365,7 @@ class OverlayWindowController: NSWindowController {
         print("[RenderPipeline] layerCountBefore=\(layerCountBefore) layerCountAfter=\(layerCountAfter)")
         print("[RenderPipeline] renderMs=\(String(format: "%.1f", durationMs)) queueMs=\(String(format: "%.1f", queueMs))")
         print("[RenderSchedule] applyFinished requestID=\(requestID) applyMs=\(String(format: "%.1f", durationMs)) requestToApplyMs=\(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - requestedAt) * 1000.0))")
+        CompletionManager.shared.recordAtomicGhostVisibleApply(requestID: requestID, textLen: text.count)
         LatencyInstrumentation.shared.renderApplied(requestID: requestID, textLen: text.count, source: "updateAutocompleteText")
     }
 
@@ -1432,11 +1433,13 @@ class OverlayWindowController: NSWindowController {
             inlineHostingView.rootView = rootView
         } else {
             inlineHostingView = NSHostingView(rootView: rootView)
+            inlineHostingView?.wantsLayer = false
         }
 
         if overlayWindow.contentView !== inlineHostingView {
             overlayWindow.contentView = inlineHostingView
         }
+        overlayWindow.contentView?.wantsLayer = false
         overlayWindow.ignoresMouseEvents = true
 
         inlineHostingView?.layoutSubtreeIfNeeded()
