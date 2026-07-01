@@ -16,6 +16,11 @@ import Cocoa
 ///
 /// The preface (blocks 1–3) is frozen per context window via `frozenPrefix`; only block 4
 /// changes on each keystroke, giving the LLM maximum KV prefix reuse.
+enum AutocompleteContextPolicy: String {
+    case inlineActiveTextOnly
+    case fullContext
+}
+
 class PromptBuilder {
     static let shared = PromptBuilder()
 
@@ -48,15 +53,15 @@ class PromptBuilder {
     // MARK: - Public API
 
     /// Builds the full prompt passed to the LLM for inline completion.
-    func buildPrompt(textBeforeCaret: String, liveBuffer: String, systemInstructions: String) -> String {
-        let prefix = buildPromptPrefix(systemInstructions: systemInstructions)
-        let suffix = buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer).text
+    func buildPrompt(textBeforeCaret: String, liveBuffer: String, systemInstructions: String, policy: AutocompleteContextPolicy = .fullContext) -> String {
+        let prefix = buildPromptPrefix(systemInstructions: systemInstructions, policy: policy).text
+        let suffix = buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, policy: policy).text
         return prefix + suffix
     }
 
     /// Returns the frozen conditioning preface for prewarm prefill.
     func buildStaticPrefix(systemInstructions: String) -> String {
-        return buildPromptPrefix(systemInstructions: systemInstructions)
+        return buildPromptPrefix(systemInstructions: systemInstructions, policy: .fullContext).text
     }
 
     /// Call this when the active app or screen context changes so the frozen prefix
@@ -76,7 +81,7 @@ class PromptBuilder {
     // There are NO <start_of_turn> / <end_of_turn> / instruct wrappers here. Base models
     // treat those as literal document text and will echo them, causing hallucination.
 
-    func buildPromptPrefix(systemInstructions: String) -> String {
+    func buildPromptPrefix(systemInstructions: String, policy: AutocompleteContextPolicy = .fullContext) -> (text: String, clipboardIncluded: Bool, ocrIncluded: Bool, universalContextIncluded: Bool) {
         let british = SettingsManager.shared.useBritishEnglish
         let context = UniversalContextManager.shared.latestContext
         let currentScreen = ScreenContextManager.shared.latestScreenText
@@ -89,10 +94,33 @@ class PromptBuilder {
         }
         let screenHash = String(currentScreen.prefix(200))
         let clipHash   = String(recentClip.prefix(100))
-        let stableKey  = "\(historyHash)\(systemInstructions.hashValue)|\(british)|\(context.appBundleId)|\(screenHash)|\(clipHash)"
+        let stableKey  = "\(policy.rawValue)|\(historyHash)\(systemInstructions.hashValue)|\(british)|\(context.appBundleId)|\(screenHash)|\(clipHash)"
+
+        var clipboardIncluded = false
+        var ocrIncluded = false
+        var universalContextIncluded = false
+
+        // In this refactor we don't cache the boolean flags to keep it simple, but we can compute them inline for return.
+        // But since we want to return them, let's bypass cache or recompute the bools for the cache hit. 
+        // Actually, let's just always compute the bools even on cache hit, it's cheap.
+
+        if policy != .inlineActiveTextOnly {
+            let history = UniversalContextManager.shared.contextHistory
+            if let snap = history.last, !snap.screenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                universalContextIncluded = true
+            }
+            let trimmedScreen = currentScreen.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedScreen.isEmpty {
+                ocrIncluded = true
+            }
+            let trimmedClip = recentClip.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedClip.isEmpty {
+                clipboardIncluded = true
+            }
+        }
 
         if frozenPrefixKey == stableKey && !frozenPrefix.isEmpty {
-            return frozenPrefix
+            return (frozenPrefix, clipboardIncluded, ocrIncluded, universalContextIncluded)
         }
 
         // ── Block 1: Style / persona conditioning ─────────────────────────────
@@ -105,13 +133,14 @@ class PromptBuilder {
             prefaceLines.append(style)
         }
 
-        // ── Block 2: Dual-window rolling history (previous window screen text) ──
-        let history = UniversalContextManager.shared.contextHistory
-        if let snap = history.last, !snap.screenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            var text = snap.screenText
-            if text.count > 800 { text = String(text.prefix(800)) }
-            prefaceLines.append("Nearby on screen: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
+        if policy != .inlineActiveTextOnly {
+            // ── Block 2: Dual-window rolling history (previous window screen text) ──
+            let history = UniversalContextManager.shared.contextHistory
+            if let snap = history.last, !snap.screenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                var text = snap.screenText
+                if text.count > 800 { text = String(text.prefix(800)) }
+                prefaceLines.append("Nearby on screen: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
 
         // ── Block 3: Live OCR snapshot ────────────────────────────────────────
         let trimmedScreen = currentScreen.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -126,6 +155,7 @@ class PromptBuilder {
         if !trimmedClip.isEmpty {
             let clipped = trimmedClip.count > 300 ? String(trimmedClip.prefix(300)) : trimmedClip
             prefaceLines.append("On the clipboard: \(clipped)")
+        }
         }
 
         // ── Final preface: joined with \n, then \n\n boundary before the live prefix ──
@@ -143,7 +173,7 @@ class PromptBuilder {
         frozenPrefix = built
         frozenPrefixKey = stableKey
         print("[TypeFlow-Debug] PromptBuilder: Conditioning preface frozen (\(built.count) chars, \(prefaceLines.count) blocks).")
-        return built
+        return (built, clipboardIncluded, ocrIncluded, universalContextIncluded)
     }
 
     // MARK: - Suffix builder — live typing prefix (per-keystroke)
@@ -152,7 +182,7 @@ class PromptBuilder {
     // Trailing whitespace is trimmed so generation begins at a clean word boundary,
     // matching BaseCompletionPromptRenderer.trimmingTrailingWhitespace().
 
-    func buildPromptSuffix(textBeforeCaret: String, liveBuffer: String) -> (text: String, requiresHealing: Bool) {
+    func buildPromptSuffix(textBeforeCaret: String, liveBuffer: String, policy: AutocompleteContextPolicy = .fullContext) -> (text: String, requiresHealing: Bool, clipboardIncluded: Bool) {
         let lines = textBeforeCaret.components(separatedBy: .newlines)
         // Include up to 4 preceding lines for paragraph-level context
         let previousLines = lines.dropLast().suffix(4).joined(separator: "\n")
@@ -164,11 +194,13 @@ class PromptBuilder {
             suffix += previousLines + "\n"
         }
 
+        var clipboardIncluded = false
         // Inline clipboard injection on trigger keyword
-        if hasClipboardTrigger(textBeforeCaret: textBeforeCaret) {
+        if policy != .inlineActiveTextOnly && hasClipboardTrigger(textBeforeCaret: textBeforeCaret) {
             let recentClipboard = Array(ClipboardMonitor.shared.recentItems.suffix(3))
             if !recentClipboard.isEmpty {
                 suffix += "\n" + recentClipboard.joined(separator: "\n") + "\n"
+                clipboardIncluded = true
             }
         }
 
@@ -215,7 +247,7 @@ class PromptBuilder {
 
         suffix += finalActiveLine
         logContextAudit("PromptBuilder output suffixLen=\(suffix.count) finalActiveLineLen=\(finalActiveLine.count) requiresHealing=\(requiresHealing) suffix='\(contextAuditPreview(suffix))'")
-        return (text: suffix, requiresHealing: requiresHealing)
+        return (text: suffix, requiresHealing: requiresHealing, clipboardIncluded: clipboardIncluded)
     }
 
     // MARK: - Rewrite prompt

@@ -1171,6 +1171,14 @@ class CompletionManager: @unchecked Sendable {
             streamBuffer.logSuppressedAfterVisible(requestID: requestID)
             return
         }
+        
+        if candidate.mode == "afterSpace" {
+            let words = candidate.suggestion.components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
+            if !words.contains(where: { $0.count >= 3 }) {
+                print("[VisibleSuggestionAudit] decision=rejectedBeforeVisible reason=tinyGarbageAfterSpace")
+                return
+            }
+        }
 
         LatencyInstrumentation.shared.firstUsable(requestID: requestID, workID: workID, textLen: candidate.finalLen)
         LatencyInstrumentation.shared.renderRequested(requestID: requestID, workID: workID, source: source, textLen: candidate.finalLen)
@@ -1185,6 +1193,9 @@ class CompletionManager: @unchecked Sendable {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             guard self.shouldRenderGenerationResult(requestID: requestID, workID: workID, source: "\(source)-main") else { return }
+            
+            print("[VisibleSuggestionAudit] requestID=\(requestID) source=\(source) activeLine='\(self.qualityAuditPreview(requestSnapshot.canonicalTextBeforeCaret))' rawOutput='\(self.qualityAuditPreview(candidate.rawOutput))' finalSuggestion='\(self.qualityAuditPreview(candidate.suggestion))' decision=visibleApplied reason=\(candidate.reason) promptIsolationPolicy=inlineActiveTextOnly clipboardIncluded=false ocrIncluded=false universalContextIncluded=false")
+            
             self.applyAutocompleteOverlayText(
                 candidate.suggestion,
                 requestSnapshot: requestSnapshot,
@@ -1525,6 +1536,12 @@ class CompletionManager: @unchecked Sendable {
                     }
                     return
                 } else {
+                    let enableSpellcheckGhosts = false
+                    if !enableSpellcheckGhosts {
+                        print("[SpellcheckGhost] suppressed reason=disabledForInlineAutocomplete")
+                        return
+                    }
+                    print("[SpellcheckGhost] visibleApplied")
                     // Show it as orange ghost text suggestion
                     activeSpellCorrection = (misspelled: word, corrected: correction)
                     let ghostText = getGhostText(misspelled: word, correction: correction)
@@ -1570,6 +1587,13 @@ class CompletionManager: @unchecked Sendable {
                         print("[TypeFlow-Debug] Inline definite typo spell correction found: '\(word)' -> '\(correction)'")
                         // Cancel any pending LLM generation tasks
                         workController.cancelAll()
+                        
+                        let enableSpellcheckGhosts = false
+                        if !enableSpellcheckGhosts {
+                            print("[SpellcheckGhost] suppressed reason=disabledForInlineAutocomplete")
+                            return
+                        }
+                        print("[SpellcheckGhost] visibleApplied")
                         
                         activeSpellCorrection = (misspelled: word, corrected: correction)
                         
@@ -1788,6 +1812,7 @@ class CompletionManager: @unchecked Sendable {
                 textBeforeCaret: fullActiveLine,
                 liveBuffer: effectiveLiveBuffer,
                 cancellationToken: generationCancellationToken,
+                policy: .inlineActiveTextOnly,
                 onStream: { [weak self] partialText in
                     guard let self = self else { return }
                     guard !generationCancellationToken.isCancelled else {
