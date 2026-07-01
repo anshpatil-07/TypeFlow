@@ -1167,23 +1167,96 @@ class CompletionManager: @unchecked Sendable {
         let workID = requestSnapshot.workID
         guard !cancellationToken.isCancelled else { return }
         guard shouldRenderGenerationResult(requestID: requestID, workID: workID, source: source) else { return }
+        // Extract partial word if any
+        let activeLine = requestSnapshot.canonicalTextBeforeCaret
+        let wordBoundaryChars: Set<Character> = [
+            " ", "\t", ".", "_", "(", ")", ":", "/", ",", ";",
+            "{", "}", "=", "+", "-", "*", "&", "|", "!", "?",
+            "\"", "'", "[", "]", "<", ">"
+        ]
+        
+        var partialWord = ""
+        if !activeLine.isEmpty && !wordBoundaryChars.contains(activeLine.last!) {
+            var partialStart = activeLine.endIndex
+            var idx = activeLine.index(before: activeLine.endIndex)
+            while idx >= activeLine.startIndex {
+                if wordBoundaryChars.contains(activeLine[idx]) {
+                    partialStart = activeLine.index(after: idx)
+                    break
+                }
+                if idx == activeLine.startIndex {
+                    partialStart = activeLine.startIndex
+                    break
+                }
+                idx = activeLine.index(before: idx)
+            }
+            partialWord = String(activeLine[partialStart...])
+        }
+
+        // Visible Usefulness Gate
+        var accepted = true
+        var rejectionReason = ""
+        let suggestion = candidate.suggestion
+
+        if candidate.mode == "midWord" {
+            let isPunctuationOnly = suggestion.allSatisfy { !$0.isLetter && !$0.isNumber }
+            
+            if suggestion.isEmpty {
+                accepted = false; rejectionReason = "empty"
+            } else if isPunctuationOnly {
+                accepted = false; rejectionReason = "punctuationOnly"
+            } else if suggestion.first!.isWhitespace {
+                accepted = false; rejectionReason = "leadingWhitespace"
+            } else if !partialWord.isEmpty && partialWord.first!.isLowercase && suggestion.first!.isUppercase {
+                accepted = false; rejectionReason = "uppercaseMismatched"
+            } else if suggestion.first!.isNumber && !partialWord.contains(where: { $0.isNumber }) {
+                accepted = false; rejectionReason = "numericGarbage"
+            } else if suggestion.contains(" ") {
+                accepted = false; rejectionReason = "fullPhraseMidWord"
+            }
+        } else if candidate.mode == "afterSpace" {
+            let words = suggestion.components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
+            let isPunctuationOnly = suggestion.allSatisfy { !$0.isLetter && !$0.isNumber }
+            let lowerSug = suggestion.lowercased().trimmingCharacters(in: .whitespaces)
+            let weirdSuffixes = ["ata", "anta", "yson", "ord", "pped"]
+            
+            if isPunctuationOnly {
+                accepted = false; rejectionReason = "punctuationOnly"
+            } else if suggestion.count <= 2 {
+                accepted = false; rejectionReason = "tooShortAfterSpace"
+            } else if !words.contains(where: { $0.count >= 3 }) {
+                accepted = false; rejectionReason = "tinyGarbageAfterSpace"
+            } else if suggestion.first!.isNumber && !activeLine.contains(where: { $0.isNumber }) {
+                accepted = false; rejectionReason = "numericGarbage"
+            } else if weirdSuffixes.contains(lowerSug) {
+                accepted = false; rejectionReason = "suffixLookingFragment"
+            }
+            
+            // Early atomic candidate selection for afterSpace
+            if accepted && source == "early" {
+                if !suggestion.contains(" ") && suggestion.count < 4 {
+                    accepted = false; rejectionReason = "partialBPEFragment"
+                }
+            }
+        }
+
+        print("[VisibleUsefulnessGate] decision=\(accepted ? "accepted" : "rejected") mode=\(candidate.mode) reason=\(rejectionReason.isEmpty ? "valid" : rejectionReason)")
+
+        if !accepted {
+            print("[VisibleSuggestionAudit] requestID=\(requestID) decision=rejectedBeforeVisible mode=\(candidate.mode) activeLine='\(self.qualityAuditPreview(activeLine))' partialWord='\(partialWord)' rawOutput='\(self.qualityAuditPreview(candidate.rawOutput))' finalSuggestion='\(self.qualityAuditPreview(candidate.suggestion))' reason=\(rejectionReason)")
+            return
+        }
+
         guard streamBuffer.reserveVisibleApply() else {
             streamBuffer.logSuppressedAfterVisible(requestID: requestID)
             return
-        }
-        
-        if candidate.mode == "afterSpace" {
-            let words = candidate.suggestion.components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
-            if !words.contains(where: { $0.count >= 3 }) {
-                print("[VisibleSuggestionAudit] decision=rejectedBeforeVisible reason=tinyGarbageAfterSpace")
-                return
-            }
         }
 
         LatencyInstrumentation.shared.firstUsable(requestID: requestID, workID: workID, textLen: candidate.finalLen)
         LatencyInstrumentation.shared.renderRequested(requestID: requestID, workID: workID, source: source, textLen: candidate.finalLen)
 
         let elapsedMs = (CFAbsoluteTimeGetCurrent() - candidate.createdAt) * 1000.0
+        
         if source == "early" || source == "early-stable" {
             print("[AtomicGhost] earlyVisibleApply requestID=\(requestID) elapsedMs=\(String(format: "%.1f", elapsedMs))")
         } else {
@@ -1194,7 +1267,11 @@ class CompletionManager: @unchecked Sendable {
             guard let self = self else { return }
             guard self.shouldRenderGenerationResult(requestID: requestID, workID: workID, source: "\(source)-main") else { return }
             
-            print("[VisibleSuggestionAudit] requestID=\(requestID) source=\(source) activeLine='\(self.qualityAuditPreview(requestSnapshot.canonicalTextBeforeCaret))' rawOutput='\(self.qualityAuditPreview(candidate.rawOutput))' finalSuggestion='\(self.qualityAuditPreview(candidate.suggestion))' decision=visibleApplied reason=\(candidate.reason) promptIsolationPolicy=inlineActiveTextOnly clipboardIncluded=false ocrIncluded=false universalContextIncluded=false")
+            self.atomicGhostLock.lock()
+            let visibleCount = (self.atomicGhostVisibleApplyCountByRequestID[requestID] ?? 0) + 1
+            self.atomicGhostLock.unlock()
+
+            print("[VisibleSuggestionAudit] requestID=\(requestID) decision=visibleApplied mode=\(candidate.mode) activeLine='\(self.qualityAuditPreview(activeLine))' partialWord='\(partialWord)' rawOutput='\(self.qualityAuditPreview(candidate.rawOutput))' finalSuggestion='\(self.qualityAuditPreview(candidate.suggestion))' source=\(source) promptIsolationPolicy=inlineActiveTextOnly elapsedMs=\(String(format: "%.1f", elapsedMs)) visibleApplyCountForRequest=\(visibleCount)")
             
             self.applyAutocompleteOverlayText(
                 candidate.suggestion,
