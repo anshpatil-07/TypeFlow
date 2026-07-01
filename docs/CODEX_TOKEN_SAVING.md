@@ -44,3 +44,24 @@ git diff -- <specific files>
 - Routine final reports should be concise, ideally under 12 bullets.
 - Exception: log-audit and handoff reports may be longer when needed, but must remain structured and compact.
 - Include enough detail for the next agent to continue without rereading large raw artifacts.
+
+## RTK command-output compression
+
+RTK is installed locally and should be used for noisy shell inspection when available.
+
+Prefer compact/RTK-wrapped commands:
+- rtk git status --short
+- rtk git diff --stat
+- rtk git diff -- <specific files>
+- rtk rg <pattern> <paths>
+- rtk ls
+- rtk cat <small file only>
+
+For build/test/log workflows:
+- redirect full xcodebuild output to a local log file
+- report only success/failure, or the relevant final error section on failure
+- use the TypeFlow log auditor for TypeFlow logs
+- never paste full raw logs
+- never paste full raw build output
+
+RTK helps reduce command-output tokens. It does not reduce reasoning tokens, long prompts, old chat history, or huge text pasted directly into chat.
