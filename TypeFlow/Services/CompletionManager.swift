@@ -437,6 +437,7 @@ class CompletionManager: @unchecked Sendable {
         private var didLogStreamNoAX = false
         private var didLogSkippedStreamAX = false
         private var didLogFinalNoAX = false
+        private var didLogQualityAudit = false
 
         init(
             requestID: UInt64,
@@ -496,6 +497,15 @@ class CompletionManager: @unchecked Sendable {
             didLogFinalNoAX = true
             return true
         }
+
+        func shouldLogQualityAudit(force: Bool = false) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if force { return true }
+            guard !didLogQualityAudit else { return false }
+            didLogQualityAudit = true
+            return true
+        }
     }
 
     private func contextAuditPreview(_ text: String, limit: Int = 220) -> String {
@@ -508,6 +518,102 @@ class CompletionManager: @unchecked Sendable {
 
     private func logContextAudit(_ message: String) {
         print("[TypeFlow-ContextAudit] \(message)")
+    }
+
+    private func qualityAuditPreview(_ text: String, limit: Int = 220) -> String {
+        let escaped = text
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\t", with: "\\t")
+            .replacingOccurrences(of: "'", with: "\\'")
+        if escaped.count <= limit { return escaped }
+        return "..." + String(escaped.suffix(limit))
+    }
+
+    private func qualityAuditReason(
+        rawOutput: String,
+        processedOutput: String,
+        finalSuggestion: String,
+        activeLine: String
+    ) -> String {
+        let trimmedSuggestion = finalSuggestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedRaw = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowerRaw = trimmedRaw.lowercased()
+        let assistantLikePrefixes = [
+            "i'm not sure",
+            "i am not sure",
+            "i'm sorry",
+            "i cannot",
+            "i can't",
+            "as an ai",
+            "sure,",
+            "here's",
+            "here is",
+            "let me",
+            "it sounds like"
+        ]
+
+        if finalSuggestion.isEmpty {
+            return "empty"
+        }
+        if assistantLikePrefixes.contains(where: { lowerRaw.hasPrefix($0) || trimmedSuggestion.lowercased().hasPrefix($0) }) {
+            return "assistantLike"
+        }
+
+        let punctuationAndWhitespace = CharacterSet.punctuationCharacters
+            .union(.symbols)
+            .union(.whitespacesAndNewlines)
+        if !trimmedSuggestion.isEmpty,
+           trimmedSuggestion.unicodeScalars.allSatisfy({ punctuationAndWhitespace.contains($0) }) {
+            return "punctuationOnly"
+        }
+
+        if finalSuggestion != finalSuggestion.trimmingCharacters(in: .whitespacesAndNewlines) {
+            return "trailingWhitespace"
+        }
+
+        let currentWord = activeLine
+            .components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+            .last ?? ""
+        if !currentWord.isEmpty && finalSuggestion.hasPrefix(currentWord) {
+            return "duplicatePrefix"
+        }
+        if !activeLine.isEmpty && finalSuggestion.hasPrefix(activeLine) {
+            return "duplicatePrefix"
+        }
+
+        if finalSuggestion.count > 160 {
+            return "tooLong"
+        }
+
+        _ = processedOutput
+        return "validContinuation"
+    }
+
+    private func logQualityAudit(
+        requestSnapshot: GenerationRequestSnapshot,
+        rawOutput: String,
+        processedOutput: String,
+        finalSuggestion: String,
+        phase: String,
+        force: Bool = false
+    ) {
+        guard requestSnapshot.shouldLogQualityAudit(force: force) else { return }
+
+        let activeLine = requestSnapshot.canonicalTextBeforeCaret
+            .components(separatedBy: .newlines)
+            .last ?? ""
+        let reason = qualityAuditReason(
+            rawOutput: rawOutput,
+            processedOutput: processedOutput,
+            finalSuggestion: finalSuggestion,
+            activeLine: activeLine
+        )
+        let accepted = reason == "validContinuation"
+        let rejectionReason = accepted ? "none" : reason
+
+        print("[QualityAudit] requestID=\(requestSnapshot.requestID) phase=\(phase) textBeforeCaret='\(qualityAuditPreview(requestSnapshot.canonicalTextBeforeCaret))' rawOutput='\(qualityAuditPreview(rawOutput))' processedOutput='\(qualityAuditPreview(processedOutput))' accepted=\(accepted) rejectionReason=\(rejectionReason)")
+        print("[QualityAudit] reason=\(reason) source=\(requestSnapshot.source.rawValue) activeLine='\(qualityAuditPreview(activeLine))' finalSuggestion='\(qualityAuditPreview(finalSuggestion))'")
     }
 
     private func canonicalizePredictionSnapshot(_ snapshot: PredictionSnapshot) -> CanonicalPredictionContext {
@@ -1462,6 +1568,13 @@ class CompletionManager: @unchecked Sendable {
                         if let newlineRange = remainder.range(of: "\n") {
                             let truncated = String(remainder[..<newlineRange.lowerBound])
                             guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream-newline") else { return }
+                            self.logQualityAudit(
+                                requestSnapshot: requestSnapshot,
+                                rawOutput: partialText,
+                                processedOutput: processed,
+                                finalSuggestion: truncated,
+                                phase: "stream-newline"
+                            )
                             if !truncated.isEmpty {
                                 LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: truncated.count)
                                 LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "stream-newline", textLen: truncated.count)
@@ -1476,6 +1589,13 @@ class CompletionManager: @unchecked Sendable {
                     }
                     
                     guard self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "stream") else { return }
+                    self.logQualityAudit(
+                        requestSnapshot: requestSnapshot,
+                        rawOutput: partialText,
+                        processedOutput: processed,
+                        finalSuggestion: remainder,
+                        phase: "stream"
+                    )
                     if !remainder.isEmpty {
                         LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: remainder.count)
                         LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "stream", textLen: remainder.count)
@@ -1531,6 +1651,14 @@ class CompletionManager: @unchecked Sendable {
             print("[TypeFlow-Debug] Processed completion: '\(finalRemainder.prefix(40))'")
             
             if Task.isCancelled || !self.shouldRenderGenerationResult(requestID: resultRequestID, workID: workID, source: "final") { return }
+            self.logQualityAudit(
+                requestSnapshot: requestSnapshot,
+                rawOutput: completion,
+                processedOutput: processedCompletion,
+                finalSuggestion: finalRemainder,
+                phase: "final",
+                force: finalRemainder.isEmpty
+            )
             if !finalRemainder.isEmpty {
                 LatencyInstrumentation.shared.firstUsable(requestID: resultRequestID, workID: workID, textLen: finalRemainder.count)
                 LatencyInstrumentation.shared.renderRequested(requestID: resultRequestID, workID: workID, source: "final", textLen: finalRemainder.count)
