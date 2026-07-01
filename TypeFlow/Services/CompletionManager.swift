@@ -447,7 +447,7 @@ class CompletionManager: @unchecked Sendable {
             attemptedCaretCapture = true
             lock.unlock()
 
-            let rect = monitor?.getCurrentCaretRect()
+            let rect = monitor?.getCurrentCaretRect(requestID: requestID)
 
             lock.lock()
             cachedCaretRect = rect

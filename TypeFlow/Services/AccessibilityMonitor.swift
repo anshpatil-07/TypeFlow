@@ -201,6 +201,20 @@ class AccessibilityMonitor {
     
     private var lastDeletedWord: String?
     private var isBackspacing = false
+    private let editableElementLock = NSLock()
+    private var lastEditableElement: AXUIElement?
+    private var lastEditableElementPID: pid_t = 0
+    private var lastEditableElementRole: String = ""
+    private var lastEditableElementTimestamp: CFAbsoluteTime = 0
+
+    private struct EditableElementResolution {
+        let element: AXUIElement
+        let source: String
+        let role: String
+        let subrole: String
+        let pid: pid_t
+        let isRecovered: Bool
+    }
 
     private func contextAuditPreview(_ text: String, limit: Int = 180) -> String {
         let escaped = text
@@ -1268,14 +1282,357 @@ class AccessibilityMonitor {
         AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
     
-    func getCurrentCaretRect() -> CGRect? {
+    private func geometryProbeID(_ requestID: UInt64?) -> String {
+        requestID.map(String.init) ?? "nil"
+    }
+
+    private func geometryProbeRect(_ rect: CGRect?) -> String {
+        guard let rect else { return "nil" }
+        return String(
+            format: "{{x=%.1f,y=%.1f,w=%.1f,h=%.1f}}",
+            rect.origin.x,
+            rect.origin.y,
+            rect.width,
+            rect.height
+        )
+    }
+
+    private func geometryProbeError(_ error: AXError) -> String {
+        switch error {
+        case .success: return "success"
+        case .failure: return "failure"
+        case .illegalArgument: return "illegalArgument"
+        case .invalidUIElement: return "invalidUIElement"
+        case .invalidUIElementObserver: return "invalidUIElementObserver"
+        case .cannotComplete: return "cannotComplete"
+        case .attributeUnsupported: return "attributeUnsupported"
+        case .actionUnsupported: return "actionUnsupported"
+        case .notificationUnsupported: return "notificationUnsupported"
+        case .notImplemented: return "notImplemented"
+        case .notificationAlreadyRegistered: return "notificationAlreadyRegistered"
+        case .notificationNotRegistered: return "notificationNotRegistered"
+        case .apiDisabled: return "apiDisabled"
+        case .noValue: return "noValue"
+        case .parameterizedAttributeUnsupported: return "parameterizedAttributeUnsupported"
+        case .notEnoughPrecision: return "notEnoughPrecision"
+        @unknown default: return "unknown(\(error.rawValue))"
+        }
+    }
+
+    private func geometryProbeAXRect(_ value: CFTypeRef?) -> CGRect? {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = value as! AXValue
+        var rect = CGRect.zero
+        guard AXValueGetValue(axValue, .cgRect, &rect) else { return nil }
+        return rect
+    }
+
+    private func geometryProbeAXPoint(_ value: CFTypeRef?) -> CGPoint? {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = value as! AXValue
+        var point = CGPoint.zero
+        guard AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
+        return point
+    }
+
+    private func geometryProbeAXSize(_ value: CFTypeRef?) -> CGSize? {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = value as! AXValue
+        var size = CGSize.zero
+        guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
+        return size
+    }
+
+    private func geometryProbeAttributeString(_ axElement: AXUIElement, attribute: CFString) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axElement, attribute, &value) == .success,
+              let string = value as? String else {
+            return nil
+        }
+        return string
+    }
+
+    private func editableElementPID(_ axElement: AXUIElement) -> pid_t {
+        var pid: pid_t = 0
+        AXUIElementGetPid(axElement, &pid)
+        return pid
+    }
+
+    private func editableElementRoleInfo(_ axElement: AXUIElement) -> (role: String, subrole: String) {
+        let role = geometryProbeAttributeString(axElement, attribute: kAXRoleAttribute as CFString) ?? "nil"
+        let subrole = geometryProbeAttributeString(axElement, attribute: kAXSubroleAttribute as CFString) ?? "nil"
+        return (role, subrole)
+    }
+
+    private func editableElementFrame(_ axElement: AXUIElement) -> CGRect? {
+        var positionValue: CFTypeRef?
+        let positionErr = AXUIElementCopyAttributeValue(axElement, kAXPositionAttribute as CFString, &positionValue)
+        var sizeValue: CFTypeRef?
+        let sizeErr = AXUIElementCopyAttributeValue(axElement, kAXSizeAttribute as CFString, &sizeValue)
+        guard positionErr == .success,
+              sizeErr == .success,
+              let position = geometryProbeAXPoint(positionValue),
+              let size = geometryProbeAXSize(sizeValue) else {
+            return nil
+        }
+        return CGRect(origin: position, size: size)
+    }
+
+    private func editableElementHasTextSupport(_ axElement: AXUIElement) -> Bool {
+        var valueRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef) == .success, valueRef != nil {
+            return true
+        }
+
+        var rangeRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success, rangeRef != nil {
+            return true
+        }
+
+        var markerRangeRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axElement, "AXSelectedTextMarkerRange" as CFString, &markerRangeRef) == .success, markerRangeRef != nil {
+            return true
+        }
+
+        return false
+    }
+
+    private func rememberEditableElement(_ axElement: AXUIElement, source: String) {
+        let pid = editableElementPID(axElement)
+        guard pid != 0, pid != NSRunningApplication.current.processIdentifier else { return }
+
+        let roleInfo = editableElementRoleInfo(axElement)
+        guard isEditableAXRole(role: roleInfo.role, subrole: roleInfo.subrole) else { return }
+        guard editableElementFrame(axElement).map({ !$0.isEmpty }) == true else { return }
+        guard editableElementHasTextSupport(axElement) else { return }
+
+        editableElementLock.lock()
+        lastEditableElement = axElement
+        lastEditableElementPID = pid
+        lastEditableElementRole = roleInfo.role
+        lastEditableElementTimestamp = CFAbsoluteTimeGetCurrent()
+        editableElementLock.unlock()
+
+        print("[EditableResolver] remembered source=\(source) role=\(roleInfo.role) pid=\(pid)")
+    }
+
+    private func invalidateRememberedEditableElement(reason: String) {
+        editableElementLock.lock()
+        lastEditableElement = nil
+        lastEditableElementPID = 0
+        lastEditableElementRole = ""
+        lastEditableElementTimestamp = 0
+        editableElementLock.unlock()
+
+        print("[EditableResolver] invalidated reason=\(reason)")
+    }
+
+    private func validateEditableElement(
+        _ axElement: AXUIElement,
+        expectedPID: pid_t,
+        source: String,
+        isRecovered: Bool
+    ) -> EditableElementResolution? {
+        let pid = editableElementPID(axElement)
+        guard pid == expectedPID else {
+            print("[EditableResolver] rejected reason=pidMismatch source=\(source) expectedPID=\(expectedPID) actualPID=\(pid)")
+            return nil
+        }
+        guard pid != NSRunningApplication.current.processIdentifier else {
+            print("[EditableResolver] rejected reason=overlayElement source=\(source) pid=\(pid)")
+            return nil
+        }
+
+        let roleInfo = editableElementRoleInfo(axElement)
+        guard isEditableAXRole(role: roleInfo.role, subrole: roleInfo.subrole) else {
+            print("[EditableResolver] rejected reason=roleNotEditable source=\(source) role=\(roleInfo.role) subrole=\(roleInfo.subrole)")
+            return nil
+        }
+
+        guard let frame = editableElementFrame(axElement), !frame.isEmpty else {
+            print("[EditableResolver] rejected reason=emptyFrame source=\(source) role=\(roleInfo.role) pid=\(pid)")
+            return nil
+        }
+
+        guard editableElementHasTextSupport(axElement) else {
+            print("[EditableResolver] rejected reason=noAXValue source=\(source) role=\(roleInfo.role) pid=\(pid)")
+            return nil
+        }
+
+        print("[EditableResolver] resolved source=\(source) role=\(roleInfo.role) pid=\(pid)")
+        rememberEditableElement(axElement, source: source)
+        return EditableElementResolution(
+            element: axElement,
+            source: source,
+            role: roleInfo.role,
+            subrole: roleInfo.subrole,
+            pid: pid,
+            isRecovered: isRecovered
+        )
+    }
+
+    private func appScopedFocusedElement(pid: pid_t) -> AXUIElement? {
+        let appElement = AXUIElementCreateApplication(pid)
+        var focusedElement: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+        guard err == .success, let element = focusedElement else {
+            print("[EditableResolver] appScopedFocusedElement available=false role=nil error=\(geometryProbeError(err))")
+            return nil
+        }
+        let axElement = element as! AXUIElement
+        let roleInfo = editableElementRoleInfo(axElement)
+        print("[EditableResolver] appScopedFocusedElement available=true role=\(roleInfo.role)")
+        return axElement
+    }
+
+    private func cachedTextExtractionElement() -> (element: AXUIElement, ageMs: Double, samePID: Bool)? {
+        let focusedPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        editableElementLock.lock()
+        let element = lastEditableElement
+        let pid = lastEditableElementPID
+        let timestamp = lastEditableElementTimestamp
+        editableElementLock.unlock()
+
+        guard let element else { return nil }
+        let ageMs = (CFAbsoluteTimeGetCurrent() - timestamp) * 1000
+        return (element, ageMs, pid == focusedPID)
+    }
+
+    private func firstObservedEditableElement(in root: AXUIElement, expectedPID: pid_t) -> AXUIElement? {
+        var queue: [AXUIElement] = [root]
+        var visited = 0
+        let maxVisited = 160
+
+        while !queue.isEmpty && visited < maxVisited {
+            let element = queue.removeFirst()
+            visited += 1
+
+            if editableElementPID(element) == expectedPID {
+                let roleInfo = editableElementRoleInfo(element)
+                if isEditableAXRole(role: roleInfo.role, subrole: roleInfo.subrole),
+                   editableElementFrame(element).map({ !$0.isEmpty }) == true,
+                   editableElementHasTextSupport(element) {
+                    return element
+                }
+            }
+
+            var childrenRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+                  let children = childrenRef as? [AXUIElement] else {
+                continue
+            }
+            queue.append(contentsOf: children.prefix(max(0, maxVisited - visited)))
+        }
+
+        return nil
+    }
+
+    private func resolveEditableElementForGeometry(
+        systemFocusedElement: AXUIElement?,
+        systemFocusedError: AXError,
+        focusedPID: pid_t
+    ) -> EditableElementResolution? {
+        print("[EditableResolver] systemFocusedElement available=\(systemFocusedElement != nil)")
+
+        if let systemFocusedElement,
+           let resolution = validateEditableElement(
+                systemFocusedElement,
+                expectedPID: focusedPID,
+                source: "systemFocused",
+                isRecovered: false
+           ) {
+            return resolution
+        }
+
+        if systemFocusedElement == nil {
+            print("[EditableResolver] systemFocusedElement unavailable error=\(geometryProbeError(systemFocusedError))")
+        }
+
+        if let appFocused = appScopedFocusedElement(pid: focusedPID),
+           let resolution = validateEditableElement(
+                appFocused,
+                expectedPID: focusedPID,
+                source: "appScopedFocused",
+                isRecovered: true
+           ) {
+            return resolution
+        }
+
+        if let cached = cachedTextExtractionElement() {
+            let roleInfo = editableElementRoleInfo(cached.element)
+            print("[EditableResolver] reusedTextExtractionElement available=true role=\(roleInfo.role)")
+            print("[EditableResolver] reusedLastEditableElement available=true ageMs=\(String(format: "%.1f", cached.ageMs)) samePID=\(cached.samePID)")
+            if cached.samePID,
+               cached.ageMs < 10_000,
+               let resolution = validateEditableElement(
+                    cached.element,
+                    expectedPID: focusedPID,
+                    source: "textExtractionElement",
+                    isRecovered: true
+               ) {
+                return resolution
+            } else if !cached.samePID {
+                print("[EditableResolver] rejected reason=pidMismatch source=lastEditable expectedPID=\(focusedPID)")
+            } else {
+                print("[EditableResolver] rejected reason=staleSession source=lastEditable ageMs=\(String(format: "%.1f", cached.ageMs))")
+            }
+        } else {
+            print("[EditableResolver] reusedTextExtractionElement available=false role=nil")
+            print("[EditableResolver] reusedLastEditableElement available=false ageMs=nil samePID=false")
+        }
+
+        let appElement = AXUIElementCreateApplication(focusedPID)
+        if let observed = firstObservedEditableElement(in: appElement, expectedPID: focusedPID),
+           let resolution = validateEditableElement(
+                observed,
+                expectedPID: focusedPID,
+                source: "observedEditable",
+                isRecovered: true
+           ) {
+            return resolution
+        }
+
+        return nil
+    }
+
+    func getCurrentCaretRect(requestID: UInt64? = nil) -> CGRect? {
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        let focusedPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        let appName = NSWorkspace.shared.frontmostApplication?.localizedName ?? "unknown"
         let systemWideElement = AXUIElementCreateSystemWide()
         var focusedElement: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
-        
-        guard err == .success, let element = focusedElement else { return nil }
-        let axElement = element as! AXUIElement
-        
+        let systemFocusedElement = (err == .success ? focusedElement : nil).map { $0 as! AXUIElement }
+
+        guard let resolution = resolveEditableElementForGeometry(
+            systemFocusedElement: systemFocusedElement,
+            systemFocusedError: err,
+            focusedPID: focusedPID
+        ) else {
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+            print("[GeometryProbe] start requestID=\(geometryProbeID(requestID)) focusedPID=\(focusedPID) app=\(appName) role=nil subrole=nil")
+            print("[GeometryProbe] finalGeometry unavailable reason=focusedElementUnavailable error=\(geometryProbeError(err))")
+            print("[GeometryProbe] timingMs=\(String(format: "%.1f", elapsedMs))")
+            return nil
+        }
+        let axElement = resolution.element
+        let role = resolution.role
+        let subrole = resolution.subrole
+        print("[GeometryProbe] start requestID=\(geometryProbeID(requestID)) focusedPID=\(focusedPID) app=\(appName) role=\(role) subrole=\(subrole)")
+
+        var positionValue: CFTypeRef?
+        let positionErr = AXUIElementCopyAttributeValue(axElement, kAXPositionAttribute as CFString, &positionValue)
+        var sizeValue: CFTypeRef?
+        let sizeErr = AXUIElementCopyAttributeValue(axElement, kAXSizeAttribute as CFString, &sizeValue)
+        let focusedPosition = geometryProbeAXPoint(positionValue)
+        let focusedSize = geometryProbeAXSize(sizeValue)
+        let focusedFrame: CGRect?
+        if let focusedPosition, let focusedSize {
+            focusedFrame = CGRect(origin: focusedPosition, size: focusedSize)
+        } else {
+            focusedFrame = nil
+        }
+        print("[GeometryProbe] focusedElementFrame available=\(focusedFrame != nil) rect=\(geometryProbeRect(focusedFrame)) positionError=\(geometryProbeError(positionErr)) sizeError=\(geometryProbeError(sizeErr))")
 
         // --- Priority: WebKit/Chromium AXTextMarker ---
         let markerRangeAttr = "AXSelectedTextMarkerRange" as CFString
@@ -1287,81 +1644,147 @@ class AccessibilityMonitor {
         if rangeErr == .success, let range = rangeValue {
             var boundsValue: CFTypeRef?
             let boundsErr = AXUIElementCopyParameterizedAttributeValue(axElement, boundsForRangeAttr, range, &boundsValue)
-            
+            let rect = geometryProbeAXRect(boundsValue)
+            print("[GeometryProbe] browserTextMarkerRange available=true boundsAvailable=\(rect != nil) rect=\(geometryProbeRect(rect)) error=\(geometryProbeError(boundsErr))")
             if boundsErr == .success {
-                // The value is an AXValue. We must decode it.
-                let axValue = boundsValue as! AXValue
-                var rect = CGRect.zero
-                AXValueGetValue(axValue, .cgRect, &rect)
-                
-                if rect != .zero {
+                if let rect, rect != .zero {
                     // Suppressed: print("[TypeFlow-Debug] Browser Caret found via AXTextMarker: \(rect)")
+                    let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+                    print("[GeometryProbe] coordinateConversion available=true rect=\(geometryProbeRect(rect))")
+                    print("[GeometryProbe] finalGeometry available=true source=browserTextMarker rect=\(geometryProbeRect(rect))")
+                    print("[GeometryProbe] timingMs=\(String(format: "%.1f", elapsedMs))")
                     return rect
                 }
             }
+        } else {
+            print("[GeometryProbe] browserTextMarkerRange available=false boundsAvailable=false rect=nil error=\(geometryProbeError(rangeErr))")
         }
         print("[TypeFlow-Debug] Browser AXTextMarker extraction failed.")
 
         // --- Standard fallback for native macOS apps ---
         var selectedRangeRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success {
+        let selectedRangeErr = AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef)
+        if selectedRangeErr == .success,
+           let selectedRangeRef,
+           CFGetTypeID(selectedRangeRef) == AXValueGetTypeID() {
             let rangeValue = selectedRangeRef as! AXValue
             var range = CFRange(location: 0, length: 0)
             AXValueGetValue(rangeValue, .cfRange, &range)
-            
+
+            print("[GeometryProbe] selectedRange available=true location=\(range.location) length=\(range.length)")
+
             // Try getting the bounds of the range directly
             var bounds: CFTypeRef?
-            if AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, rangeValue, &bounds) == .success {
-                var rect = CGRect.zero
-                AXValueGetValue(bounds as! AXValue, .cgRect, &rect)
-                if rect.width > 0 || rect.height > 0 {
-                    return rect
-                }
+            let selectedBoundsErr = AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, rangeValue, &bounds)
+            let selectedBoundsRect = geometryProbeAXRect(bounds)
+            print("[GeometryProbe] boundsForSelectedRange available=\(selectedBoundsRect != nil) rect=\(geometryProbeRect(selectedBoundsRect)) error=\(geometryProbeError(selectedBoundsErr))")
+            var selectedBoundsReturnRect: CGRect?
+            if selectedBoundsErr == .success, let rect = selectedBoundsRect, rect.width > 0 || rect.height > 0 {
+                selectedBoundsReturnRect = rect
+            } else {
+                selectedBoundsReturnRect = nil
             }
-            
+
+            var zeroLengthReturnRect: CGRect?
+            var zeroLengthRange = CFRange(location: range.location, length: 0)
+            if let zeroLengthValue = AXValueCreate(.cfRange, &zeroLengthRange) {
+                var zeroBounds: CFTypeRef?
+                let zeroBoundsErr = AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, zeroLengthValue, &zeroBounds)
+                let zeroBoundsRect = geometryProbeAXRect(zeroBounds)
+                print("[GeometryProbe] boundsForZeroLengthCaretRange available=\(zeroBoundsRect != nil) rect=\(geometryProbeRect(zeroBoundsRect)) error=\(geometryProbeError(zeroBoundsErr))")
+                if zeroBoundsErr == .success, let rect = zeroBoundsRect, rect.width > 0 || rect.height > 0 {
+                    zeroLengthReturnRect = rect
+                }
+            } else {
+                print("[GeometryProbe] boundsForZeroLengthCaretRange available=false rect=nil error=createRangeFailed")
+            }
+
             // If the range length is 0 (caret only), try to query range of length 1 around it
+            var previousCharReturnRect: CGRect?
+            var nextCharReturnRect: CGRect?
             if range.length == 0 {
                 // Try char before caret
                 if range.location > 0 {
                     var fallbackRange = CFRange(location: range.location - 1, length: 1)
                     if let fallbackValue = AXValueCreate(.cfRange, &fallbackRange) {
                         var charBounds: CFTypeRef?
-                        if AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, fallbackValue, &charBounds) == .success {
-                            var rect = CGRect.zero
-                            AXValueGetValue(charBounds as! AXValue, .cgRect, &rect)
+                        let previousCharErr = AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, fallbackValue, &charBounds)
+                        let previousCharRect = geometryProbeAXRect(charBounds)
+                        print("[GeometryProbe] boundsForPreviousCharRange available=\(previousCharRect != nil) rect=\(geometryProbeRect(previousCharRect)) error=\(geometryProbeError(previousCharErr))")
+                        if previousCharErr == .success, let rect = previousCharRect {
                             if rect.width > 0 || rect.height > 0 {
-                                return CGRect(x: rect.origin.x + rect.width, y: rect.origin.y, width: 0, height: rect.height)
+                                previousCharReturnRect = CGRect(x: rect.origin.x + rect.width, y: rect.origin.y, width: 0, height: rect.height)
                             }
                         }
+                    } else {
+                        print("[GeometryProbe] boundsForPreviousCharRange available=false rect=nil error=createRangeFailed")
                     }
+                } else {
+                    print("[GeometryProbe] boundsForPreviousCharRange available=false rect=nil error=caretAtStart")
                 }
                 
                 // Try char at caret
                 var fallbackRange = CFRange(location: range.location, length: 1)
                 if let fallbackValue = AXValueCreate(.cfRange, &fallbackRange) {
                     var charBounds: CFTypeRef?
-                    if AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, fallbackValue, &charBounds) == .success {
-                        var rect = CGRect.zero
-                        AXValueGetValue(charBounds as! AXValue, .cgRect, &rect)
+                    let nextCharErr = AXUIElementCopyParameterizedAttributeValue(axElement, kAXBoundsForRangeParameterizedAttribute as CFString, fallbackValue, &charBounds)
+                    let nextCharRect = geometryProbeAXRect(charBounds)
+                    print("[GeometryProbe] boundsForNextCharRange available=\(nextCharRect != nil) rect=\(geometryProbeRect(nextCharRect)) error=\(geometryProbeError(nextCharErr))")
+                    if nextCharErr == .success, let rect = nextCharRect {
                         if rect.width > 0 || rect.height > 0 {
-                            return CGRect(x: rect.origin.x, y: rect.origin.y, width: 0, height: rect.height)
+                            nextCharReturnRect = CGRect(x: rect.origin.x, y: rect.origin.y, width: 0, height: rect.height)
                         }
                     }
+                } else {
+                    print("[GeometryProbe] boundsForNextCharRange available=false rect=nil error=createRangeFailed")
                 }
             }
+
+            if resolution.isRecovered, let zeroLengthReturnRect {
+                let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+                print("[GeometryProbe] coordinateConversion available=true rect=\(geometryProbeRect(zeroLengthReturnRect))")
+                print("[GeometryProbe] finalGeometry available=true source=zeroLengthCaretBounds rect=\(geometryProbeRect(zeroLengthReturnRect))")
+                print("[GeometryProbe] timingMs=\(String(format: "%.1f", elapsedMs))")
+                return zeroLengthReturnRect
+            }
+            if let selectedBoundsReturnRect {
+                let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+                print("[GeometryProbe] coordinateConversion available=true rect=\(geometryProbeRect(selectedBoundsReturnRect))")
+                print("[GeometryProbe] finalGeometry available=true source=selectedRangeBounds rect=\(geometryProbeRect(selectedBoundsReturnRect))")
+                print("[GeometryProbe] timingMs=\(String(format: "%.1f", elapsedMs))")
+                return selectedBoundsReturnRect
+            }
+            if let zeroLengthReturnRect {
+                let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+                print("[GeometryProbe] coordinateConversion available=true rect=\(geometryProbeRect(zeroLengthReturnRect))")
+                print("[GeometryProbe] finalGeometry available=true source=zeroLengthCaretBounds rect=\(geometryProbeRect(zeroLengthReturnRect))")
+                print("[GeometryProbe] timingMs=\(String(format: "%.1f", elapsedMs))")
+                return zeroLengthReturnRect
+            }
+            if let previousCharReturnRect {
+                let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+                print("[GeometryProbe] coordinateConversion available=true rect=\(geometryProbeRect(previousCharReturnRect))")
+                print("[GeometryProbe] finalGeometry available=true source=previousCharBounds rect=\(geometryProbeRect(previousCharReturnRect))")
+                print("[GeometryProbe] timingMs=\(String(format: "%.1f", elapsedMs))")
+                return previousCharReturnRect
+            }
+            if let nextCharReturnRect {
+                let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+                print("[GeometryProbe] coordinateConversion available=true rect=\(geometryProbeRect(nextCharReturnRect))")
+                print("[GeometryProbe] finalGeometry available=true source=nextCharRange rect=\(geometryProbeRect(nextCharReturnRect))")
+                print("[GeometryProbe] timingMs=\(String(format: "%.1f", elapsedMs))")
+                return nextCharReturnRect
+            }
+        } else {
+            print("[GeometryProbe] selectedRange available=false location=nil length=nil error=\(geometryProbeError(selectedRangeErr))")
+            print("[GeometryProbe] boundsForSelectedRange available=false rect=nil error=noSelectedRange")
+            print("[GeometryProbe] boundsForZeroLengthCaretRange available=false rect=nil error=noSelectedRange")
+            print("[GeometryProbe] boundsForPreviousCharRange available=false rect=nil error=noSelectedRange")
         }
         
         
         // Fallback: use focused element's bottom-left corner with offset
-        var positionVal: CFTypeRef?
-        var sizeVal: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, kAXPositionAttribute as CFString, &positionVal) == .success,
-           AXUIElementCopyAttributeValue(axElement, kAXSizeAttribute as CFString, &sizeVal) == .success {
-            var pos = CGPoint.zero
-            var size = CGSize.zero
-            AXValueGetValue(positionVal as! AXValue, .cgPoint, &pos)
-            AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
-            
+        if let pos = focusedPosition, let size = focusedSize {
             let textLength = self.keystrokeBuffer.count
             
             let estimatedTextWidth = CGFloat(textLength) * 8.0
@@ -1369,9 +1792,18 @@ class AccessibilityMonitor {
             let fallbackX = pos.x + 5 + estimatedTextWidth
             let fallbackY = pos.y + max(0, size.height - 18)
             print("[TypeFlow] Caret bounds failed, falling back to element bottom-left (offset): x=\(fallbackX), y=\(fallbackY), size=\(size), textLength=\(textLength)")
-            return CGRect(x: fallbackX, y: fallbackY, width: 0, height: 15)
+            let finalRect = CGRect(x: fallbackX, y: fallbackY, width: 0, height: 15)
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+            print("[GeometryProbe] coordinateConversion available=true rect=\(geometryProbeRect(finalRect))")
+            print("[GeometryProbe] finalGeometry available=true source=elementFrameEstimated rect=\(geometryProbeRect(finalRect))")
+            print("[GeometryProbe] timingMs=\(String(format: "%.1f", elapsedMs))")
+            return finalRect
         }
-        
+
+        let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+        print("[GeometryProbe] coordinateConversion available=false rect=nil")
+        print("[GeometryProbe] finalGeometry unavailable reason=noTextMarkerNoRangeNoElementFrame")
+        print("[GeometryProbe] timingMs=\(String(format: "%.1f", elapsedMs))")
         return nil
     }
 
@@ -1380,7 +1812,9 @@ class AccessibilityMonitor {
         var focusedElement: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
         guard err == .success, let element = focusedElement else { return nil }
-        return (element as! AXUIElement)
+        let axElement = element as! AXUIElement
+        rememberEditableElement(axElement, source: "textExtraction")
+        return axElement
     }
 
     func clearKeystrokeBuffer() {
@@ -1388,6 +1822,7 @@ class AccessibilityMonitor {
             logContextAudit("clearKeystrokeBuffer oldLen=\(keystrokeBuffer.count) oldBuffer='\(contextAuditPreview(keystrokeBuffer))'")
         }
         keystrokeBuffer = ""
+        invalidateRememberedEditableElement(reason: "bufferCleared")
         // Suppressed: print("[TypeFlow-Debug] Keystroke buffer cleared")
     }
 

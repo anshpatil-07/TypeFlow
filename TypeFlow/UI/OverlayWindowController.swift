@@ -1024,6 +1024,7 @@ class OverlayWindowController: NSWindowController {
     }
 
     private func applyMoveOverlay(to rect: CGRect) {
+        print("[GeometryProbe] overlayMove source=moveOverlay rect={{x=\(String(format: "%.1f", rect.origin.x)),y=\(String(format: "%.1f", rect.origin.y)),w=\(String(format: "%.1f", rect.width)),h=\(String(format: "%.1f", rect.height))}}")
         lastCaretRect = rect
         if let geom = lastGeometry {
             lastGeometry = geom.withCaretRect(appKitCaretRect(from: rect))
