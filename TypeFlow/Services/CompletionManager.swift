@@ -2236,12 +2236,19 @@ struct SuggestionInteractionState {
                 print("[QualityContract] rejectedPunctuationOnly")
             }
             if reason == "repeatedTokenLoop" {
-                print("[QualityContract] rejectedRepeatedTokenLoop")
+                if decision == .rejected {
+                    print("[QualityContract] rejectedRepeatedTokenLoop")
+                } else if decision == .truncated {
+                    print("[QualityContract] truncatedRepeatedTokenLoop")
+                }
+            }
+            if reason == "invalidMidWordContinuation" {
+                print("[QualityContract] rejectedInvalidMidWordContinuation")
             }
             print("[QualityContract] finalSuggestion='\(Self.preview(suggestion))'")
         }
 
-        private static func preview(_ text: String, limit: Int = 220) -> String {
+        static func preview(_ text: String, limit: Int = 220) -> String {
             let escaped = text
                 .replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\n", with: "\\n")
@@ -2284,6 +2291,21 @@ struct SuggestionInteractionState {
         let leadingWhitespace = String(candidate.prefix { $0.isWhitespace })
         let withoutLeadingWhitespace = String(candidate.dropFirst(leadingWhitespace.count))
 
+        if mode == "partialWord" {
+            if rawCompletion.first?.isWhitespace == true {
+                return makeContract("", .rejected, "invalidMidWordContinuation", mode, rawCompletion, activeLine, partialWord, false, "")
+            }
+            if let firstChar = candidate.first, firstChar.isUppercase, partialWord.last?.isLowercase == true {
+                return makeContract("", .rejected, "invalidMidWordContinuation", mode, rawCompletion, activeLine, partialWord, false, "")
+            }
+        }
+
+        if mode == "afterSpace" {
+            if withoutLeadingWhitespace.first?.isUppercase == true {
+                print("[QualityContract] suspiciousUppercaseAfterSpace raw='\(ContinuationContract.preview(rawCompletion))'")
+            }
+        }
+
         if !partialWord.isEmpty && withoutLeadingWhitespace.lowercased().hasPrefix(partialWord.lowercased()) {
             let prefixEnd = withoutLeadingWhitespace.index(withoutLeadingWhitespace.startIndex, offsetBy: partialWord.count)
             let novelSuffix = String(withoutLeadingWhitespace[prefixEnd...])
@@ -2306,15 +2328,19 @@ struct SuggestionInteractionState {
         candidate = truncateAtFirstNewline(candidate)
 
         let loopCheck = removeRepeatedTokenLoop(from: candidate)
+        var finalDecision: ContinuationDecision = .accepted
+        var finalReason = "validContinuation"
+
         if loopCheck.rejected {
             return makeContract("", .rejected, "repeatedTokenLoop", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
         }
         if loopCheck.truncated {
-            let truncated = loopCheck.text
-            if truncated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            candidate = loopCheck.text
+            finalDecision = .truncated
+            finalReason = "repeatedTokenLoop"
+            if candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return makeContract("", .rejected, "repeatedTokenLoop", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
             }
-            return makeContract(truncated, .truncated, "repeatedTokenLoop", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
         }
 
         if candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2327,7 +2353,7 @@ struct SuggestionInteractionState {
             return makeContract("", .rejected, "pureOverlap", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
         }
 
-        return makeContract(candidate, .accepted, "validContinuation", mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
+        return makeContract(candidate, finalDecision, finalReason, mode, rawCompletion, activeLine, partialWord, preservedLeadingWhitespace, removedDuplicatePrefix)
     }
 
     static func sliceGeneratedSuffix(activeLine: String, rawCompletion: String) -> String {
@@ -2415,7 +2441,9 @@ struct SuggestionInteractionState {
             }
 
             if repeatCount >= 2 {
-                return ("", false, true)
+                let truncateIndex = tokenRange.lowerBound
+                let truncatedString = String(text[..<truncateIndex])
+                return (truncatedString, true, false)
             }
         }
 

@@ -36,8 +36,33 @@ struct ContinuationCanonicalizer {
         }
 
         var candidate = rawCompletion
+        var preservedLeadingWhitespace = candidate.first?.isWhitespace == true
         let leadingWhitespace = String(candidate.prefix { $0.isWhitespace })
         let withoutLeadingWhitespace = String(candidate.dropFirst(leadingWhitespace.count))
+
+        let mode: String
+        if activeLine.last?.isWhitespace == true {
+            mode = "afterSpace"
+        } else if partialWord.isEmpty {
+            mode = "midWord"
+        } else {
+            mode = "partialWord"
+        }
+
+        if mode == "partialWord" {
+            if rawCompletion.first?.isWhitespace == true {
+                return ContinuationContract(suggestion: "", decision: .rejected, reason: "invalidMidWordContinuation")
+            }
+            if let firstChar = candidate.first, firstChar.isUppercase, partialWord.last?.isLowercase == true {
+                return ContinuationContract(suggestion: "", decision: .rejected, reason: "invalidMidWordContinuation")
+            }
+        }
+
+        if mode == "afterSpace" {
+            if withoutLeadingWhitespace.first?.isUppercase == true {
+                // Log suspiciousUppercaseAfterSpace
+            }
+        }
 
         if !partialWord.isEmpty && withoutLeadingWhitespace.lowercased().hasPrefix(partialWord.lowercased()) {
             let prefixEnd = withoutLeadingWhitespace.index(withoutLeadingWhitespace.startIndex, offsetBy: partialWord.count)
@@ -56,11 +81,19 @@ struct ContinuationCanonicalizer {
         candidate = truncateAtFirstNewline(candidate)
 
         let loopCheck = removeRepeatedTokenLoop(from: candidate)
+        var finalDecision: ContinuationDecision = .accepted
+        var finalReason = "validContinuation"
+
         if loopCheck.rejected {
             return ContinuationContract(suggestion: "", decision: .rejected, reason: "repeatedTokenLoop")
         }
         if loopCheck.truncated {
-            return ContinuationContract(suggestion: loopCheck.text, decision: .truncated, reason: "repeatedTokenLoop")
+            candidate = loopCheck.text
+            finalDecision = .truncated
+            finalReason = "repeatedTokenLoop"
+            if candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return ContinuationContract(suggestion: "", decision: .rejected, reason: "repeatedTokenLoop")
+            }
         }
 
         if candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -73,7 +106,7 @@ struct ContinuationCanonicalizer {
             return ContinuationContract(suggestion: "", decision: .rejected, reason: "pureOverlap")
         }
 
-        return ContinuationContract(suggestion: candidate, decision: .accepted, reason: "validContinuation")
+        return ContinuationContract(suggestion: candidate, decision: finalDecision, reason: finalReason)
     }
 
     private static func currentPartialWord(in text: String) -> String {
@@ -133,7 +166,9 @@ struct ContinuationCanonicalizer {
             }
 
             if repeatCount >= 2 {
-                return ("", false, true)
+                let truncateIndex = tokenRange.lowerBound
+                let truncatedString = String(text[..<truncateIndex])
+                return (truncatedString, true, false)
             }
         }
 
@@ -175,12 +210,20 @@ let cases = [
     Case(name: "duplicate phrase overlap", active: "...quality and then co", raw: "and then co", decision: .rejected, reason: "pureOverlap", suggestion: ""),
     Case(name: "duplicate partial overlap", active: "...with a fe", raw: " fe", decision: .rejected, reason: "pureOverlap", suggestion: ""),
     Case(name: "punctuation only", active: "...writes a caref", raw: ".", decision: .rejected, reason: "punctuationOnly", suggestion: ""),
-    Case(name: "repeated token loop", active: "a few", raw: "ordinary ordinary ordinary", decision: .rejected, reason: "repeatedTokenLoop", suggestion: ""),
+    Case(name: "repeated token loop", active: "a few", raw: "ordinary ordinary ordinary", decision: .truncated, reason: "repeatedTokenLoop", suggestion: "ordinary "),
     Case(name: "valid after-space", active: "the quick ", raw: "brown fox", decision: .accepted, reason: "validContinuation", suggestion: "brown fox"),
-    Case(name: "valid mid-word healing", active: "autocom", raw: "autocomplete works", decision: .accepted, reason: "validContinuation", suggestion: "plete works"),
-    Case(name: "leading whitespace removed mid-word by contract", active: "hello", raw: " world", decision: .accepted, reason: "validContinuation", suggestion: "world"),
+    Case(name: "valid mid-word healing", active: "autocom", raw: "plete works", decision: .accepted, reason: "validContinuation", suggestion: "plete works"),
+    Case(name: "leading whitespace removed mid-word by contract", active: "hello", raw: " world", decision: .rejected, reason: "invalidMidWordContinuation", suggestion: ""),
     Case(name: "whitespace only", active: "hello", raw: "   \t", decision: .rejected, reason: "whitespaceOnly", suggestion: ""),
     Case(name: "punctuation plus meaningful text", active: "hello", raw: ", world", decision: .accepted, reason: "validContinuation", suggestion: ", world"),
+    Case(name: "invalid mid-word continuation case 1", active: "the quick br", raw: "How", decision: .rejected, reason: "invalidMidWordContinuation", suggestion: ""),
+    Case(name: "invalid mid-word continuation case 2", active: "the quick brw", raw: "How", decision: .rejected, reason: "invalidMidWordContinuation", suggestion: ""),
+    Case(name: "valid uppercase continuation", active: "T", raw: "ense", decision: .accepted, reason: "validContinuation", suggestion: "ense"),
+    Case(name: "valid single letter continuation", active: "...retur", raw: "n", decision: .accepted, reason: "validContinuation", suggestion: "n"),
+    Case(name: "repeated overlap loop", active: "the quick brown ", raw: " brown brown brown", decision: .rejected, reason: "pureOverlap", suggestion: ""),
+    Case(name: "pure overlap twinkle", active: "twinkle twinkle", raw: "twinkle", decision: .rejected, reason: "pureOverlap", suggestion: ""),
+    Case(name: "pure overlap dear", active: "Dear tea", raw: ",", decision: .rejected, reason: "punctuationOnly", suggestion: ""),
+    Case(name: "truncate token loop with novel prefix", active: "fox ", raw: "brown brown brown", decision: .truncated, reason: "repeatedTokenLoop", suggestion: "brown "),
 ]
 
 var failures = 0
