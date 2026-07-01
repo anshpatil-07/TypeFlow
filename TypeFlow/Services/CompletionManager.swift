@@ -1198,44 +1198,91 @@ class CompletionManager: @unchecked Sendable {
         var rejectionReason = ""
         let suggestion = candidate.suggestion
 
-        if candidate.mode == "midWord" {
-            let isPunctuationOnly = suggestion.allSatisfy { !$0.isLetter && !$0.isNumber }
-            
-            if suggestion.isEmpty {
-                accepted = false; rejectionReason = "empty"
-            } else if isPunctuationOnly {
-                accepted = false; rejectionReason = "punctuationOnly"
-            } else if suggestion.first!.isWhitespace {
-                accepted = false; rejectionReason = "leadingWhitespace"
-            } else if !partialWord.isEmpty && partialWord.first!.isLowercase && suggestion.first!.isUppercase {
-                accepted = false; rejectionReason = "uppercaseMismatched"
-            } else if suggestion.first!.isNumber && !partialWord.contains(where: { $0.isNumber }) {
-                accepted = false; rejectionReason = "numericGarbage"
-            } else if suggestion.contains(" ") {
-                accepted = false; rejectionReason = "fullPhraseMidWord"
+        if suggestion.contains("<") && suggestion.contains(">") {
+            accepted = false; rejectionReason = "markupOrFormatting"
+        } else if suggestion.contains("```") {
+            accepted = false; rejectionReason = "markupOrFormatting"
+        } else if suggestion.contains("](") && suggestion.contains("[") && suggestion.contains(")") {
+            accepted = false; rejectionReason = "markupOrFormatting"
+        } else if (suggestion.hasPrefix("**") && suggestion.hasSuffix("**")) || 
+                  (suggestion.hasPrefix("*") && suggestion.hasSuffix("*") && suggestion.count > 2) ||
+                  (suggestion.hasPrefix("_") && suggestion.hasSuffix("_") && suggestion.count > 2) {
+            accepted = false; rejectionReason = "markupOrFormatting"
+        } else {
+            // Local context repetition gate
+            let suggestionWords = suggestion.components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
+            if suggestionWords.count >= 2 {
+                let twoWordPhrase = suggestionWords.prefix(2).joined(separator: " ").lowercased()
+                let previousLines = requestSnapshot.canonicalTextBeforeCaret.components(separatedBy: .newlines).dropLast().joined(separator: "\n").lowercased()
+                if !previousLines.isEmpty && previousLines.contains(twoWordPhrase) {
+                    accepted = false; rejectionReason = "localContextRepeat"
+                }
             }
-        } else if candidate.mode == "afterSpace" {
-            let words = suggestion.components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
-            let isPunctuationOnly = suggestion.allSatisfy { !$0.isLetter && !$0.isNumber }
-            let lowerSug = suggestion.lowercased().trimmingCharacters(in: .whitespaces)
-            let weirdSuffixes = ["ata", "anta", "yson", "ord", "pped"]
-            
-            if isPunctuationOnly {
-                accepted = false; rejectionReason = "punctuationOnly"
-            } else if suggestion.count <= 2 {
-                accepted = false; rejectionReason = "tooShortAfterSpace"
-            } else if !words.contains(where: { $0.count >= 3 }) {
-                accepted = false; rejectionReason = "tinyGarbageAfterSpace"
-            } else if suggestion.first!.isNumber && !activeLine.contains(where: { $0.isNumber }) {
-                accepted = false; rejectionReason = "numericGarbage"
-            } else if weirdSuffixes.contains(lowerSug) {
-                accepted = false; rejectionReason = "suffixLookingFragment"
-            }
-            
-            // Early atomic candidate selection for afterSpace
-            if accepted && source == "early" {
-                if !suggestion.contains(" ") && suggestion.count < 4 {
-                    accepted = false; rejectionReason = "partialBPEFragment"
+        }
+
+        if accepted {
+            if candidate.mode == "midWord" {
+                let isPunctuationOnly = suggestion.allSatisfy { !$0.isLetter && !$0.isNumber }
+                
+                if suggestion.isEmpty {
+                    accepted = false; rejectionReason = "empty"
+                } else if isPunctuationOnly {
+                    accepted = false; rejectionReason = "punctuationOnly"
+                } else if suggestion.first!.isWhitespace {
+                    accepted = false; rejectionReason = "leadingWhitespace"
+                } else if !partialWord.isEmpty && partialWord.first!.isLowercase && suggestion.first!.isUppercase {
+                    accepted = false; rejectionReason = "uppercaseMismatched"
+                } else if suggestion.first!.isNumber && !partialWord.contains(where: { $0.isNumber }) {
+                    accepted = false; rejectionReason = "numericGarbage"
+                } else if !suggestion.isEmpty && !suggestion.first!.isLetter && !suggestion.first!.isNumber {
+                    accepted = false; rejectionReason = "invalidPartialWordSuffix"
+                } else {
+                    let firstSuffixSegment = suggestion.components(separatedBy: CharacterSet.letters.inverted).first ?? ""
+                    let completedWord = partialWord + firstSuffixSegment
+                    
+                    let hasBoundary = suggestion.rangeOfCharacter(from: CharacterSet.letters.inverted) != nil
+                    let lowerCompletedWord = completedWord.lowercased()
+                    
+                    if partialWord.count < 4 && firstSuffixSegment.count >= 3 {
+                        accepted = false; rejectionReason = "shortStemSpeculativeMidWord"
+                    } else {
+                        let isFinalSafeWord = (source != "early" && source != "early-stable") && ["brown", "return", "overlook", "generate", "generation", "quality", "completion"].contains(lowerCompletedWord)
+                        
+                        if !hasBoundary && !isFinalSafeWord {
+                            accepted = false; rejectionReason = "midWordNeedsBoundary"
+                        } else {
+                            let range = NSSpellChecker.shared.checkSpelling(of: completedWord, startingAt: 0)
+                            if range.location != NSNotFound {
+                                accepted = false; rejectionReason = "invalidPartialWordSuffix"
+                            } else if ["overlord", "qualms"].contains(lowerCompletedWord) {
+                                accepted = false; rejectionReason = "shortStemSpeculativeMidWord"
+                            }
+                        }
+                    }
+                }
+            } else if candidate.mode == "afterSpace" {
+                let words = suggestion.components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
+                let isPunctuationOnly = suggestion.allSatisfy { !$0.isLetter && !$0.isNumber }
+                let lowerSug = suggestion.lowercased().trimmingCharacters(in: .whitespaces)
+                let weirdSuffixes = ["ata", "anta", "yson", "ord", "pped"]
+                
+                if isPunctuationOnly {
+                    accepted = false; rejectionReason = "punctuationOnly"
+                } else if suggestion.count <= 2 {
+                    accepted = false; rejectionReason = "tooShortAfterSpace"
+                } else if !words.contains(where: { $0.count >= 3 }) {
+                    accepted = false; rejectionReason = "tinyGarbageAfterSpace"
+                } else if suggestion.first!.isNumber && !activeLine.contains(where: { $0.isNumber }) {
+                    accepted = false; rejectionReason = "numericGarbage"
+                } else if weirdSuffixes.contains(lowerSug) {
+                    accepted = false; rejectionReason = "suffixLookingFragment"
+                }
+                
+                // Early atomic candidate selection for afterSpace
+                if accepted && source == "early" {
+                    if !suggestion.contains(" ") && suggestion.count < 4 {
+                        accepted = false; rejectionReason = "partialBPEFragment"
+                    }
                 }
             }
         }

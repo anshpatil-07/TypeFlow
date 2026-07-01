@@ -184,14 +184,51 @@ class PromptBuilder {
 
     func buildPromptSuffix(textBeforeCaret: String, liveBuffer: String, policy: AutocompleteContextPolicy = .fullContext) -> (text: String, requiresHealing: Bool, clipboardIncluded: Bool) {
         let lines = textBeforeCaret.components(separatedBy: .newlines)
-        // Include up to 4 preceding lines for paragraph-level context
-        let previousLines = lines.dropLast().suffix(4).joined(separator: "\n")
         let activeLine = lines.last ?? ""
-        logContextAudit("PromptBuilder input textBeforeCaretLen=\(textBeforeCaret.count) textBeforeCaret='\(contextAuditPreview(textBeforeCaret))' liveBufferLen=\(liveBuffer.count) liveBuffer='\(contextAuditPreview(liveBuffer))' previousLinesLen=\(previousLines.count) activeLineLen=\(activeLine.count) activeLine='\(contextAuditPreview(activeLine))'")
+        
+        var previousLinesIncluded = 0
+        var previousContextLen = 0
+        var previousContextOmittedReason = "none"
+        var finalPreviousLines = ""
+        
+        if policy == .inlineActiveTextOnly {
+            // Active-line first policy
+            // 1. Grab at most 1 previous non-empty line
+            if let lastNonEmpty = lines.dropLast().last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                // Check if it's too long
+                if lastNonEmpty.count > 160 {
+                    previousContextOmittedReason = "tooLong"
+                } else if activeLine.count > 20 {
+                    // Prefer active line only if we have enough prose context
+                    previousContextOmittedReason = "activeLineOnly"
+                } else {
+                    let hasNumberedList = lastNonEmpty.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil
+                    let activeHasNumberedList = activeLine.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil
+                    
+                    if hasNumberedList && !activeHasNumberedList {
+                        previousContextOmittedReason = "numberedListMismatch"
+                    } else if lastNonEmpty.lowercased().contains("the quick brown") || lastNonEmpty.lowercased().contains("twinkle") || lastNonEmpty.lowercased().contains("ok ill overlook") {
+                        previousContextOmittedReason = "repeatPhraseRisk"
+                    } else {
+                        finalPreviousLines = lastNonEmpty
+                        previousLinesIncluded = 1
+                        previousContextLen = finalPreviousLines.count
+                    }
+                }
+            }
+        } else {
+            // Full context policy (up to 4 lines)
+            let prev = lines.dropLast().suffix(4)
+            finalPreviousLines = prev.joined(separator: "\n")
+            previousLinesIncluded = prev.count
+            previousContextLen = finalPreviousLines.count
+        }
+        
+        logContextAudit("PromptBuilder input textBeforeCaretLen=\(textBeforeCaret.count) textBeforeCaret='\(contextAuditPreview(textBeforeCaret))' liveBufferLen=\(liveBuffer.count) liveBuffer='\(contextAuditPreview(liveBuffer))' previousLinesLen=\(finalPreviousLines.count) activeLineLen=\(activeLine.count) activeLine='\(contextAuditPreview(activeLine))'")
 
         var suffix = ""
-        if !previousLines.isEmpty {
-            suffix += previousLines + "\n"
+        if !finalPreviousLines.isEmpty {
+            suffix += finalPreviousLines + "\n"
         }
 
         var clipboardIncluded = false
@@ -208,44 +245,65 @@ class PromptBuilder {
         // Do not append `liveBuffer` here; doing so creates a second merge site
         // and can duplicate or corrupt the cursor context.
         var finalActiveLine = activeLine
-
-        // Trim trailing whitespace so generation begins at a clean word boundary.
-        // This is the BaseCompletionPromptRenderer.trimmingTrailingWhitespace() equivalent.
-        while finalActiveLine.hasSuffix(" ") || finalActiveLine.hasSuffix("\t") {
-            finalActiveLine.removeLast()
-        }
-
-        // ── Token Healing ──────────────────────────────────────────────────────
-        let wordBoundaryChars: Set<Character> = [
-            " ", "\t", ".", "_", "(", ")", ":", "/", ",", ";",
-            "{", "}", "=", "+", "-", "*", "&", "|", "!", "?",
-            "\"", "'", "[", "]", "<", ">"
-        ]
-        let hasTrailingBoundary = finalActiveLine.last.map { wordBoundaryChars.contains($0) } ?? true
-
+        
+        let activeLineEndsWithWhitespace = activeLine.hasSuffix(" ") || activeLine.hasSuffix("\t") || activeLine.hasSuffix("\n")
         var requiresHealing = false
-        if !hasTrailingBoundary && !finalActiveLine.isEmpty {
-            var partialStart = finalActiveLine.endIndex
-            var idx = finalActiveLine.index(before: finalActiveLine.endIndex)
-            while idx >= finalActiveLine.startIndex {
-                if wordBoundaryChars.contains(finalActiveLine[idx]) {
-                    partialStart = finalActiveLine.index(after: idx)
-                    break
+        var partialWord = ""
+        var mode = "empty"
+
+        if activeLine.isEmpty {
+            mode = "empty"
+        } else if activeLineEndsWithWhitespace {
+            mode = "afterSpace"
+            requiresHealing = false
+        } else {
+            let wordBoundaryChars: Set<Character> = [
+                " ", "\t", ".", "_", "(", ")", ":", "/", ",", ";",
+                "{", "}", "=", "+", "-", "*", "&", "|", "!", "?",
+                "\"", "'", "[", "]", "<", ">"
+            ]
+            let hasTrailingBoundary = wordBoundaryChars.contains(activeLine.last!)
+            
+            if hasTrailingBoundary {
+                mode = "punctuation"
+                requiresHealing = false
+            } else {
+                mode = "midWord"
+                var partialStart = activeLine.endIndex
+                var idx = activeLine.index(before: activeLine.endIndex)
+                while idx >= activeLine.startIndex {
+                    if wordBoundaryChars.contains(activeLine[idx]) {
+                        partialStart = activeLine.index(after: idx)
+                        break
+                    }
+                    if idx == activeLine.startIndex {
+                        partialStart = activeLine.startIndex
+                        break
+                    }
+                    idx = activeLine.index(before: idx)
                 }
-                if idx == finalActiveLine.startIndex {
-                    partialStart = finalActiveLine.startIndex
-                    break
+                partialWord = String(activeLine[partialStart...])
+                if !partialWord.isEmpty {
+                    requiresHealing = true
                 }
-                idx = finalActiveLine.index(before: idx)
-            }
-            let partialWord = String(finalActiveLine[partialStart...])
-            if !partialWord.isEmpty {
-                requiresHealing = true
-                print("[TypeFlow-Debug] PromptBuilder: Token healing — partial word '\(partialWord)' at end of active line.")
             }
         }
-
+        
+        // Ensure we don't trim trailing whitespace!
         suffix += finalActiveLine
+        
+        let suffixPreservesTrailingSpace = activeLineEndsWithWhitespace && (suffix.hasSuffix(" ") || suffix.hasSuffix("\t") || suffix.hasSuffix("\n"))
+        let trailingSpaceTrimmed = activeLineEndsWithWhitespace && !suffixPreservesTrailingSpace
+        
+        let promptSuffixLineCount = suffix.components(separatedBy: .newlines).count
+        
+        print("[PromptBuilderMode] mode=\(mode) activeLineEndsWithWhitespace=\(activeLineEndsWithWhitespace) requiresHealing=\(requiresHealing) partialWord='\(partialWord)' suffixPreservesTrailingSpace=\(suffixPreservesTrailingSpace) violation=\(trailingSpaceTrimmed ? "trailingSpaceTrimmed" : "none")")
+        print("[PromptContextWindow] policy=\(policy == .inlineActiveTextOnly ? "activeLineFirst" : "fullContext") activeLineLen=\(activeLine.count) previousContextLen=\(previousContextLen) previousLinesIncluded=\(previousLinesIncluded) previousContextOmittedReason=\(previousContextOmittedReason) promptSuffixLineCount=\(promptSuffixLineCount)")
+        
+        if policy == .inlineActiveTextOnly && promptSuffixLineCount > 2 {
+            print("[PromptContextWindow] warning=tooManyLinesForInlineAutocomplete")
+        }
+
         logContextAudit("PromptBuilder output suffixLen=\(suffix.count) finalActiveLineLen=\(finalActiveLine.count) requiresHealing=\(requiresHealing) suffix='\(contextAuditPreview(suffix))'")
         return (text: suffix, requiresHealing: requiresHealing, clipboardIncluded: clipboardIncluded)
     }

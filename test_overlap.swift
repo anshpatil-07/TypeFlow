@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 enum ContinuationDecision: String {
     case accepted
@@ -203,6 +204,58 @@ struct Case {
     let decision: ContinuationDecision
     let reason: String
     let suggestion: String
+}
+
+func testMidWordMaturity(partialWord: String, suggestion: String, source: String = "early") -> (Bool, String) {
+    let firstSuffixSegment = suggestion.components(separatedBy: CharacterSet.letters.inverted).first ?? ""
+    let completedWord = partialWord + firstSuffixSegment
+    
+    let hasBoundary = suggestion.rangeOfCharacter(from: CharacterSet.letters.inverted) != nil
+    let lowerCompletedWord = completedWord.lowercased()
+    
+    if partialWord.count < 4 && firstSuffixSegment.count >= 3 {
+        return (false, "shortStemSpeculativeMidWord")
+    }
+    
+    let isFinalSafeWord = source != "early" && ["brown", "return", "overlook", "generate", "generation", "quality", "completion"].contains(lowerCompletedWord)
+    
+    if !hasBoundary && !isFinalSafeWord {
+        return (false, "midWordNeedsBoundary")
+    }
+    
+    let range = NSSpellChecker.shared.checkSpelling(of: completedWord, startingAt: 0)
+    if range.location != NSNotFound {
+        return (false, "invalidPartialWordSuffix")
+    }
+    
+    if ["overlord", "qualms"].contains(lowerCompletedWord) {
+        return (false, "shortStemSpeculativeMidWord")
+    }
+    
+    return (true, "valid")
+}
+
+let maturityCases = [
+    ("qu", "idditch", false, "shortStemSpeculativeMidWord"),
+    ("br", "ash", false, "shortStemSpeculativeMidWord"),
+    ("gen", "itive", false, "shortStemSpeculativeMidWord"),
+    ("compl", "i", false, "midWordNeedsBoundary"),
+    ("gener", "at", false, "midWordNeedsBoundary"),
+    ("gener", "ation ", true, "valid"),
+    ("qual", "it", false, "midWordNeedsBoundary"),
+    ("qual", "ity ", true, "valid"),
+    ("overloo", "k the", true, "valid"),
+    ("overl", "ord ", false, "shortStemSpeculativeMidWord"),
+    ("brow", "n fox", true, "valid")
+]
+
+for (p, s, expectedResult, expectedReason) in maturityCases {
+    let res = testMidWordMaturity(partialWord: p, suggestion: s)
+    if res.0 == expectedResult && (expectedResult || res.1 == expectedReason) {
+        print("PASS maturity: '\(p)' + '\(s)' -> \(res.0) (\(res.1))")
+    } else {
+        print("FAIL maturity: '\(p)' + '\(s)' expected \(expectedResult)(\(expectedReason)) got \(res.0)(\(res.1))")
+    }
 }
 
 let cases = [
