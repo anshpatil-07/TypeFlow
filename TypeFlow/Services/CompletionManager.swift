@@ -841,9 +841,9 @@ class CompletionManager: @unchecked Sendable {
             if let rect = geometry.rect {
                 overlayWindowController?.moveOverlay(to: rect)
             }
-            overlayWindowController?.updateText(text)
+            overlayWindowController?.updateAutocompleteText(text, requestID: requestSnapshot.requestID)
         } else {
-            overlayWindowController?.updateText("")
+            overlayWindowController?.updateAutocompleteText("", requestID: requestSnapshot.requestID)
         }
     }
     

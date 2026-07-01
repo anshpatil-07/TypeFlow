@@ -766,7 +766,14 @@ class OverlayWindowController: NSWindowController {
             smartReplyOptions: [String]
         )
         case updateGhostText(text: String, isStale: Bool)
+        case updateAutocompleteText(text: String, requestID: UInt64)
         case replaceGhostTextAfterAcceptance(inserted: String, remainder: String, source: String)
+    }
+
+    private struct PendingAutocompleteRender {
+        let requestID: UInt64
+        let text: String
+        let requestedAt: CFAbsoluteTime
     }
 
     var overlayWindow: OverlayWindow!
@@ -788,6 +795,10 @@ class OverlayWindowController: NSWindowController {
     private var pendingShiftOverlayX: CGFloat = 0
     private var pendingOverlayMutation: PendingOverlayMutation?
     private var isDeferredOverlayFlushScheduled = false
+    private var pendingAutocompleteRender: PendingAutocompleteRender?
+    private var isAutocompleteRenderFlushScheduled = false
+    private var lastRenderedAutocompleteText: String = ""
+    private var lastRenderedAutocompleteRequestID: UInt64?
 
     private func overlaySubviewCount() -> Int {
         func countSubviews(in view: NSView?) -> Int {
@@ -822,6 +833,10 @@ class OverlayWindowController: NSWindowController {
         }
 
         pendingShiftOverlayX = 0
+        pendingAutocompleteRender = nil
+        isAutocompleteRenderFlushScheduled = false
+        lastRenderedAutocompleteText = ""
+        lastRenderedAutocompleteRequestID = nil
         if clearPendingMutations {
             pendingMoveOverlayRect = nil
             pendingOverlayMutation = nil
@@ -831,6 +846,17 @@ class OverlayWindowController: NSWindowController {
 
     private func logRenderReplace(text: String) {
         print("[OverlayRender] renderReplace text='\(text)' layerCountAfter=\(overlayLayerCount()) subviewCountAfter=\(overlaySubviewCount())")
+    }
+
+    private func appKitCaretRect(from caretRect: CGRect) -> CGRect {
+        let displayBounds = CGDisplayBounds(CGMainDisplayID())
+        let displayHeight = displayBounds.height
+        return CGRect(
+            x: caretRect.origin.x,
+            y: displayHeight - caretRect.origin.y - caretRect.height,
+            width: caretRect.width,
+            height: caretRect.height
+        )
     }
 
     init() {
@@ -974,6 +1000,8 @@ class OverlayWindowController: NSWindowController {
                 )
             case .updateGhostText(let text, let isStale):
                 self.applyUpdateGhostText(text, isStale: isStale)
+            case .updateAutocompleteText(let text, let requestID):
+                self.enqueueAutocompleteRender(text: text, requestID: requestID)
             case .replaceGhostTextAfterAcceptance(let inserted, let remainder, let source):
                 self.applyReplaceGhostTextAfterAcceptance(inserted: inserted, remainder: remainder, source: source)
             case .none:
@@ -997,6 +1025,9 @@ class OverlayWindowController: NSWindowController {
 
     private func applyMoveOverlay(to rect: CGRect) {
         lastCaretRect = rect
+        if let geom = lastGeometry {
+            lastGeometry = geom.withCaretRect(appKitCaretRect(from: rect))
+        }
         updateFocusSessionKeyIfNeeded()
         repositionWindow()
     }
@@ -1013,9 +1044,9 @@ class OverlayWindowController: NSWindowController {
         guard !completionModel.text.isEmpty || completionModel.isLoading || (!completionModel.smartReplyOptions.isEmpty && completionModel.isSmartReply) else { return }
 
         let useSwiftUIOverlay = completionModel.isRewrite || completionModel.isSmartReply || completionModel.isLoading
-        clearAllRenderedGhostText()
         
         if useSwiftUIOverlay {
+            clearAllRenderedGhostText()
             // Rewrite, smart reply, or loading spinner mode
             let isRewriteBar = completionModel.isLoading && completionModel.isRewrite && completionModel.text != "Generating..."
             let isSmartReplyList = completionModel.isSmartReply && !completionModel.smartReplyOptions.isEmpty
@@ -1066,116 +1097,7 @@ class OverlayWindowController: NSWindowController {
             overlayWindow.setFrame(newFrame, display: true)
             logRenderReplace(text: completionModel.text)
         } else {
-            // Normal inline ghost text rendering mode
-            var resolvedStyle: ResolvedFieldStyle? = nil
-            var inputFrame: CGRect? = nil
-            
-            let systemWideElement = AXUIElementCreateSystemWide()
-            var focusedElement: CFTypeRef?
-            if AXUIElementCopyAttributeValue(systemWideElement, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success,
-               let element = focusedElement {
-                let axElement = element as! AXUIElement
-                resolvedStyle = resolveFieldStyle(for: axElement)
-                
-                var frameVal: CFTypeRef?
-                if AXUIElementCopyAttributeValue(axElement, "AXFrame" as CFString, &frameVal) == .success {
-                    let axValue = frameVal as! AXValue
-                    var rect = CGRect.zero
-                    if AXValueGetValue(axValue, .cgRect, &rect) {
-                        inputFrame = rect
-                    }
-                }
-            }
-            
-            let displayBounds = CGDisplayBounds(CGMainDisplayID())
-            let displayHeight = displayBounds.height
-            
-            let appKitCaretRect = CGRect(
-                x: lastCaretRect.origin.x,
-                y: displayHeight - lastCaretRect.origin.y - lastCaretRect.height,
-                width: lastCaretRect.width,
-                height: lastCaretRect.height
-            )
-            
-            var appKitInputFrame: CGRect? = nil
-            if let frame = inputFrame {
-                appKitInputFrame = CGRect(
-                    x: frame.origin.x,
-                    y: displayHeight - frame.origin.y - frame.height,
-                    width: frame.width,
-                    height: frame.height
-                )
-            }
-            
-            let geom = SuggestionOverlayGeometry(
-                caretRect: appKitCaretRect,
-                inputFrameRect: appKitInputFrame,
-                caretQuality: .exact,
-                isCaretAtEndOfLine: true,
-                observedCharWidth: nil,
-                isRightToLeft: false,
-                focusChangeSequence: focusSessionKey,
-                focusedInputIdentityKey: focusSessionKey,
-                isCorrection: completionModel.isSpellCorrection,
-                resolvedFieldStyle: resolvedStyle
-            )
-            
-            lastGeometry = geom
-            
-            let stabilizedCaretHeight = ghostFontStabilizer.stabilizedCaretHeight(
-                geom.caretRect.height,
-                focusSessionKey: geom.focusedInputIdentityKey
-            )
-            
-            let referenceFieldFont = resolvedStyle.flatMap { fieldFont(from: $0) }
-            let fontSize = resolvedGhostFontSize(
-                forCaretHeight: stabilizedCaretHeight,
-                caretQuality: geom.caretQuality,
-                fieldFont: referenceFieldFont
-            )
-            
-            let renderFont = referenceFieldFont.flatMap { NSFont(name: $0.fontName, size: fontSize) }
-            lastInlineFontSize = fontSize
-            lastInlineRenderFont = renderFont
-            
-            let layout = GhostSuggestionLayout.make(
-                text: completionModel.text,
-                geometry: geom,
-                fontSize: fontSize,
-                visibleFrame: targetScreenVisibleFrame(for: geom.caretRect),
-                showsAcceptanceHint: false,
-                font: renderFont
-            )
-            
-            let rootView = GhostSuggestionView(
-                layout: layout,
-                fontSize: fontSize,
-                fieldFont: renderFont,
-                fieldColor: fieldGhostColor(from: geom.resolvedFieldStyle),
-                customColor: nil,
-                keycapLabel: nil,
-                opacity: 0.75,
-                isCorrection: geom.isCorrection
-            )
-            
-            let fresh = NSHostingView(rootView: rootView)
-            inlineHostingView = fresh
-            
-            if overlayWindow.contentView !== inlineHostingView {
-                overlayWindow.contentView = inlineHostingView
-            }
-            
-            overlayWindow.ignoresMouseEvents = true
-            
-            inlineHostingView?.layoutSubtreeIfNeeded()
-            let contentSize = inlineHostingView?.fittingSize ?? .zero
-            let frame = layout.panelFrame(for: contentSize, caretRect: geom.caretRect)
-            
-            guard AXHelper_rectHasFiniteComponents(frame) else {
-                return
-            }
-            overlayWindow.setFrame(frame.integral, display: true)
-            logRenderReplace(text: completionModel.text)
+            _ = renderInlineGhostText(completionModel.text, isStale: false)
         }
     }
 
@@ -1205,6 +1127,206 @@ class OverlayWindowController: NSWindowController {
         var f = overlayWindow.frame
         f.origin.x += points
         overlayWindow.setFrameOrigin(f.origin)
+    }
+
+    func updateAutocompleteText(_ newText: String, requestID: UInt64) {
+        guard InputIsolationMode.current.allowOverlay else {
+            print("[TypeFlow-InputIsolation] overlay/window mutation blocked mode=\(InputIsolationMode.current.label) action=updateAutocompleteText")
+            return
+        }
+
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.updateAutocompleteText(newText, requestID: requestID)
+            }
+            return
+        }
+
+        print("[RenderPipeline] render requested requestID=\(requestID) textLen=\(newText.count)")
+        let mutation = PendingOverlayMutation.updateAutocompleteText(text: newText, requestID: requestID)
+        guard !deferOverlayMutationIfNeeded(mutation, action: "updateAutocompleteText") else { return }
+        enqueueAutocompleteRender(text: newText, requestID: requestID)
+    }
+
+    private func enqueueAutocompleteRender(text: String, requestID: UInt64) {
+        if let pending = pendingAutocompleteRender {
+            print("[RenderPipeline] coalesced render oldTextLen=\(pending.text.count) newTextLen=\(text.count)")
+        }
+        pendingAutocompleteRender = PendingAutocompleteRender(
+            requestID: requestID,
+            text: text,
+            requestedAt: CFAbsoluteTimeGetCurrent()
+        )
+
+        guard !isAutocompleteRenderFlushScheduled else { return }
+        isAutocompleteRenderFlushScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            self?.flushAutocompleteRender()
+        }
+    }
+
+    private func flushAutocompleteRender() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.flushAutocompleteRender()
+            }
+            return
+        }
+
+        isAutocompleteRenderFlushScheduled = false
+        guard let pending = pendingAutocompleteRender else { return }
+        pendingAutocompleteRender = nil
+
+        if InputCriticalSection.shared.isActive {
+            pendingAutocompleteRender = pending
+            scheduleDeferredOverlayFlush()
+            return
+        }
+
+        applyAutocompleteRender(text: pending.text, requestID: pending.requestID, requestedAt: pending.requestedAt)
+    }
+
+    private func applyAutocompleteRender(text: String, requestID: UInt64, requestedAt: CFAbsoluteTime) {
+        let startedAt = CFAbsoluteTimeGetCurrent()
+
+        if let lastRequestID = lastRenderedAutocompleteRequestID, requestID < lastRequestID {
+            print("[RenderPipeline] skipped stale render requestID=\(requestID)")
+            return
+        }
+
+        if lastRenderedAutocompleteRequestID == requestID && lastRenderedAutocompleteText == text {
+            print("[RenderPipeline] render applied requestID=\(requestID) textLen=\(text.count) durationMs=0.0")
+            print("[RenderPipeline] reused existing text layer=true")
+            print("[RenderPipeline] layerCountBefore=\(overlayLayerCount()) layerCountAfter=\(overlayLayerCount())")
+            print("[RenderPipeline] renderMs=0.0")
+            return
+        }
+
+        completionModel.isSpellCorrection = false
+        completionModel.isRewrite = false
+        completionModel.isLoading = false
+        completionModel.isSmartReply = false
+        completionModel.smartReplyOptions = []
+        completionModel.text = text
+
+        if text.isEmpty {
+            clearAllRenderedGhostText(resetGeometry: true, clearPendingMutations: true)
+            CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "updateAutocompleteText-empty")
+            print("[TypeFlow-InputAudit] overlayWindowEvent=orderOut source=updateAutocompleteText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
+            overlayWindow.orderOut(nil)
+            lastRenderedAutocompleteText = ""
+            lastRenderedAutocompleteRequestID = requestID
+            let durationMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+            print("[RenderPipeline] render applied requestID=\(requestID) textLen=0 durationMs=\(String(format: "%.1f", durationMs))")
+            print("[RenderPipeline] renderMs=\(String(format: "%.1f", durationMs))")
+            LatencyInstrumentation.shared.renderApplied(textLen: 0, source: "updateAutocompleteText")
+            return
+        }
+
+        let layerCountBefore = overlayLayerCount()
+        let reusedExistingLayer = inlineHostingView != nil && overlayWindow.contentView === inlineHostingView
+        guard renderInlineGhostText(text, isStale: false) else {
+            print("[RenderPipeline] skipped render because geometry unavailable")
+            return
+        }
+
+        print("[TypeFlow-InputAudit] overlayWindowEvent=orderFront source=updateAutocompleteText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
+        overlayWindow.orderFront(nil)
+        let hasActiveCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
+        CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(hasActiveCompletion, reason: "updateAutocompleteText-visible")
+
+        lastRenderedAutocompleteText = text
+        lastRenderedAutocompleteRequestID = requestID
+
+        let layerCountAfter = overlayLayerCount()
+        let durationMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
+        let queueMs = (startedAt - requestedAt) * 1000
+        print("[RenderPipeline] render applied requestID=\(requestID) textLen=\(text.count) durationMs=\(String(format: "%.1f", durationMs))")
+        print("[RenderPipeline] reused existing text layer=\(reusedExistingLayer)")
+        print("[RenderPipeline] layerCountBefore=\(layerCountBefore) layerCountAfter=\(layerCountAfter)")
+        print("[RenderPipeline] renderMs=\(String(format: "%.1f", durationMs)) queueMs=\(String(format: "%.1f", queueMs))")
+        LatencyInstrumentation.shared.renderApplied(textLen: text.count, source: "updateAutocompleteText")
+    }
+
+    @discardableResult
+    private func renderInlineGhostText(_ text: String, isStale: Bool) -> Bool {
+        guard !text.isEmpty else { return false }
+
+        let geom: SuggestionOverlayGeometry
+        if let existing = lastGeometry {
+            geom = existing
+        } else {
+            guard lastCaretRect != .zero else { return false }
+            let appKitCaretRect = appKitCaretRect(from: lastCaretRect)
+
+            geom = SuggestionOverlayGeometry(
+                caretRect: appKitCaretRect,
+                inputFrameRect: nil,
+                caretQuality: .exact,
+                isCaretAtEndOfLine: true,
+                observedCharWidth: nil,
+                isRightToLeft: false,
+                focusChangeSequence: focusSessionKey,
+                focusedInputIdentityKey: focusSessionKey,
+                isCorrection: completionModel.isSpellCorrection,
+                resolvedFieldStyle: nil
+            )
+            lastGeometry = geom
+        }
+
+        let stabilizedCaretHeight = ghostFontStabilizer.stabilizedCaretHeight(
+            geom.caretRect.height,
+            focusSessionKey: geom.focusedInputIdentityKey
+        )
+        let referenceFieldFont = geom.resolvedFieldStyle.flatMap { fieldFont(from: $0) }
+        let fontSize = lastInlineFontSize ?? resolvedGhostFontSize(
+            forCaretHeight: stabilizedCaretHeight,
+            caretQuality: geom.caretQuality,
+            fieldFont: referenceFieldFont
+        )
+        let renderFont = lastInlineRenderFont ?? referenceFieldFont.flatMap { NSFont(name: $0.fontName, size: fontSize) }
+        lastInlineFontSize = fontSize
+        lastInlineRenderFont = renderFont
+
+        let layout = GhostSuggestionLayout.make(
+            text: text,
+            geometry: geom,
+            fontSize: fontSize,
+            visibleFrame: targetScreenVisibleFrame(for: geom.caretRect),
+            showsAcceptanceHint: false,
+            font: renderFont
+        )
+
+        let rootView = GhostSuggestionView(
+            layout: layout,
+            fontSize: fontSize,
+            fieldFont: renderFont,
+            fieldColor: fieldGhostColor(from: geom.resolvedFieldStyle),
+            customColor: nil,
+            keycapLabel: nil,
+            opacity: isStale ? 0.35 : 0.75,
+            isCorrection: geom.isCorrection
+        )
+
+        if let inlineHostingView {
+            inlineHostingView.rootView = rootView
+        } else {
+            inlineHostingView = NSHostingView(rootView: rootView)
+        }
+
+        if overlayWindow.contentView !== inlineHostingView {
+            overlayWindow.contentView = inlineHostingView
+        }
+        overlayWindow.ignoresMouseEvents = true
+
+        inlineHostingView?.layoutSubtreeIfNeeded()
+        let contentSize = inlineHostingView?.fittingSize ?? .zero
+        let frame = layout.panelFrame(for: contentSize, caretRect: geom.caretRect)
+        guard AXHelper_rectHasFiniteComponents(frame) else { return false }
+
+        overlayWindow.setFrame(frame.integral, display: true)
+        logRenderReplace(text: text)
+        return true
     }
 
     func replaceGhostTextAfterAcceptance(inserted: String, remainder: String, source: String = "tabAccept") {
@@ -1262,62 +1384,29 @@ class OverlayWindowController: NSWindowController {
         applyUpdateGhostText(newText, isStale: isStale)
     }
 
-    private func applyUpdateGhostText(_ newText: String, isStale: Bool = false) {
-        completionModel.text = newText
-        
-        guard !newText.isEmpty else {
-            clearAllRenderedGhostText(resetGeometry: true, clearPendingMutations: true)
+	    private func applyUpdateGhostText(_ newText: String, isStale: Bool = false) {
+	        completionModel.text = newText
+	        
+	        guard !newText.isEmpty else {
+	            clearAllRenderedGhostText(resetGeometry: true, clearPendingMutations: true)
             CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "updateGhostText-empty")
             print("[TypeFlow-InputAudit] overlayWindowEvent=orderOut source=updateGhostText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
             overlayWindow.orderOut(nil)
             return
         }
 
-        let hasActiveCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
-        CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(hasActiveCompletion && !isStale, reason: isStale ? "updateGhostText-stale" : "updateGhostText-active")
-        
-        clearAllRenderedGhostText()
+	        let hasActiveCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
+	        CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(hasActiveCompletion && !isStale, reason: isStale ? "updateGhostText-stale" : "updateGhostText-active")
 
-        if let geom = lastGeometry {
-            let font = lastInlineRenderFont ?? NSFont.systemFont(ofSize: lastInlineFontSize ?? 13)
-            let layout = GhostSuggestionLayout.make(
-                text: newText,
-                geometry: geom,
-                fontSize: lastInlineFontSize ?? 13,
-                visibleFrame: targetScreenVisibleFrame(for: geom.caretRect),
-                showsAcceptanceHint: false,
-                font: font
-            )
-            
-            let rootView = GhostSuggestionView(
-                layout: layout,
-                fontSize: lastInlineFontSize ?? 13,
-                fieldFont: font,
-                fieldColor: fieldGhostColor(from: geom.resolvedFieldStyle),
-                customColor: nil,
-                keycapLabel: nil,
-                opacity: isStale ? 0.35 : 0.75,
-                isCorrection: geom.isCorrection
-            )
-            
-            let fresh = NSHostingView(rootView: rootView)
-            inlineHostingView = fresh
-            
-            if overlayWindow.contentView !== inlineHostingView {
-                overlayWindow.contentView = inlineHostingView
-            }
-            
-            inlineHostingView?.layoutSubtreeIfNeeded()
-            let contentSize = inlineHostingView?.fittingSize ?? .zero
-            let frame = layout.panelFrame(for: contentSize, caretRect: geom.caretRect)
-            
-            if AXHelper_rectHasFiniteComponents(frame) {
-                overlayWindow.setFrame(frame.integral, display: true)
-            }
-            logRenderReplace(text: newText)
-            LatencyInstrumentation.shared.renderApplied(textLen: newText.count, source: "updateGhostText")
-        }
-    }
+	        let before = overlayLayerCount()
+	        if renderInlineGhostText(newText, isStale: isStale) {
+	            print("[RenderPipeline] reused existing text layer=\(inlineHostingView != nil)")
+	            print("[RenderPipeline] layerCountBefore=\(before) layerCountAfter=\(overlayLayerCount())")
+	            LatencyInstrumentation.shared.renderApplied(textLen: newText.count, source: "updateGhostText")
+	        } else {
+	            print("[RenderPipeline] skipped render because geometry unavailable")
+	        }
+	    }
 
     func updateText(_ newText: String,
                     isSpellCorrection: Bool = false,
