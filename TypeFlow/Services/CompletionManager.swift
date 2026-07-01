@@ -265,6 +265,7 @@ final class LatencyInstrumentation: @unchecked Sendable {
         lock.unlock()
         if shouldLog {
             log("first usable completion requestID=\(requestID) workID=\(workID) textLen=\(textLen)")
+            print("[RenderSchedule] firstUsableCompletion requestID=\(requestID) t=\(String(format: "%.6f", t))")
         }
     }
 

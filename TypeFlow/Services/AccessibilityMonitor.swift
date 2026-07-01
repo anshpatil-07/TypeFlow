@@ -91,6 +91,13 @@ final class InputCriticalSection {
         return active
     }
 
+    var activeDepth: Int {
+        lock.lock()
+        let depth = downKeys.count
+        lock.unlock()
+        return depth
+    }
+
     func begin(keyCode: Int64, chars: String) {
         let label = chars.isEmpty ? "keyCode=\(keyCode)" : chars
         lock.lock()
@@ -813,6 +820,7 @@ class AccessibilityMonitor {
     private func installDynamicAcceptTapIfNeeded(reason: String) {
         guard acceptTap == nil else { return }
 
+        let installStartedAt = CFAbsoluteTimeGetCurrent()
         let eventMask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
         acceptTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -869,6 +877,8 @@ class AccessibilityMonitor {
         )
 
         guard let tap = acceptTap else {
+            let installMs = (CFAbsoluteTimeGetCurrent() - installStartedAt) * 1000.0
+            print("[RenderSchedule] acceptTapInstallMs=\(String(format: "%.1f", installMs)) success=false")
             print("[TypeFlow-InputAudit] acceptTap=dynamicCreateFailed enabled=false reason=\(reason)")
             return
         }
@@ -876,6 +886,8 @@ class AccessibilityMonitor {
         acceptRunLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), acceptRunLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        let installMs = (CFAbsoluteTimeGetCurrent() - installStartedAt) * 1000.0
+        print("[RenderSchedule] acceptTapInstallMs=\(String(format: "%.1f", installMs)) success=true reason=\(reason)")
         print("[TypeFlow-InputAudit] acceptTap=dynamicCreated enabled=true location=cgSessionEventTap place=tailAppendEventTap options=defaultTap reason=\(reason)")
     }
 
