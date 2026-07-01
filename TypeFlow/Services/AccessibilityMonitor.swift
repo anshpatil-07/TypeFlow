@@ -80,6 +80,7 @@ final class InputCriticalSection {
     private let lock = NSLock()
     private var downKeys: [Int64: String] = [:]
     private var pendingSafeCallbacks: [() -> Void] = []
+    private var pendingImmediateSafeCallbacks: [() -> Void] = []
     private let flushDelay: TimeInterval = 0.02
 
     private init() {}
@@ -115,11 +116,14 @@ final class InputCriticalSection {
     func end(keyCode: Int64, chars: String) {
         let label = chars.isEmpty ? "keyCode=\(keyCode)" : chars
         var callbacks: [() -> Void] = []
+        var immediateCallbacks: [() -> Void] = []
 
         lock.lock()
         downKeys.removeValue(forKey: keyCode)
         let depth = downKeys.count
         if depth == 0 {
+            immediateCallbacks = pendingImmediateSafeCallbacks
+            pendingImmediateSafeCallbacks.removeAll()
             callbacks = pendingSafeCallbacks
             pendingSafeCallbacks.removeAll()
         }
@@ -127,19 +131,29 @@ final class InputCriticalSection {
 
         print("[InputCriticalSection] keyUp \(label) -> end depth=\(depth)")
 
-        guard !callbacks.isEmpty else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + flushDelay) {
-            print("[InputCriticalSection] flushed/deferred overlay update after keyUp callbacks=\(callbacks.count)")
-            callbacks.forEach { $0() }
+        if !immediateCallbacks.isEmpty {
+            DispatchQueue.main.async {
+                print("[InputCriticalSection] flushed/deferred overlay update after keyUp immediateCallbacks=\(immediateCallbacks.count)")
+                immediateCallbacks.forEach { $0() }
+            }
+        }
+
+        if !callbacks.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + flushDelay) {
+                print("[InputCriticalSection] flushed/deferred overlay update after keyUp callbacks=\(callbacks.count)")
+                callbacks.forEach { $0() }
+            }
         }
     }
 
-    func runWhenSafe(_ callback: @escaping () -> Void) {
+    func runWhenSafe(_ callback: @escaping () -> Void, immediateAfterDepthZero: Bool = false) {
         var runNow = false
 
         lock.lock()
         if downKeys.isEmpty {
             runNow = true
+        } else if immediateAfterDepthZero {
+            pendingImmediateSafeCallbacks.append(callback)
         } else {
             pendingSafeCallbacks.append(callback)
         }
@@ -152,12 +166,15 @@ final class InputCriticalSection {
 
     private func forceEndIfStillDown(keyCode: Int64, chars: String) {
         var callbacks: [() -> Void] = []
+        var immediateCallbacks: [() -> Void] = []
         var didForce = false
 
         lock.lock()
         if downKeys.removeValue(forKey: keyCode) != nil {
             didForce = true
             if downKeys.isEmpty {
+                immediateCallbacks = pendingImmediateSafeCallbacks
+                pendingImmediateSafeCallbacks.removeAll()
                 callbacks = pendingSafeCallbacks
                 pendingSafeCallbacks.removeAll()
             }
@@ -167,10 +184,18 @@ final class InputCriticalSection {
         guard didForce else { return }
         print("[InputCriticalSection] key \(chars) force-ended after timeout")
 
-        guard !callbacks.isEmpty else { return }
-        DispatchQueue.main.async {
-            print("[InputCriticalSection] flushed/deferred overlay update after forced end callbacks=\(callbacks.count)")
-            callbacks.forEach { $0() }
+        if !immediateCallbacks.isEmpty {
+            DispatchQueue.main.async {
+                print("[InputCriticalSection] flushed/deferred overlay update after forced end immediateCallbacks=\(immediateCallbacks.count)")
+                immediateCallbacks.forEach { $0() }
+            }
+        }
+
+        if !callbacks.isEmpty {
+            DispatchQueue.main.async {
+                print("[InputCriticalSection] flushed/deferred overlay update after forced end callbacks=\(callbacks.count)")
+                callbacks.forEach { $0() }
+            }
         }
     }
 }

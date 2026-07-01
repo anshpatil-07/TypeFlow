@@ -39,7 +39,6 @@ final class LatencyInstrumentation: @unchecked Sendable {
     private var latestDebouncedWorkID: UInt64?
     private var metricsByWorkID: [UInt64: Metrics] = [:]
     private var workIDByRequestID: [UInt64: UInt64] = [:]
-    private var pendingRenderRequestID: UInt64?
 
     private func now() -> CFAbsoluteTime { CFAbsoluteTimeGetCurrent() }
 
@@ -273,32 +272,47 @@ final class LatencyInstrumentation: @unchecked Sendable {
         let t = now()
         lock.lock()
         var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
-        if metrics.renderRequestedTime == nil {
-            metrics.renderRequestedTime = t
-        }
-        pendingRenderRequestID = requestID
+        metrics.renderRequestedTime = t
         metricsByWorkID[workID] = metrics
         lock.unlock()
         log("overlay render requested requestID=\(requestID) workID=\(workID) source=\(source) textLen=\(textLen)")
     }
 
-    func renderApplied(textLen: Int, source: String) {
+    func renderApplied(requestID: UInt64, textLen: Int, source: String) {
         let t = now()
         var summary: String?
         lock.lock()
-        if let requestID = pendingRenderRequestID,
-           let workID = workIDByRequestID[requestID],
+        if let workID = workIDByRequestID[requestID],
            var metrics = metricsByWorkID[workID] {
             if metrics.renderAppliedTime == nil {
                 metrics.renderAppliedTime = t
                 metricsByWorkID[workID] = metrics
                 summary = successSummary(for: metrics)
+                if let renderRequestedTime = metrics.renderRequestedTime {
+                    let renderMs = (t - renderRequestedTime) * 1000.0
+                    print("[RenderSchedule] renderMsAttributed requestID=\(requestID) renderMs=\(String(format: "%.1f", renderMs))")
+                }
             }
-            pendingRenderRequestID = nil
         }
         lock.unlock()
         log("overlay render applied source=\(source) textLen=\(textLen)")
         if let summary { print(summary) }
+    }
+
+    func renderApplied(textLen: Int, source: String) {
+        log("overlay render applied source=\(source) textLen=\(textLen)")
+    }
+
+    func renderExcluded(requestID: UInt64, reason: String) {
+        lock.lock()
+        if let workID = workIDByRequestID[requestID],
+           var metrics = metricsByWorkID[workID],
+           metrics.renderAppliedTime == nil {
+            metrics.renderRequestedTime = nil
+            metricsByWorkID[workID] = metrics
+        }
+        lock.unlock()
+        print("[RenderSchedule] renderMsExcluded requestID=\(requestID) reason=\(reason)")
     }
 
     func cancellationRequested(requestID: UInt64, workID: UInt64, abortedByStage1B: Bool) {
@@ -317,6 +331,9 @@ final class LatencyInstrumentation: @unchecked Sendable {
         lock.lock()
         var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
         metrics.abortedByStage1B = metrics.abortedByStage1B || abortedByStage1B
+        if metrics.renderAppliedTime == nil {
+            metrics.renderRequestedTime = nil
+        }
         if !metrics.cancelledSummaryLogged {
             metrics.cancelledSummaryLogged = true
             metricsByWorkID[workID] = metrics
@@ -601,6 +618,10 @@ class CompletionManager: @unchecked Sendable {
         resultOwnershipLock.lock()
         defer { resultOwnershipLock.unlock() }
         return requestID == latestResultRequestID
+    }
+
+    func isRenderRequestCurrent(_ requestID: UInt64) -> Bool {
+        return isLatestResultRequest(requestID)
     }
 
     private func isGenerationResultCurrent(requestID: UInt64, workID: UInt64) -> Bool {
@@ -1036,6 +1057,7 @@ class CompletionManager: @unchecked Sendable {
         }
         // Suppressed: print("[TypeFlow-Debug] onTextChanged called")
         invalidateGenerationResults(reason: "text-changed", bufferSnapshot: bufferFallback)
+        overlayWindowController?.dropPendingAutocompleteRenders(reason: "textChanged")
         requestActiveGenerationAbort(reason: "new-input")
         
         if currentCompletion != nil && !currentCompletion!.isEmpty {

@@ -835,6 +835,10 @@ class OverlayWindowController: NSWindowController {
         }
 
         pendingShiftOverlayX = 0
+        if let pending = pendingAutocompleteRender {
+            print("[RenderSchedule] pendingRenderDropped reason=emptyCompletion requestID=\(pending.requestID)")
+            LatencyInstrumentation.shared.renderExcluded(requestID: pending.requestID, reason: "emptyCompletion")
+        }
         pendingAutocompleteRender = nil
         isAutocompleteRenderFlushScheduled = false
         lastRenderedAutocompleteText = ""
@@ -849,6 +853,26 @@ class OverlayWindowController: NSWindowController {
 
     private func logRenderReplace(text: String) {
         print("[OverlayRender] renderReplace text='\(text)' layerCountAfter=\(overlayLayerCount()) subviewCountAfter=\(overlaySubviewCount())")
+    }
+
+    func dropPendingAutocompleteRenders(reason: String) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.dropPendingAutocompleteRenders(reason: reason)
+            }
+            return
+        }
+        if case .updateAutocompleteText(_, let requestID) = pendingOverlayMutation {
+            print("[RenderSchedule] pendingRenderDropped reason=\(reason) requestID=\(requestID)")
+            LatencyInstrumentation.shared.renderExcluded(requestID: requestID, reason: reason)
+            pendingOverlayMutation = nil
+            pendingOverlayMutationDeferredAtByRequestID.removeValue(forKey: requestID)
+        }
+        if let pending = pendingAutocompleteRender {
+            print("[RenderSchedule] pendingRenderDropped reason=\(reason) requestID=\(pending.requestID)")
+            LatencyInstrumentation.shared.renderExcluded(requestID: pending.requestID, reason: reason)
+            pendingAutocompleteRender = nil
+        }
     }
 
     private func appKitCaretRect(from caretRect: CGRect) -> CGRect {
@@ -925,9 +949,9 @@ class OverlayWindowController: NSWindowController {
         guard !isDeferredOverlayFlushScheduled else { return }
         isDeferredOverlayFlushScheduled = true
 
-        InputCriticalSection.shared.runWhenSafe { [weak self] in
+        InputCriticalSection.shared.runWhenSafe({ [weak self] in
             self?.flushDeferredOverlayMutation()
-        }
+        }, immediateAfterDepthZero: true)
     }
 
     private func deferMoveOverlayIfNeeded(to rect: CGRect) -> Bool {
@@ -950,10 +974,29 @@ class OverlayWindowController: NSWindowController {
 
     private func deferOverlayMutationIfNeeded(_ mutation: PendingOverlayMutation, action: String) -> Bool {
         guard InputCriticalSection.shared.isActive else { return false }
+        if case .updateAutocompleteText(let text, let requestID) = mutation, text.isEmpty {
+            print("[RenderSchedule] pendingRenderDropped reason=emptyCompletion requestID=\(requestID)")
+            LatencyInstrumentation.shared.renderExcluded(requestID: requestID, reason: "emptyCompletion")
+            return false
+        }
+        if case .updateGhostText(let text, _) = mutation, text.isEmpty {
+            return false
+        }
+        if case .updateText(let text, _, _, _, _, _) = mutation, text.isEmpty {
+            return false
+        }
         if pendingShiftOverlayX != 0 {
             print("[OverlayRender] prevented additive overlay render")
         }
         pendingShiftOverlayX = 0
+        if case .updateAutocompleteText(_, let newID) = mutation,
+           case .updateAutocompleteText(_, let oldID) = pendingOverlayMutation {
+            print("[RenderSchedule] pendingRenderReplaced oldRequestID=\(oldID) newRequestID=\(newID)")
+            if oldID != newID {
+                LatencyInstrumentation.shared.renderExcluded(requestID: oldID, reason: "coalesced")
+            }
+            pendingOverlayMutationDeferredAtByRequestID.removeValue(forKey: oldID)
+        }
         pendingOverlayMutation = mutation
         print("[InputCriticalSection] overlay update blocked/deferred because physical key is down action=\(action)")
         let requestID: UInt64?
@@ -961,6 +1004,8 @@ class OverlayWindowController: NSWindowController {
         case .updateAutocompleteText(_, let id):
             requestID = id
             pendingOverlayMutationDeferredAtByRequestID[id] = CFAbsoluteTimeGetCurrent()
+            print("[RenderSchedule] pendingRenderStored requestID=\(id) workID=nil")
+            print("[RenderSchedule] preparedOffscreenDuringCriticalSection requestID=\(id)")
         default:
             requestID = nil
         }
@@ -997,6 +1042,13 @@ class OverlayWindowController: NSWindowController {
                 let deferredAt = self.pendingOverlayMutationDeferredAtByRequestID.removeValue(forKey: requestID)
                 let waitMs = deferredAt.map { (CFAbsoluteTimeGetCurrent() - $0) * 1000.0 }
                 print("[RenderSchedule] deferredRenderFlushed requestID=\(requestID) waitMs=\(waitMs.map { String(format: "%.1f", $0) } ?? "nil")")
+                print("[RenderSchedule] keyDepthZeroFlush requestID=\(requestID) waitMs=\(waitMs.map { String(format: "%.1f", $0) } ?? "nil")")
+                guard CompletionManager.shared.isRenderRequestCurrent(requestID) else {
+                    print("[RenderSchedule] pendingRenderDropped reason=stale requestID=\(requestID)")
+                    LatencyInstrumentation.shared.renderExcluded(requestID: requestID, reason: "stale")
+                    return
+                }
+                print("[RenderSchedule] visibleApplyAfterFlush requestID=\(requestID) waitMs=\(waitMs.map { String(format: "%.1f", $0) } ?? "nil")")
             }
 
             if let moveRect {
@@ -1178,9 +1230,17 @@ class OverlayWindowController: NSWindowController {
     }
 
     private func enqueueAutocompleteRender(text: String, requestID: UInt64) {
+        guard CompletionManager.shared.isRenderRequestCurrent(requestID) else {
+            print("[RenderSchedule] pendingRenderDropped reason=stale requestID=\(requestID)")
+            LatencyInstrumentation.shared.renderExcluded(requestID: requestID, reason: "stale")
+            return
+        }
         if let pending = pendingAutocompleteRender {
             print("[RenderPipeline] coalesced render oldTextLen=\(pending.text.count) newTextLen=\(text.count)")
             print("[RenderSchedule] coalescedToLatest oldRequestID=\(pending.requestID) newRequestID=\(requestID)")
+            if pending.requestID != requestID {
+                LatencyInstrumentation.shared.renderExcluded(requestID: pending.requestID, reason: "coalesced")
+            }
         }
         pendingAutocompleteRender = PendingAutocompleteRender(
             requestID: requestID,
@@ -1212,6 +1272,12 @@ class OverlayWindowController: NSWindowController {
         guard let pending = pendingAutocompleteRender else { return }
         pendingAutocompleteRender = nil
 
+        guard CompletionManager.shared.isRenderRequestCurrent(pending.requestID) else {
+            print("[RenderSchedule] pendingRenderDropped reason=stale requestID=\(pending.requestID)")
+            LatencyInstrumentation.shared.renderExcluded(requestID: pending.requestID, reason: "stale")
+            return
+        }
+
         if InputCriticalSection.shared.isActive {
             pendingAutocompleteRender = PendingAutocompleteRender(
                 requestID: pending.requestID,
@@ -1230,9 +1296,16 @@ class OverlayWindowController: NSWindowController {
     private func applyAutocompleteRender(text: String, requestID: UInt64, requestedAt: CFAbsoluteTime) {
         let startedAt = CFAbsoluteTimeGetCurrent()
 
+        guard CompletionManager.shared.isRenderRequestCurrent(requestID) else {
+            print("[RenderSchedule] pendingRenderDropped reason=stale requestID=\(requestID)")
+            LatencyInstrumentation.shared.renderExcluded(requestID: requestID, reason: "stale")
+            return
+        }
+
         if let lastRequestID = lastRenderedAutocompleteRequestID, requestID < lastRequestID {
             print("[RenderPipeline] skipped stale render requestID=\(requestID)")
             print("[RenderSchedule] droppedStale requestID=\(requestID)")
+            LatencyInstrumentation.shared.renderExcluded(requestID: requestID, reason: "stale")
             return
         }
 
@@ -1264,6 +1337,7 @@ class OverlayWindowController: NSWindowController {
             print("[RenderPipeline] render applied requestID=\(requestID) textLen=0 durationMs=\(String(format: "%.1f", durationMs))")
             print("[RenderPipeline] renderMs=\(String(format: "%.1f", durationMs))")
             print("[RenderSchedule] applyFinished requestID=\(requestID) applyMs=\(String(format: "%.1f", durationMs)) requestToApplyMs=\(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - requestedAt) * 1000.0))")
+            LatencyInstrumentation.shared.renderExcluded(requestID: requestID, reason: "emptyCompletion")
             LatencyInstrumentation.shared.renderApplied(textLen: 0, source: "updateAutocompleteText")
             return
         }
@@ -1291,7 +1365,7 @@ class OverlayWindowController: NSWindowController {
         print("[RenderPipeline] layerCountBefore=\(layerCountBefore) layerCountAfter=\(layerCountAfter)")
         print("[RenderPipeline] renderMs=\(String(format: "%.1f", durationMs)) queueMs=\(String(format: "%.1f", queueMs))")
         print("[RenderSchedule] applyFinished requestID=\(requestID) applyMs=\(String(format: "%.1f", durationMs)) requestToApplyMs=\(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - requestedAt) * 1000.0))")
-        LatencyInstrumentation.shared.renderApplied(textLen: text.count, source: "updateAutocompleteText")
+        LatencyInstrumentation.shared.renderApplied(requestID: requestID, textLen: text.count, source: "updateAutocompleteText")
     }
 
     @discardableResult
