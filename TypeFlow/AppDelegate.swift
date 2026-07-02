@@ -68,6 +68,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         
+        if ProcessInfo.processInfo.arguments.contains("-runFIMProbe") {
+            Task {
+                await runInternalFIMProbe()
+            }
+        }
+        
         // Request screen capture permission after a delay when application is finished launching
         // and main window is active.
         if inputIsolationMode.allowAncillaryStartup {
@@ -80,4 +86,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ aNotification: Notification) {}
+
+    private func runInternalFIMProbe() async {
+        let phrases = [
+            "The quick brown ",
+            "i want the ghost text to feel natural ",
+            "this completion should be useful because ",
+            "we need the suggestion to ",
+            "public ResponseEntity<User> getUserById(",
+            "SELECT * FROM users WHERE "
+        ]
+        
+        UserDefaults.standard.set(true, forKey: "FIMEnabled")
+        UserDefaults.standard.set(0.1, forKey: "globalTemperature")
+        
+        await LLMEngine.shared.prewarmCache()
+        
+        print("\n\n=== INTERNAL FIM PROBE ===")
+        for phrase in phrases {
+            let start = Date()
+            let rawOutput = await LLMEngine.shared.generateCompletion(textBeforeCaret: phrase, liveBuffer: "")
+            let elapsed = Date().timeIntervalSince(start) * 1000
+            
+            print("Phrase: '\(phrase)'")
+            print("  rawOutput: '\(rawOutput)'")
+            print("  totalGenerationMs: \(String(format: "%.1f", elapsed))ms")
+        }
+        print("=== PROBE COMPLETE ===\n\n")
+        NSApplication.shared.terminate(nil)
+    }
 }

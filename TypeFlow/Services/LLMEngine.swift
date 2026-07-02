@@ -1,5 +1,101 @@
 import Foundation
 
+enum ModelFamily: String {
+    case gemmaCausal = "gemmaCausal"
+    case qwenCoderFIM = "qwenCoderFIM"
+    case unknown = "unknown"
+}
+
+enum PromptMode {
+    case causal
+    case fim
+}
+
+struct ModelProfile {
+    let path: String
+    let family: ModelFamily
+    let promptMode: PromptMode
+    
+    let fimPrefix: String?
+    let fimSuffix: String?
+    let fimMiddle: String?
+    
+    let stopTokens: [String]
+    let maxTokens: Int
+    let temperature: Float
+}
+
+extension ModelProfile {
+    static let gemmaDefault = ModelProfile(
+        path: "",
+        family: .gemmaCausal,
+        promptMode: .causal,
+        fimPrefix: nil,
+        fimSuffix: nil,
+        fimMiddle: nil,
+        stopTokens: ["<|im_end|>", "<|endoftext|>"],
+        maxTokens: 30,
+        temperature: 0.1
+    )
+    
+    static let qwenFIM = ModelProfile(
+        path: "",
+        family: .qwenCoderFIM,
+        promptMode: .fim,
+        fimPrefix: "<|fim_prefix|>",
+        fimSuffix: "<|fim_suffix|>",
+        fimMiddle: "<|fim_middle|>",
+        stopTokens: ["<|file_separator|>", "<|endoftext|>", "<|im_end|>"],
+        maxTokens: 30,
+        temperature: 0.1
+    )
+    
+    static func current() -> ModelProfile {
+        let modelPath = UserDefaults.standard.string(forKey: "modelPath") ?? ""
+        let profileID = UserDefaults.standard.string(forKey: "modelProfileID") ?? "unknown"
+        
+        if profileID == "qwenCoderFIM" {
+            return ModelProfile(
+                path: modelPath,
+                family: .qwenCoderFIM,
+                promptMode: .fim,
+                fimPrefix: qwenFIM.fimPrefix,
+                fimSuffix: qwenFIM.fimSuffix,
+                fimMiddle: qwenFIM.fimMiddle,
+                stopTokens: qwenFIM.stopTokens,
+                maxTokens: qwenFIM.maxTokens,
+                temperature: qwenFIM.temperature
+            )
+        } else if profileID == "gemmaCausal" {
+            return ModelProfile(
+                path: modelPath,
+                family: .gemmaCausal,
+                promptMode: .causal,
+                fimPrefix: nil,
+                fimSuffix: nil,
+                fimMiddle: nil,
+                stopTokens: gemmaDefault.stopTokens,
+                maxTokens: gemmaDefault.maxTokens,
+                temperature: gemmaDefault.temperature
+            )
+        }
+        
+        // Default to gemma fallback if unspecified, but fail closed on path
+        return ModelProfile(
+            path: modelPath,
+            family: .unknown,
+            promptMode: .causal,
+            fimPrefix: nil,
+            fimSuffix: nil,
+            fimMiddle: nil,
+            stopTokens: gemmaDefault.stopTokens,
+            maxTokens: gemmaDefault.maxTokens,
+            temperature: gemmaDefault.temperature
+        )
+    }
+}
+
+
 actor LLMEngine {
     static let shared = LLMEngine()
     
@@ -7,6 +103,8 @@ actor LLMEngine {
     private var inactivityTimer: Timer?
     private var modelLoadTask: Task<Void, Never>?
     private var latestModelLoadRequestID: UInt64?
+    
+    private(set) var activeProfile: ModelProfile = ModelProfile.current()
     
     var isModelReady: Bool { get async { await runtime.isModelReady } }
     
@@ -76,6 +174,7 @@ actor LLMEngine {
         textBeforeCaret: String,
         liveBuffer: String,
         cancellationToken: LlamaGenerationCancellationToken? = nil,
+        policy: AutocompleteContextPolicy = .fullContext,
         onStream: (@Sendable (String) -> Void)? = nil
     ) async -> String {
         print("[TypeFlow-Debug] LLMEngine: generateCompletion called")
@@ -116,9 +215,9 @@ actor LLMEngine {
         if maxTokens == 0 { maxTokens = 20 }
         
         LatencyInstrumentation.shared.promptBuildStart(requestID: instrumentationRequestID, workID: instrumentationWorkID)
+        let fullPrompt = PromptBuilder.shared.buildPrompt(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, systemInstructions: hardcodedInstructions, requestID: instrumentationRequestID, workID: instrumentationWorkID)
+        // Extract suffixResult just for context audit log compatibility
         let suffixResult = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer)
-        let dynamicPrefixPrompt = PromptBuilder.shared.buildPromptPrefix(systemInstructions: hardcodedInstructions)
-        let fullPrompt = dynamicPrefixPrompt + suffixResult.text
         LatencyInstrumentation.shared.promptBuildEnd(requestID: instrumentationRequestID, workID: instrumentationWorkID)
         logContextAudit("LLMEngine generate textBeforeCaretLen=\(textBeforeCaret.count) textBeforeCaret='\(contextAuditPreview(textBeforeCaret))' liveBufferLen=\(liveBuffer.count) liveBuffer='\(contextAuditPreview(liveBuffer))' suffixLen=\(suffixResult.text.count) suffix='\(contextAuditPreview(suffixResult.text))' fullPromptLen=\(fullPrompt.count) fullPromptTail='\(contextAuditPreview(fullPrompt))'")
         
@@ -126,9 +225,10 @@ actor LLMEngine {
             LatencyInstrumentation.shared.llamaGenerationStart(requestID: instrumentationRequestID, workID: instrumentationWorkID)
             let output = try await runtime.generate(
                 prompt: fullPrompt,
-                maxTokens: maxTokens,
-                temperature: temperature == 0.0 ? 0.2 : temperature,
+                maxTokens: activeProfile.maxTokens,
+                temperature: activeProfile.temperature == 0.0 ? 0.2 : activeProfile.temperature,
                 cancellationToken: cancellationToken,
+                workID: instrumentationWorkID,
                 onPartialRawText: { partialText in
                     LatencyInstrumentation.shared.firstToken(requestID: instrumentationRequestID, workID: instrumentationWorkID)
                     if cancellationToken?.isCancelled == true {
@@ -183,8 +283,8 @@ actor LLMEngine {
             let maxTokens = max(100, selectedText.count / 2)
             let output = try await runtime.generate(
                 prompt: prompt,
-                maxTokens: maxTokens,
-                temperature: temperature == 0.0 ? 0.2 : temperature
+                maxTokens: activeProfile.maxTokens,
+                temperature: activeProfile.temperature == 0.0 ? 0.2 : activeProfile.temperature
             )
             return output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
         } catch {
@@ -217,8 +317,8 @@ actor LLMEngine {
         do {
             let output = try await runtime.generate(
                 prompt: prompt,
-                maxTokens: 150,
-                temperature: 0.6
+                maxTokens: activeProfile.maxTokens,
+                temperature: activeProfile.temperature
             )
             
             let options = output.components(separatedBy: "|||")
@@ -255,12 +355,31 @@ actor LLMEngine {
 
         let loadTask = Task { [runtime] in
             do {
-                let modelId = SettingsManager.shared.activeModelId
-                print("[TypeFlow-Debug] LLMEngine: Loading model: \(modelId)")
-
-                let ggufPath = "\(NSHomeDirectory())/Documents/gemma-4-E2B-i1-Q4_K_M.gguf"
-
-                try await runtime.loadModel(path: ggufPath)
+                if await runtime.isModelReady { return }
+                
+                activeProfile = ModelProfile.current()
+                
+                if activeProfile.path.isEmpty {
+                    print("[TypeFlow-Error] LLMEngine: No model path configured. Failing closed.")
+                    throw NSError(domain: "LLMEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Model path not configured."])
+                }
+                
+                print("==========================================")
+                print("[TypeFlow-Startup] MODEL CONFIGURATION")
+                print("- Model Path: \(activeProfile.path)")
+                print("- Model Profile: \(activeProfile.family.rawValue)")
+                print("- FIM Enabled: \(activeProfile.promptMode == .fim)")
+                if activeProfile.promptMode == .fim {
+                    print("- FIM Tokens: Prefix=\(activeProfile.fimPrefix ?? ""), Suffix=\(activeProfile.fimSuffix ?? ""), Middle=\(activeProfile.fimMiddle ?? "")")
+                }
+                let minDebounce = 25
+                let maxDebounce = 75
+                print("- Debounce: \(minDebounce)ms - \(maxDebounce)ms")
+                print("- Sampler Settings: temp=\(activeProfile.temperature), maxTokens=\(activeProfile.maxTokens)")
+                print("- Stop Tokens: \(activeProfile.stopTokens)")
+                print("==========================================")
+                
+                try await runtime.loadModel(profile: activeProfile)
                 print("[TypeFlow-Debug] LLMEngine: Model loaded successfully.")
             } catch {
                 print("[TypeFlow-Debug] LLMEngine: Failed to load model: \(error)")

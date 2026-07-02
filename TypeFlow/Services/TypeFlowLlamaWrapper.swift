@@ -97,9 +97,9 @@ actor TypeFlowLlamaWrapper {
         llama_backend_free()
     }
     
-    func loadModel(path: String) throws {
+    func loadModel(profile: ModelProfile) throws {
         unloadModel()
-        print("[TypeFlow-Debug] LlamaWrapper: Loading model from \(path)")
+        print("[TypeFlow-Debug] LlamaWrapper: Loading model from \(profile.path)")
         
         var mparams = llama_model_default_params()
         // Hardware Strictness: Ensure memory mapping is enabled
@@ -107,9 +107,9 @@ actor TypeFlowLlamaWrapper {
         // Enable Metal GPU support if available by setting a high number of layers
         mparams.n_gpu_layers = 99
         
-        model = llama_load_model_from_file(path, mparams)
+        model = llama_load_model_from_file(profile.path, mparams)
         guard let model = model else {
-            throw NSError(domain: "TypeFlowLlamaWrapper", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to load model from \(path)"])
+            throw NSError(domain: "TypeFlowLlamaWrapper", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to load model from \(profile.path)"])
         }
         
         var cparams = llama_context_default_params()
@@ -119,9 +119,37 @@ actor TypeFlowLlamaWrapper {
         
         ctx = llama_new_context_with_model(model, cparams)
         guard let ctx = ctx else {
-            llama_free_model(model)
-            self.model = nil
             throw NSError(domain: "TypeFlowLlamaWrapper", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to create context"])
+        }
+        
+        if profile.promptMode == .fim {
+            print("[TypeFlow-Debug] LlamaWrapper: Verifying FIM tokens for \(profile.path)")
+            let vocab = llama_model_get_vocab(model)
+            
+            let verifyToken = { (tokenStr: String?) -> Bool in
+                guard let tokenStr = tokenStr else { return false }
+                var tokens = [llama_token](repeating: 0, count: 5)
+                let cStr = tokenStr.cString(using: .utf8)
+                let res = llama_tokenize(vocab, cStr, Int32(tokenStr.utf8.count), &tokens, 5, true, true)
+                if res == 1 {
+                    print("[TypeFlow-Debug] LlamaWrapper: Verified token \(tokenStr) -> ID \(tokens[0])")
+                    return true
+                } else if res > 1 {
+                    print("[TypeFlow-Debug] LlamaWrapper: WARNING: Token \(tokenStr) split into \(res) pieces: \(tokens.prefix(Int(res)))")
+                    return false
+                }
+                return false
+            }
+            
+            let prefixOK = verifyToken(profile.fimPrefix)
+            let middleOK = verifyToken(profile.fimMiddle)
+            let suffixOK = verifyToken(profile.fimSuffix)
+            
+            if !prefixOK || !middleOK || !suffixOK {
+                print("[TypeFlow-Debug] LlamaWrapper: FIM verification failed. Failing closed.")
+                unloadModel()
+                throw NSError(domain: "TypeFlowLlamaWrapper", code: 6, userInfo: [NSLocalizedDescriptionKey: "FIM token verification failed for loaded model"])
+            }
         }
         
         isLoaded = true
@@ -192,6 +220,7 @@ actor TypeFlowLlamaWrapper {
         maxTokens: Int,
         temperature: Float,
         cancellationToken: LlamaGenerationCancellationToken? = nil,
+        workID: UInt64? = nil,
         onPartialRawText: (@Sendable (String) -> Void)? = nil
     ) throws -> String {
         guard isLoaded, let model = model, let ctx = ctx else {
@@ -215,9 +244,11 @@ actor TypeFlowLlamaWrapper {
         var n_tokens: Int32 = 0
         let promptCount = Int32(prompt.utf8.count)
         
+        let t0 = CFAbsoluteTimeGetCurrent()
         let tokenizeResult = prompt.withCString { cStr in
             return llama_tokenize(vocab, cStr, promptCount, &tokens, Int32(tokens.count), true, true)
         }
+        let t1 = CFAbsoluteTimeGetCurrent()
         
         if tokenizeResult < 0 {
             throw NSError(domain: "TypeFlowLlamaWrapper", code: 4, userInfo: [NSLocalizedDescriptionKey: "Tokenization failed. Prompt too long?"])
@@ -262,15 +293,44 @@ actor TypeFlowLlamaWrapper {
         var generatedText = ""
         var n_cur: Int32 = n_tokens
         var hasEmittedValidText = false
+        var generatedCount = 0
         
         // 4. Setup Sampler
         let sparams = llama_sampler_chain_default_params()
         guard let smpl = llama_sampler_chain_init(sparams) else {
             throw NSError(domain: "TypeFlowLlamaWrapper", code: 6, userInfo: [NSLocalizedDescriptionKey: "Failed to init sampler"])
         }
-        llama_sampler_chain_add(smpl, llama_sampler_init_greedy())
-        if temperature > 0.0 {
-            llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature))
+        
+        let testTopK = UserDefaults.standard.integer(forKey: "TestSamplerTopK")
+        let testTopP = Float(UserDefaults.standard.double(forKey: "TestSamplerTopP"))
+        let testRepeatPenalty = Float(UserDefaults.standard.double(forKey: "TestSamplerRepeatPenalty"))
+        let testRepeatLastN = UserDefaults.standard.integer(forKey: "TestSamplerRepeatLastN")
+        
+        var effectiveTemp = temperature
+        if UserDefaults.standard.object(forKey: "TestSamplerTemperature") != nil {
+            effectiveTemp = Float(UserDefaults.standard.double(forKey: "TestSamplerTemperature"))
+        }
+        
+        if testRepeatPenalty > 0.0 && testRepeatPenalty != 1.0 {
+            let lastN = testRepeatLastN > 0 ? Int32(testRepeatLastN) : 64
+            llama_sampler_chain_add(smpl, llama_sampler_init_penalties(lastN, testRepeatPenalty, 0.0, 0.0))
+        }
+        
+        if testTopK > 0 {
+            llama_sampler_chain_add(smpl, llama_sampler_init_top_k(Int32(testTopK)))
+        }
+        
+        if testTopP > 0.0 && testTopP < 1.0 {
+            llama_sampler_chain_add(smpl, llama_sampler_init_top_p(testTopP, 1))
+        }
+        
+        if effectiveTemp > 0.0 {
+            llama_sampler_chain_add(smpl, llama_sampler_init_temp(effectiveTemp))
+            // Must end with dist for stochastic sampling
+            llama_sampler_chain_add(smpl, llama_sampler_init_dist(UInt32.random(in: 0..<UInt32.max)))
+        } else {
+            // Temperature 0 means greedy
+            llama_sampler_chain_add(smpl, llama_sampler_init_greedy())
         }
         
         // 5. Generation Loop
@@ -297,6 +357,8 @@ actor TypeFlowLlamaWrapper {
             if llama_vocab_is_eog(vocab, new_token_id) {
                 break
             }
+            
+            generatedCount += 1
             
             // Memory Strictness: Zero-copy UnsafeMutableBufferPointer extraction
             var pieceBuffer = [CChar](repeating: 0, count: 64)
@@ -362,6 +424,11 @@ actor TypeFlowLlamaWrapper {
         }
         
         llama_sampler_free(smpl)
+        let genT1 = CFAbsoluteTimeGetCurrent()
+        if let workID = workID {
+            LatencyInstrumentation.shared.setTokenizationMetrics(requestID: nil, workID: workID, promptTokens: Int(n_tokens), generatedTokens: generatedCount, tStart: t0, tEnd: t1, gEnd: genT1)
+        }
+        
         return generatedText
     }
 }

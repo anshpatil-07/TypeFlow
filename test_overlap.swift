@@ -213,7 +213,9 @@ func testMidWordMaturity(partialWord: String, suggestion: String, source: String
     let hasBoundary = suggestion.rangeOfCharacter(from: CharacterSet.letters.inverted) != nil
     let lowerCompletedWord = completedWord.lowercased()
     
-    if partialWord.count < 4 && firstSuffixSegment.count >= 3 {
+    if partialWord.count < 3 {
+        return (false, "shortStemSpeculativeMidWord")
+    } else if partialWord.count < 4 && firstSuffixSegment.count >= 3 {
         return (false, "shortStemSpeculativeMidWord")
     }
     
@@ -235,6 +237,63 @@ func testMidWordMaturity(partialWord: String, suggestion: String, source: String
     return (true, "valid")
 }
 
+func testAfterSpaceMaturity(suggestion: String, activeLine: String = "", source: String = "early") -> (Bool, String) {
+    let words = suggestion.components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
+    let isPunctuationOnly = suggestion.allSatisfy { !$0.isLetter && !$0.isNumber }
+    let lowerSug = suggestion.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    
+    let chattyFillers = ["mhm.", "mhm", "uh", "um", "yeah", "okay", "ok", "yes", "i mean", "like,", "so,"]
+    let isMalformedQuote = suggestion.hasPrefix("I\"") || suggestion.hasPrefix("I'") || suggestion == "\"" || suggestion == "'"
+    
+    let isShortCommonWord = ["the", "a", "an", "this", "that", "it", "we", "in", "of", "to", "for", "on", "as", "is", "are", "was", "were", "and", "or", "but"].contains(lowerSug)
+    let activeWords = activeLine.lowercased().components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
+    
+    let isLocalContextRepeat = (!isShortCommonWord && words.count == 1 && activeWords.contains(words[0])) ||
+                               (words.count > 1 && activeLine.lowercased().contains(lowerSug))
+    let isRepeatedTokenLoop = words.count == 2 && words[0] == words[1]
+    
+    if isPunctuationOnly { return (false, "punctuationOnly") }
+    if chattyFillers.contains(lowerSug) { return (false, "fillerOrChatty") }
+    if isMalformedQuote { return (false, "malformedQuote") }
+    if isRepeatedTokenLoop { return (false, "repeatedTokenLoop") }
+    if isLocalContextRepeat { return (false, "localContextRepeat") }
+    
+    if suggestion.first!.isNumber && !activeLine.contains(where: { $0.isNumber }) {
+        return (false, "numericGarbage")
+    }
+    if ["ata", "anta", "yson", "ord", "pped"].contains(lowerSug) {
+        return (false, "suffixLookingFragment")
+    }
+    
+    if suggestion.count <= 2 {
+        return (false, "tooShortAfterSpace")
+    }
+    
+    if words.count >= 2 && words.allSatisfy({ $0.count <= 2 }) {
+        let hasUsefulCommonPhrase = lowerSug.contains("of the") || lowerSug.contains("to the") || lowerSug.contains("in the")
+        if !hasUsefulCommonPhrase {
+            return (false, "tinyGarbageAfterSpace")
+        }
+    }
+    
+    let hasBoundary = suggestion.contains(" ") || suggestion.rangeOfCharacter(from: CharacterSet.punctuationCharacters) != nil
+    
+    if source == "early" {
+        if words.count == 1 {
+            if !hasBoundary {
+                return (false, "immatureAfterSpaceCandidate")
+            } else if isShortCommonWord {
+                return (false, "immatureAfterSpaceCandidate")
+            }
+        }
+    } else {
+        if words.count == 1 && isShortCommonWord {
+            return (false, "tooShortAfterSpace")
+        }
+    }
+    return (true, "valid")
+}
+
 let maturityCases = [
     ("qu", "idditch", false, "shortStemSpeculativeMidWord"),
     ("br", "ash", false, "shortStemSpeculativeMidWord"),
@@ -246,15 +305,44 @@ let maturityCases = [
     ("qual", "ity ", true, "valid"),
     ("overloo", "k the", true, "valid"),
     ("overl", "ord ", false, "shortStemSpeculativeMidWord"),
-    ("brow", "n fox", true, "valid")
+    ("brow", "n fox", true, "valid"),
+    ("o", "k i", false, "shortStemSpeculativeMidWord")
 ]
 
 for (p, s, expectedResult, expectedReason) in maturityCases {
     let res = testMidWordMaturity(partialWord: p, suggestion: s)
     if res.0 == expectedResult && (expectedResult || res.1 == expectedReason) {
-        print("PASS maturity: '\(p)' + '\(s)' -> \(res.0) (\(res.1))")
+        print("PASS midWord maturity: '\(p)' + '\(s)' -> \(res.0) (\(res.1))")
     } else {
-        print("FAIL maturity: '\(p)' + '\(s)' expected \(expectedResult)(\(expectedReason)) got \(res.0)(\(res.1))")
+        print("FAIL midWord maturity: '\(p)' + '\(s)' expected \(expectedResult)(\(expectedReason)) got \(res.0)(\(res.1))")
+    }
+}
+
+let afterSpaceCases = [
+    ("mhm.", "", "early", false, "fillerOrChatty"),
+    ("I\"", "", "early", false, "malformedQuote"),
+    ("the issue", "", "early", true, "valid"),
+    ("a better", "", "early", true, "valid"),
+    ("of the", "", "early", true, "valid"),
+    ("the ", "", "early", false, "immatureAfterSpaceCandidate"),
+    ("a ", "", "early", false, "tooShortAfterSpace"),
+    ("4. there", "", "early", false, "numericGarbage"),
+    ("4. there", "1. ", "early", true, "valid"),
+    ("co co", "", "early", false, "repeatedTokenLoop"),
+    ("ghost", "i want the ghost text to feel natural ", "early", false, "localContextRepeat"),
+    ("feel", "i want the ghost text to feel natural ", "early", false, "localContextRepeat"),
+    ("ghost ghost", "i want the ghost text to ", "early", false, "repeatedTokenLoop"),
+    ("need", "we need the suggestion to ", "early", false, "localContextRepeat"),
+    ("the next", "this is ", "early", true, "valid"),
+    ("a better", "this is ", "early", true, "valid")
+]
+
+for (s, act, src, expectedResult, expectedReason) in afterSpaceCases {
+    let res = testAfterSpaceMaturity(suggestion: s, activeLine: act, source: src)
+    if res.0 == expectedResult && (expectedResult || res.1 == expectedReason) {
+        print("PASS afterSpace maturity: '\(s)' -> \(res.0) (\(res.1))")
+    } else {
+        print("FAIL afterSpace maturity: '\(s)' expected \(expectedResult)(\(expectedReason)) got \(res.0)(\(res.1))")
     }
 }
 

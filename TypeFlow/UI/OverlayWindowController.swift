@@ -1338,7 +1338,7 @@ class OverlayWindowController: NSWindowController {
             print("[RenderPipeline] renderMs=\(String(format: "%.1f", durationMs))")
             print("[RenderSchedule] applyFinished requestID=\(requestID) applyMs=\(String(format: "%.1f", durationMs)) requestToApplyMs=\(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - requestedAt) * 1000.0))")
             LatencyInstrumentation.shared.renderExcluded(requestID: requestID, reason: "emptyCompletion")
-            LatencyInstrumentation.shared.renderApplied(textLen: 0, source: "updateAutocompleteText")
+            LatencyInstrumentation.shared.renderApplied(requestID: nil, textLen: 0, source: "updateAutocompleteText")
             return
         }
 
@@ -1525,7 +1525,7 @@ class OverlayWindowController: NSWindowController {
 	        if renderInlineGhostText(newText, isStale: isStale) {
 	            print("[RenderPipeline] reused existing text layer=\(inlineHostingView != nil)")
 	            print("[RenderPipeline] layerCountBefore=\(before) layerCountAfter=\(overlayLayerCount())")
-	            LatencyInstrumentation.shared.renderApplied(textLen: newText.count, source: "updateGhostText")
+	            LatencyInstrumentation.shared.renderApplied(requestID: nil, textLen: newText.count, source: "updateGhostText")
 	        } else {
 	            print("[RenderPipeline] skipped render because geometry unavailable")
 	        }
@@ -1587,7 +1587,7 @@ class OverlayWindowController: NSWindowController {
             repositionWindow()
             print("[TypeFlow-InputAudit] overlayWindowEvent=orderFront source=updateText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
             overlayWindow.orderFront(nil)
-            LatencyInstrumentation.shared.renderApplied(textLen: newText.count, source: "updateText")
+            LatencyInstrumentation.shared.renderApplied(requestID: nil, textLen: newText.count, source: "updateText")
             let hasActiveCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
             let shouldEnableAcceptTap = hasActiveCompletion && !newText.isEmpty && !isLoading && smartReplyOptions.isEmpty
             CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(shouldEnableAcceptTap, reason: "updateText-visible")

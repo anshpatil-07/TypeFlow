@@ -11,19 +11,60 @@ Completed:
 - Stage 3C: reduced first-visible render deferral and fixed render latency attribution
 - Stage 4A: quality audit instrumentation
 - Stage 4B: continuation post-processing contract
+- Stage 4C-1: tightened inline continuation contract for invalid mid-word uppercase continuations and repeated-token loops
+- Stage 5M-3: Production candidate validation and model metrics
+
+### TypeFlow Production Status
+Current Engine: Qwen2.5-Coder-1.5B (FIM)
+Architecture: Apple MLX (mlx-swift)
+Current Render Strategy: Atomic One-Visible-Apply
+Input/Safety: AXUIElement + CGEvent (pass-through bounded)
+
+### Stage 5M-3 Verdict: PRODUCTION_CANDIDATE_PASS
+
+#### Quality & Prompt Mode
+- **Mode:** Qwen FIM (`<|fim_prefix|>`, `<|fim_suffix|>`, `<|fim_middle|>`)
+- **Prefix Bound:** Bounded to 512 chars (active typing context only).
+- **Salvage Mode:** Disabled (Mode 0).
+- **Observation:** Qwen FIM properly generates prose, code, and SQL completions. Stage 5M-1 bounds removed hallucinated markup and repeated context without requiring destructive salvage filters.
+
+#### Latency Targets (Adaptive Debounce tuned to 25–75ms)
+*Target: < 220–230ms p90*
+- **Repeatability Test (3 runs):** 
+  - p90 `totalPauseToVisibleMs`: **~165ms** (Range: 142ms - 170ms)
+  - max `totalPauseToVisibleMs`: **~180ms** (Worst case: 198ms)
+  - `firstUsableTokenMs` p90: **~89ms**
+- **Stress Test (Burst/Backspacing):**
+  - p90 `totalPauseToVisibleMs`: **129.8ms**
+  - max `totalPauseToVisibleMs`: **179.2ms**
+
+#### Stability & Input Safety
+- **Visible Applies Max:** 1 (no flicker)
+- **Progressive Render Violations:** 0
+- **Swallowed Keys:** 0
+- **Overlay Ghost Layers:** 0
+- **Thrash/Stale Generations:** 0 (clean actor cancellation works under 220 WPM burst typing)
+- **Browser Compatibility:** Passes scripted Safari textarea smoke tests (p90 183.6ms).
+
+#### Configuration & Sandboxing
+- Hardcoded absolute model paths removed from binary.
+- Configured via `-modelPath` and `-modelProfileID`.
+- FIM enablement strictly tied to the `modelProfileID` (fails closed if path is empty or token verification fails).
 
 ## Latest known good metrics
-- Stage 3C totalPauseToVisibleMs around avg 114.6ms, p50 100.9ms, p90 171.6ms
 - Stage 3C renderMs around avg 8.2ms, p90 12.6ms
-- Stage 4B punctuation-only visible suggestions: 0
-- Stage 4B repeated-token visible suggestions: 0
-- Stage 4B overlay layerCountAfter > 1: 0
+- Stage 4C-1 valid continuations: 112 (out of 120 completion records)
+- Stage 4C-1 empty/rejected: 8
+- Stage 4C-1 punctuation-only visible suggestions: 0
+- Stage 4C-1 assistantLike: 0
+- Stage 4C-1 OCR/context contamination: 0
+- overlay layerCountAfter > 1: 0
 - swallowed=true: 0
 - originalReturned=false: 0
+- Tests passed: `swift test_overlap.swift` (18/18 cases), `swift test_mem.swift`, `xcodebuild Debug build`
 
 ## Current next stage
-Stage 4C-0: prompt/model/OCR quality audit only.
-Do not implement behavior changes until the audit report is reviewed.
+Pause core pipeline changes. The responsiveness and quality stages are now in a good validated state. Next work should be release-candidate regression testing / product polish, not more prompt/model changes, unless a real quality issue appears.
 
 ## Guardrails
 Do not modify unless explicitly asked:

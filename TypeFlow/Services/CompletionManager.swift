@@ -26,6 +26,29 @@ final class LatencyInstrumentation: @unchecked Sendable {
         var renderAppliedTime: CFAbsoluteTime?
         var cancellationRequestedTime: CFAbsoluteTime?
         var startTime: CFAbsoluteTime?
+        
+        var tokenizationStartTime: CFAbsoluteTime?
+        var tokenizationEndTime: CFAbsoluteTime?
+        var generationEndTime: CFAbsoluteTime?
+        
+        var debounceDelayMs: Int?
+        var promptTokenCount: Int?
+        var generatedTokenCount: Int?
+        
+        var boundedPrefixLen: Int?
+        var boundedPrefixLineCount: Int?
+        var suffixLen: Int?
+        var prefixWasTruncated: Bool?
+        var trailingSpacePreserved: Bool?
+        
+        var promptMode: String?
+        var modelProfile: String?
+        var completionKind: String?
+        var activeLine: String?
+        var finalSuggestion: String?
+        var visibleApplied: Bool = false
+        var rejectReason: String?
+        
         var cancelledSummaryLogged = false
         var successSummaryLogged = false
         var abortedByStage1B = false
@@ -108,6 +131,7 @@ final class LatencyInstrumentation: @unchecked Sendable {
         }
         metrics.onTextChangedTime = latestOnTextChangedTime ?? t
         metrics.debounceScheduledTime = t
+        metrics.debounceDelayMs = delayMs
         latestDebouncedWorkID = workID
         metricsByWorkID[workID] = metrics
         lock.unlock()
@@ -278,14 +302,16 @@ final class LatencyInstrumentation: @unchecked Sendable {
         log("overlay render requested requestID=\(requestID) workID=\(workID) source=\(source) textLen=\(textLen)")
     }
 
-    func renderApplied(requestID: UInt64, textLen: Int, source: String) {
+    func renderApplied(requestID: UInt64? = nil, textLen: Int, source: String) {
         let t = now()
         var summary: String?
         lock.lock()
-        if let workID = workIDByRequestID[requestID],
+        if let requestID = requestID,
+           let workID = workIDByRequestID[requestID],
            var metrics = metricsByWorkID[workID] {
             if metrics.renderAppliedTime == nil {
                 metrics.renderAppliedTime = t
+                metrics.visibleApplied = true
                 metricsByWorkID[workID] = metrics
                 summary = successSummary(for: metrics)
                 if let renderRequestedTime = metrics.renderRequestedTime {
@@ -299,9 +325,43 @@ final class LatencyInstrumentation: @unchecked Sendable {
         if let summary { print(summary) }
     }
 
-    func renderApplied(textLen: Int, source: String) {
-        log("overlay render applied source=\(source) textLen=\(textLen)")
+    func setPromptMetrics(requestID: UInt64?, workID: UInt64, boundedLen: Int, lineCount: Int, suffixLen: Int, truncated: Bool, trailingPreserved: Bool, mode: String) {
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        metrics.boundedPrefixLen = boundedLen
+        metrics.boundedPrefixLineCount = lineCount
+        metrics.suffixLen = suffixLen
+        metrics.prefixWasTruncated = truncated
+        metrics.trailingSpacePreserved = trailingPreserved
+        metrics.promptMode = mode
+        metricsByWorkID[workID] = metrics
+        lock.unlock()
     }
+    
+    func setClassification(requestID: UInt64?, workID: UInt64, profile: String, kind: String, activeLine: String, finalSuggestion: String) {
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        metrics.modelProfile = profile
+        metrics.completionKind = kind
+        metrics.activeLine = activeLine
+        metrics.finalSuggestion = finalSuggestion
+        metricsByWorkID[workID] = metrics
+        lock.unlock()
+    }
+    
+    func setTokenizationMetrics(requestID: UInt64?, workID: UInt64, promptTokens: Int, generatedTokens: Int, tStart: CFAbsoluteTime?, tEnd: CFAbsoluteTime?, gEnd: CFAbsoluteTime?) {
+        lock.lock()
+        var metrics = metricsByWorkID[workID] ?? Metrics(workID: workID)
+        if let pt = promptTokens as Int? { metrics.promptTokenCount = pt }
+        if let gt = generatedTokens as Int? { metrics.generatedTokenCount = gt }
+        if let ts = tStart { metrics.tokenizationStartTime = ts }
+        if let te = tEnd { metrics.tokenizationEndTime = te }
+        if let ge = gEnd { metrics.generationEndTime = ge }
+        metricsByWorkID[workID] = metrics
+        lock.unlock()
+    }
+
+
 
     func renderExcluded(requestID: UInt64, reason: String) {
         lock.lock()
@@ -309,6 +369,8 @@ final class LatencyInstrumentation: @unchecked Sendable {
            var metrics = metricsByWorkID[workID],
            metrics.renderAppliedTime == nil {
             metrics.renderRequestedTime = nil
+            metrics.rejectReason = reason
+            metrics.visibleApplied = false
             metricsByWorkID[workID] = metrics
         }
         lock.unlock()
@@ -349,7 +411,66 @@ final class LatencyInstrumentation: @unchecked Sendable {
 
     private func successSummary(for metrics: Metrics) -> String {
         let requestID = metrics.requestID ?? 0
-        return "[LatencySummary] requestID=\(requestID) workID=\(metrics.workID) inputToDebounceMs=\(ms(metrics.inputEventTime, metrics.debounceFiredTime)) contextMs=\(ms(metrics.contextStartTime, metrics.contextEndTime)) axMs=\(ms(metrics.axStartTime, metrics.axEndTime)) ocrMs=\(ms(metrics.ocrStartTime, metrics.ocrEndTime)) promptMs=\(ms(metrics.promptStartTime, metrics.promptEndTime)) llamaFirstTokenMs=\(ms(metrics.llamaStartTime, metrics.firstTokenTime)) llamaFirstUsableMs=\(ms(metrics.llamaStartTime, metrics.firstUsableTime)) renderMs=\(ms(metrics.renderRequestedTime, metrics.renderAppliedTime)) totalPauseToVisibleMs=\(ms(metrics.inputEventTime, metrics.renderAppliedTime))"
+        let delayMs = metrics.debounceDelayMs.map { String($0) } ?? "nil"
+        
+        let tokenizationMs = ms(metrics.tokenizationStartTime, metrics.tokenizationEndTime)
+        let generationMs = ms(metrics.llamaStartTime, metrics.generationEndTime)
+        
+        return """
+        [DetailedLatency] requestID=\(requestID) workID=\(metrics.workID)
+        Input / debounce:
+        - lastKeyEventAt: \(metrics.inputEventTime ?? 0)
+        - debounceScheduledAt: \(metrics.debounceScheduledTime ?? 0)
+        - debounceDelayMs: \(delayMs)
+        - debounceFiredAt: \(metrics.debounceFiredTime ?? 0)
+        - debounceActualDelayMs: \(ms(metrics.debounceScheduledTime, metrics.debounceFiredTime))
+        
+        Request lifecycle:
+        - requestCreatedAt: \(metrics.generationRequestedTime ?? 0)
+        - requestQueuedAt: \(metrics.generationRequestedTime ?? 0)
+        - requestDequeuedAt: \(metrics.startTime ?? 0)
+        - staleCancelledBeforeStart: false
+        
+        Prompt:
+        - promptBuildStart: \(metrics.promptStartTime ?? 0)
+        - promptBuildEnd: \(metrics.promptEndTime ?? 0)
+        - promptBuildMs: \(ms(metrics.promptStartTime, metrics.promptEndTime))
+        - boundedPrefixLen: \(metrics.boundedPrefixLen ?? -1)
+        - boundedPrefixLineCount: \(metrics.boundedPrefixLineCount ?? -1)
+        - suffixLen: \(metrics.suffixLen ?? -1)
+        - prefixWasTruncated: \(metrics.prefixWasTruncated ?? false)
+        - trailingSpacePreserved: \(metrics.trailingSpacePreserved ?? false)
+        
+        Tokenization / model:
+        - tokenizationStart: \(metrics.tokenizationStartTime ?? 0)
+        - tokenizationEnd: \(metrics.tokenizationEndTime ?? 0)
+        - tokenizationMs: \(tokenizationMs)
+        - promptTokenCount: \(metrics.promptTokenCount ?? -1)
+        - generationStart: \(metrics.llamaStartTime ?? 0)
+        - firstTokenAt: \(metrics.firstTokenTime ?? 0)
+        - firstTokenMs: \(ms(metrics.llamaStartTime, metrics.firstTokenTime))
+        - firstUsableAt: \(metrics.firstUsableTime ?? 0)
+        - firstUsableTokenMs: \(ms(metrics.llamaStartTime, metrics.firstUsableTime))
+        - generatedTokenCount: \(metrics.generatedTokenCount ?? -1)
+        - generationEnd: \(metrics.generationEndTime ?? 0)
+        - generationMs: \(generationMs)
+        
+        Render:
+        - candidateSelectedAt: \(metrics.renderRequestedTime ?? 0)
+        - overlayRenderStart: \(metrics.renderRequestedTime ?? 0)
+        - overlayRenderEnd: \(metrics.renderAppliedTime ?? 0)
+        - renderMs: \(ms(metrics.renderRequestedTime, metrics.renderAppliedTime))
+        - totalPauseToVisibleMs: \(ms(metrics.inputEventTime, metrics.renderAppliedTime))
+        
+        Classification:
+        - promptMode=\(metrics.promptMode ?? "unknown")
+        - modelProfile=\(metrics.modelProfile ?? "unknown")
+        - completionKind=\(metrics.completionKind ?? "unknown")
+        - activeLine='\(metrics.activeLine ?? "")'
+        - finalSuggestion='\(metrics.finalSuggestion ?? "")'
+        - visibleApplied=\(metrics.visibleApplied)
+        - rejectReason=\(metrics.rejectReason ?? "none")
+        """
     }
 }
 
@@ -513,7 +634,7 @@ class CompletionManager: @unchecked Sendable {
     private final class AtomicGhostStreamBuffer: @unchecked Sendable {
         struct Candidate {
             let rawOutput: String
-            let suggestion: String
+            var suggestion: String
             let mode: String
             let reason: String
             let createdAt: CFAbsoluteTime
@@ -1193,22 +1314,136 @@ class CompletionManager: @unchecked Sendable {
             partialWord = String(activeLine[partialStart...])
         }
 
+        var candidate = candidate
+        let salvageMode = UserDefaults.standard.integer(forKey: "SalvageMode")
+        if salvageMode > 0 {
+            var s = candidate.suggestion
+            
+            // Mode B (salvageMode >= 1)
+            // Strip HTML/XML tags
+            s = s.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil)
+            
+            // Decode basic entities (very simple)
+            s = s.replacingOccurrences(of: "&lt;", with: "<")
+            s = s.replacingOccurrences(of: "&gt;", with: ">")
+            s = s.replacingOccurrences(of: "&amp;", with: "&")
+            s = s.replacingOccurrences(of: "&quot;", with: "\"")
+            
+            // Strip markdown emphasis/backticks
+            s = s.replacingOccurrences(of: "\\*{1,3}([^\\*]+)\\*{1,3}", with: "$1", options: .regularExpression, range: nil)
+            s = s.replacingOccurrences(of: "_{1,3}([^_]+)_{1,3}", with: "$1", options: .regularExpression, range: nil)
+            s = s.replacingOccurrences(of: "`([^`]+)`", with: "$1", options: .regularExpression, range: nil)
+            
+            // Normalize whitespace
+            s = s.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+            
+            // Strip FIM/chat control tokens if leaked
+            let profile = ModelProfile.current()
+            for stopToken in profile.stopTokens {
+                s = s.replacingOccurrences(of: stopToken, with: "")
+            }
+            if let prefix = profile.fimPrefix { s = s.replacingOccurrences(of: prefix, with: "") }
+            if let suffix = profile.fimSuffix { s = s.replacingOccurrences(of: suffix, with: "") }
+            if let middle = profile.fimMiddle { s = s.replacingOccurrences(of: middle, with: "") }
+            
+            // Truncate before Explanation:, Note:, Output:, markdown headings, or \n\n
+            if let idx = s.range(of: "Explanation:")?.lowerBound { s = String(s[..<idx]) }
+            if let idx = s.range(of: "Note:")?.lowerBound { s = String(s[..<idx]) }
+            if let idx = s.range(of: "Output:")?.lowerBound { s = String(s[..<idx]) }
+            if let idx = s.range(of: "\n\n")?.lowerBound { s = String(s[..<idx]) }
+            if let idx = s.range(of: "\n#")?.lowerBound { s = String(s[..<idx]) }
+            
+            s = s.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r,-:;"))
+            
+            // Active line prefix stripping
+            let lowerS = s.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowerActive = activeLine.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            if !lowerActive.isEmpty && lowerS.hasPrefix(lowerActive) && lowerS.count > lowerActive.count {
+                if let range = s.lowercased().range(of: lowerActive) {
+                    s = String(s[range.upperBound...])
+                    s = s.trimmingCharacters(in: CharacterSet(charactersIn: " \t,-:;"))
+                }
+            }
+            
+            // Mode C (salvageMode == 2)
+            if salvageMode == 2 {
+                // Strip list prefixes
+                s = s.replacingOccurrences(of: "^[\\s]*[\\d]+[\\)\\.]\\s+", with: "", options: .regularExpression, range: nil)
+                s = s.replacingOccurrences(of: "^[\\s]*[\\-\\*]\\s+", with: "", options: .regularExpression, range: nil)
+                
+                let codeSyntax = CharacterSet(charactersIn: "{}();<>=")
+                let isCode = s.rangeOfCharacter(from: codeSyntax) != nil || s.uppercased().contains("SELECT") || s.uppercased().contains("WHERE")
+                
+                if !isCode {
+                    let sentenceBoundaries = CharacterSet(charactersIn: ".!?")
+                    if let boundIdx = s.rangeOfCharacter(from: sentenceBoundaries)?.lowerBound { s = String(s[..<boundIdx]) }
+                    
+                    let words = s.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+                    if words.count > 8 { s = words.prefix(8).joined(separator: " ") }
+                }
+            }
+            
+            candidate.suggestion = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if candidate.suggestion != candidate.rawOutput {
+                print("[SalvageAudit] requestID=\(requestID) mode=\(salvageMode) Salvaged raw='\(candidate.rawOutput.replacingOccurrences(of: "\n", with: "\\n"))' -> '\(candidate.suggestion)'")
+            }
+        }
+        
         // Visible Usefulness Gate
         var accepted = true
         var rejectionReason = ""
         let suggestion = candidate.suggestion
 
-        if suggestion.contains("<") && suggestion.contains(">") {
-            accepted = false; rejectionReason = "markupOrFormatting"
-        } else if suggestion.contains("```") {
-            accepted = false; rejectionReason = "markupOrFormatting"
-        } else if suggestion.contains("](") && suggestion.contains("[") && suggestion.contains(")") {
-            accepted = false; rejectionReason = "markupOrFormatting"
-        } else if (suggestion.hasPrefix("**") && suggestion.hasSuffix("**")) || 
-                  (suggestion.hasPrefix("*") && suggestion.hasSuffix("*") && suggestion.count > 2) ||
-                  (suggestion.hasPrefix("_") && suggestion.hasSuffix("_") && suggestion.count > 2) {
-            accepted = false; rejectionReason = "markupOrFormatting"
-        } else {
+        // activeLineRestart check
+        let cleanedNorm = suggestion.components(separatedBy: CharacterSet.alphanumerics.inverted).joined(separator: " ").lowercased().components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        let activeNorm = activeLine.components(separatedBy: CharacterSet.alphanumerics.inverted).joined(separator: " ").lowercased().components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+        
+        if cleanedNorm.count >= 3 && activeNorm.count >= 3 {
+            if Array(cleanedNorm.prefix(3)) == Array(activeNorm.prefix(3)) {
+                accepted = false; rejectionReason = "activeLineRestart"
+            } else if cleanedNorm[0] == activeNorm[0] && cleanedNorm[1] == activeNorm[1] {
+                accepted = false; rejectionReason = "activeLineRestart"
+            }
+        }
+
+        // malformedQuote check
+        if accepted {
+            if suggestion.hasPrefix("I\"") || suggestion == "I'" {
+                accepted = false; rejectionReason = "malformedQuote"
+            } else if suggestion.hasPrefix("'") || suggestion.hasSuffix("'") {
+                accepted = false; rejectionReason = "malformedQuote"
+            } else if suggestion.hasPrefix("\"") || suggestion.hasSuffix("\"") {
+                accepted = false; rejectionReason = "malformedQuote"
+            } else if suggestion.allSatisfy({ !$0.isLetter && !$0.isNumber }) && !suggestion.isEmpty {
+                accepted = false; rejectionReason = "malformedQuote" // repurposing for punctuation-only output
+            }
+        }
+        
+        // genericFragment check
+        if accepted {
+            let generics = ["it is a good", "this is a", "there are", "the more", "states that"]
+            let lowerSug = suggestion.lowercased()
+            if generics.contains(lowerSug) || generics.contains(where: { lowerSug.hasPrefix($0 + " ") }) {
+                accepted = false; rejectionReason = "genericFragment"
+            }
+        }
+
+        if accepted {
+            if suggestion.contains("<") && suggestion.contains(">") {
+                accepted = false; rejectionReason = "markupOrFormatting"
+            } else if suggestion.contains("```") {
+                accepted = false; rejectionReason = "markupOrFormatting"
+            } else if suggestion.contains("](") && suggestion.contains("[") && suggestion.contains(")") {
+                accepted = false; rejectionReason = "markupOrFormatting"
+            } else if (suggestion.hasPrefix("**") && suggestion.hasSuffix("**")) || 
+                      (suggestion.hasPrefix("*") && suggestion.hasSuffix("*") && suggestion.count > 2) ||
+                      (suggestion.hasPrefix("_") && suggestion.hasSuffix("_") && suggestion.count > 2) {
+                accepted = false; rejectionReason = "markupOrFormatting"
+            }
+        }
+
+        if accepted {
             // Local context repetition gate
             let suggestionWords = suggestion.components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
             if suggestionWords.count >= 2 {
@@ -1243,7 +1478,9 @@ class CompletionManager: @unchecked Sendable {
                     let hasBoundary = suggestion.rangeOfCharacter(from: CharacterSet.letters.inverted) != nil
                     let lowerCompletedWord = completedWord.lowercased()
                     
-                    if partialWord.count < 4 && firstSuffixSegment.count >= 3 {
+                    if partialWord.count < 3 {
+                        accepted = false; rejectionReason = "shortStemSpeculativeMidWord"
+                    } else if partialWord.count < 4 && firstSuffixSegment.count >= 3 {
                         accepted = false; rejectionReason = "shortStemSpeculativeMidWord"
                     } else {
                         let isFinalSafeWord = (source != "early" && source != "early-stable") && ["brown", "return", "overlook", "generate", "generation", "quality", "completion"].contains(lowerCompletedWord)
@@ -1263,31 +1500,73 @@ class CompletionManager: @unchecked Sendable {
             } else if candidate.mode == "afterSpace" {
                 let words = suggestion.components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
                 let isPunctuationOnly = suggestion.allSatisfy { !$0.isLetter && !$0.isNumber }
-                let lowerSug = suggestion.lowercased().trimmingCharacters(in: .whitespaces)
-                let weirdSuffixes = ["ata", "anta", "yson", "ord", "pped"]
+                let lowerSug = suggestion.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                let chattyFillers = ["mhm.", "mhm", "uh", "um", "yeah", "okay", "ok", "yes", "i mean", "like,", "so,"]
+                
+                let isShortCommonWord = ["the", "a", "an", "this", "that", "it", "we", "in", "of", "to", "for", "on", "as", "is", "are", "was", "were", "and", "or", "but"].contains(lowerSug)
+                let activeWords = activeLine.lowercased().components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
+                
+                let isLocalContextRepeat = (!isShortCommonWord && words.count == 1 && activeWords.contains(words[0])) ||
+                                           (words.count > 1 && activeLine.lowercased().contains(lowerSug))
+                
+                let isRepeatedTokenLoop = words.count == 2 && words[0] == words[1]
                 
                 if isPunctuationOnly {
                     accepted = false; rejectionReason = "punctuationOnly"
+                } else if chattyFillers.contains(lowerSug) {
+                    accepted = false; rejectionReason = "fillerOrChatty"
+                } else if isRepeatedTokenLoop {
+                    accepted = false; rejectionReason = "repeatedTokenLoop"
+                } else if isLocalContextRepeat {
+                    accepted = false; rejectionReason = "localContextRepeat"
                 } else if suggestion.count <= 2 {
                     accepted = false; rejectionReason = "tooShortAfterSpace"
-                } else if !words.contains(where: { $0.count >= 3 }) {
-                    accepted = false; rejectionReason = "tinyGarbageAfterSpace"
+                } else if words.count >= 2 && words.allSatisfy({ $0.count <= 2 }) {
+                    let hasUsefulCommonPhrase = lowerSug.contains("of the") || lowerSug.contains("to the") || lowerSug.contains("in the")
+                    if !hasUsefulCommonPhrase {
+                        accepted = false; rejectionReason = "tinyGarbageAfterSpace"
+                    }
                 } else if suggestion.first!.isNumber && !activeLine.contains(where: { $0.isNumber }) {
                     accepted = false; rejectionReason = "numericGarbage"
-                } else if weirdSuffixes.contains(lowerSug) {
+                } else if ["ata", "anta", "yson", "ord", "pped"].contains(lowerSug) {
                     accepted = false; rejectionReason = "suffixLookingFragment"
                 }
                 
-                // Early atomic candidate selection for afterSpace
-                if accepted && source == "early" {
-                    if !suggestion.contains(" ") && suggestion.count < 4 {
-                        accepted = false; rejectionReason = "partialBPEFragment"
+                if accepted {
+                    let hasBoundary = suggestion.contains(" ") || suggestion.rangeOfCharacter(from: CharacterSet.punctuationCharacters) != nil
+                    
+                    if source == "early" {
+                        if words.count == 1 {
+                            if !hasBoundary {
+                                accepted = false; rejectionReason = "immatureAfterSpaceCandidate"
+                            } else if isShortCommonWord {
+                                accepted = false; rejectionReason = "immatureAfterSpaceCandidate"
+                            }
+                        }
+                    } else {
+                        // For final fallback, reject if it's just a single tiny/short common word that doesn't mean anything by itself
+                        if words.count == 1 && isShortCommonWord {
+                            accepted = false; rejectionReason = "tooShortAfterSpace"
+                        }
                     }
                 }
             }
         }
 
         print("[VisibleUsefulnessGate] decision=\(accepted ? "accepted" : "rejected") mode=\(candidate.mode) reason=\(rejectionReason.isEmpty ? "valid" : rejectionReason)")
+        
+        LatencyInstrumentation.shared.setClassification(
+            requestID: requestID,
+            workID: workID,
+            profile: "\(ModelProfile.current().family)",
+            kind: candidate.mode,
+            activeLine: activeLine,
+            finalSuggestion: candidate.suggestion
+        )
+        if !accepted {
+            LatencyInstrumentation.shared.renderExcluded(requestID: requestID, reason: rejectionReason)
+        }
 
         if !accepted {
             print("[VisibleSuggestionAudit] requestID=\(requestID) decision=rejectedBeforeVisible mode=\(candidate.mode) activeLine='\(self.qualityAuditPreview(activeLine))' partialWord='\(partialWord)' rawOutput='\(self.qualityAuditPreview(candidate.rawOutput))' finalSuggestion='\(self.qualityAuditPreview(candidate.suggestion))' reason=\(rejectionReason)")
@@ -1745,12 +2024,12 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // Adaptive debounce: if typing rapidly (<150ms between keystrokes) use 150ms,
-        // otherwise drop to 50ms so the first word gets a prediction nearly instantly.
+        // Adaptive debounce: if typing rapidly (<150ms between keystrokes) use 75ms,
+        // otherwise drop to 25ms so the first word gets a prediction nearly instantly.
         let now = Date()
         let keystrokeInterval = now.timeIntervalSince(lastKeystrokeTime)
         lastKeystrokeTime = now
-        let debounceInterval: TimeInterval = keystrokeInterval < 0.15 ? 0.15 : 0.05
+        let debounceInterval: TimeInterval = keystrokeInterval < 0.15 ? 0.075 : 0.025
         // Suppressed: print("[TypeFlow-Debug] Adaptive debounce...")
         
         NotificationCenter.default.post(name: Notification.Name("UserDidType"), object: nil)

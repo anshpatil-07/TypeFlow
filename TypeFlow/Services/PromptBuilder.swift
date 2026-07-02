@@ -21,8 +21,28 @@ enum AutocompleteContextPolicy: String {
     case fullContext
 }
 
+enum InlinePromptMode: String {
+    case baseActiveLine
+    case cleanProsePreface
+    case fewShotInline
+    case cleanLocalSentence
+    case hybridFewShot
+    case baseActiveLineWithMinimalComment
+    case suffixOnlyBase
+    case disabledInstructionWrapper
+    case fim
+}
+
 class PromptBuilder {
     static let shared = PromptBuilder()
+    
+    var afterSpacePromptMode: InlinePromptMode {
+        if let saved = UserDefaults.standard.string(forKey: "AfterSpacePromptMode"),
+           let mode = InlinePromptMode(rawValue: saved) {
+            return mode
+        }
+        return .baseActiveLine
+    }
 
     // MARK: - Frozen prefix cache
     // The static preface must be byte-for-byte identical across keystrokes to maximise
@@ -53,7 +73,79 @@ class PromptBuilder {
     // MARK: - Public API
 
     /// Builds the full prompt passed to the LLM for inline completion.
-    func buildPrompt(textBeforeCaret: String, liveBuffer: String, systemInstructions: String, policy: AutocompleteContextPolicy = .fullContext) -> String {
+    func buildPrompt(textBeforeCaret: String, liveBuffer: String, systemInstructions: String, requestID: UInt64? = nil, workID: UInt64? = nil, policy: AutocompleteContextPolicy = .fullContext) -> String {
+        let profile = ModelProfile.current()
+        
+        if profile.promptMode == .fim {
+            // FIM production path: Bounded context, NO OCR, NO clipboard.
+            let (prefix, truncated, len, lines) = buildBoundedFIMPrefix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer)
+            
+            if let workID = workID {
+                LatencyInstrumentation.shared.setPromptMetrics(requestID: requestID, workID: workID, boundedLen: len, lineCount: lines, suffixLen: 0, truncated: truncated, trailingPreserved: prefix.last?.isWhitespace ?? false, mode: "fim")
+            }
+            
+            print("[TypeFlow-Debug] FIM Context: rawLen=\(textBeforeCaret.count) boundedLen=\(len) lines=\(lines) truncated=\(truncated) trailingSpacePreserved=\(prefix.last?.isWhitespace ?? false)")
+            
+            // FIM suffix: text after caret (currently not passed to buildPrompt, but we could pass it if available)
+            // For now, suffix is empty, as we only have textBeforeCaret and liveBuffer.
+            let suffix = ""
+            
+            return "\(profile.fimPrefix ?? "")\(prefix)\(profile.fimSuffix ?? "")\(suffix)\(profile.fimMiddle ?? "")"
+        }
+        
+        let lines = textBeforeCaret.components(separatedBy: .newlines)
+        let activeLine = lines.last ?? ""
+        let activeLineEndsWithWhitespace = activeLine.hasSuffix(" ") || activeLine.hasSuffix("\t") || activeLine.hasSuffix("\n")
+        
+        if activeLineEndsWithWhitespace {
+            print("[TypeFlow-Debug] PromptBuilder: Using \(afterSpacePromptMode.rawValue) prompt for after-space")
+            switch afterSpacePromptMode {
+            case .fim: return ""
+            case .disabledInstructionWrapper:
+                return """
+                <start_of_turn>user
+                You are an inline autocomplete engine. Continue the following line of text exactly where it leaves off.
+                Do not repeat the input. Do not explain. Do not use conversational filler, quotes, or markdown. Output only the short natural continuation (2-8 words).
+                
+                Text to continue:
+                \(activeLine)<end_of_turn>
+                <start_of_turn>model
+                """
+            case .baseActiveLine, .cleanLocalSentence:
+                return activeLine
+            case .cleanProsePreface:
+                return "Continue the text naturally. Return only the next few words.\n\n\(activeLine)"
+            case .fewShotInline:
+                return """
+                Input: the quick brown 
+                Output: fox jumped
+                Input: i want the ghost text to feel natural 
+                Output: and useful
+                Input: this completion should be useful because 
+                Output: it predicts the next words
+                Input: \(activeLine)
+                Output: 
+                """
+            case .hybridFewShot:
+                return """
+                Input: the quick brown 
+                Output: fox jumped
+                Input: \(activeLine)
+                Output: 
+                """
+            case .baseActiveLineWithMinimalComment:
+                return """
+                Continue the text naturally. Output only the continuation.
+
+                \(activeLine)
+                """
+            case .suffixOnlyBase:
+                let prefix = buildPromptPrefix(systemInstructions: systemInstructions, policy: .inlineActiveTextOnly).text
+                let suffix = buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, policy: .inlineActiveTextOnly).text
+                return prefix + suffix
+            }
+        }
+        
         let prefix = buildPromptPrefix(systemInstructions: systemInstructions, policy: policy).text
         let suffix = buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, policy: policy).text
         return prefix + suffix
@@ -70,6 +162,50 @@ class PromptBuilder {
         frozenPrefix = ""
         frozenPrefixKey = ""
         print("[TypeFlow-Debug] PromptBuilder: Frozen prefix invalidated.")
+    }
+    
+    // MARK: - FIM Context Builder
+    
+    private func buildBoundedFIMPrefix(textBeforeCaret: String, liveBuffer: String) -> (String, Bool, Int, Int) {
+        var mergedText = textBeforeCaret
+        if !liveBuffer.isEmpty {
+            let components = mergedText.components(separatedBy: "\t")
+            if components.count > 1, components.last?.isEmpty == true {
+                mergedText = components.dropLast().joined(separator: "\t") + liveBuffer
+            }
+        }
+        
+        let charCap = 512
+        let lineCap = 10
+        
+        let allLines = mergedText.components(separatedBy: .newlines)
+        
+        // Always include the active line
+        let activeLine = allLines.last ?? ""
+        
+        var prefixLines: [String] = [activeLine]
+        var currentLen = activeLine.count
+        var truncated = false
+        
+        // Iterate backwards from the second-to-last line
+        for i in stride(from: allLines.count - 2, through: 0, by: -1) {
+            let line = allLines[i]
+            // +1 for the newline character that joins them
+            if prefixLines.count >= lineCap {
+                truncated = true
+                break
+            }
+            if currentLen + line.count + 1 > charCap {
+                truncated = true
+                break
+            }
+            prefixLines.insert(line, at: 0)
+            currentLen += line.count + 1
+        }
+        
+        // Exact reconstruction with newlines to preserve trailing whitespace and formatting
+        let boundedPrefix = prefixLines.joined(separator: "\n")
+        return (boundedPrefix, truncated, boundedPrefix.count, prefixLines.count)
     }
 
     // MARK: - Prefix builder — base model conditioning preface (static, cacheable)
