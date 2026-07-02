@@ -37,3 +37,6 @@ DerivedData/
 
 # macOS
 .DS_Store
+
+# Local benchmark runtime artifacts
+benchmark_artifacts/

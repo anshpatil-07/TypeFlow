@@ -1467,8 +1467,6 @@ class CompletionManager: @unchecked Sendable {
                     accepted = false; rejectionReason = "leadingWhitespace"
                 } else if !partialWord.isEmpty && partialWord.first!.isLowercase && suggestion.first!.isUppercase {
                     accepted = false; rejectionReason = "uppercaseMismatched"
-                } else if suggestion.first!.isNumber && !partialWord.contains(where: { $0.isNumber }) {
-                    accepted = false; rejectionReason = "numericGarbage"
                 } else if !suggestion.isEmpty && !suggestion.first!.isLetter && !suggestion.first!.isNumber {
                     accepted = false; rejectionReason = "invalidPartialWordSuffix"
                 } else {
@@ -1527,8 +1525,6 @@ class CompletionManager: @unchecked Sendable {
                     if !hasUsefulCommonPhrase {
                         accepted = false; rejectionReason = "tinyGarbageAfterSpace"
                     }
-                } else if suggestion.first!.isNumber && !activeLine.contains(where: { $0.isNumber }) {
-                    accepted = false; rejectionReason = "numericGarbage"
                 } else if ["ata", "anta", "yson", "ord", "pped"].contains(lowerSug) {
                     accepted = false; rejectionReason = "suffixLookingFragment"
                 }
@@ -1570,6 +1566,18 @@ class CompletionManager: @unchecked Sendable {
 
         if !accepted {
             print("[VisibleSuggestionAudit] requestID=\(requestID) decision=rejectedBeforeVisible mode=\(candidate.mode) activeLine='\(self.qualityAuditPreview(activeLine))' partialWord='\(partialWord)' rawOutput='\(self.qualityAuditPreview(candidate.rawOutput))' finalSuggestion='\(self.qualityAuditPreview(candidate.suggestion))' reason=\(rejectionReason)")
+            if let dictData = try? JSONSerialization.data(withJSONObject: [
+                "activeLine": activeLine,
+                "rejectionReason": rejectionReason,
+                "ghostVisible": false,
+                "rawOutput": candidate.rawOutput,
+                "finalSuggestion": candidate.suggestion,
+                "epochSeconds": Date().timeIntervalSince1970
+            ]), let jsonStr = String(data: dictData, encoding: .utf8) {
+                print(jsonStr)
+                fflush(stdout)
+            }
+
             return
         }
 
@@ -1598,6 +1606,18 @@ class CompletionManager: @unchecked Sendable {
             self.atomicGhostLock.unlock()
 
             print("[VisibleSuggestionAudit] requestID=\(requestID) decision=visibleApplied mode=\(candidate.mode) activeLine='\(self.qualityAuditPreview(activeLine))' partialWord='\(partialWord)' rawOutput='\(self.qualityAuditPreview(candidate.rawOutput))' finalSuggestion='\(self.qualityAuditPreview(candidate.suggestion))' source=\(source) promptIsolationPolicy=inlineActiveTextOnly elapsedMs=\(String(format: "%.1f", elapsedMs)) visibleApplyCountForRequest=\(visibleCount)")
+
+            if let dictData = try? JSONSerialization.data(withJSONObject: [
+                "activeLine": activeLine,
+                "visibleGhostText": candidate.suggestion,
+                "ghostVisible": true,
+                "rawOutput": candidate.rawOutput,
+                "finalSuggestion": candidate.suggestion,
+                "epochSeconds": Date().timeIntervalSince1970
+            ]), let jsonStr = String(data: dictData, encoding: .utf8) {
+                print(jsonStr)
+                fflush(stdout)
+            }
             
             self.applyAutocompleteOverlayText(
                 candidate.suggestion,
@@ -1607,9 +1627,9 @@ class CompletionManager: @unchecked Sendable {
             )
         }
 
-        if source.hasPrefix("early") && cancellationToken.requestCancellation(reason: "atomic-visible-applied") {
-            streamBuffer.logCancelledAfterVisible(requestID: requestID)
-        }
+        // if source.hasPrefix("early") && cancellationToken.requestCancellation(reason: "atomic-visible-applied") {
+        //     streamBuffer.logCancelledAfterVisible(requestID: requestID)
+        // }
     }
 
     private func logAXHotPathCounts() {
@@ -2082,6 +2102,8 @@ class CompletionManager: @unchecked Sendable {
                     NSWorkspace.shared.frontmostApplication?.bundleIdentifier?.lowercased().contains($0) == true
                 }
                 
+                let isFIM = ModelProfile.current().promptMode == .fim
+                
                 if axText.count < 100 && isBrowser {
                     Task {
                         LatencyInstrumentation.shared.ocrStart(workID: workID)
@@ -2145,6 +2167,7 @@ class CompletionManager: @unchecked Sendable {
         }
         
         let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
+        
         let effectiveConfig = SettingsManager.shared.getEffectiveConfig(for: bundleId)
         
         if !effectiveConfig.isEnabled {
@@ -2565,8 +2588,10 @@ class CompletionManager: @unchecked Sendable {
             print("[TypeFlow-Debug] Accept spell correction: activeLine='\(activeLine)', misspelled='\(spellCorrection.misspelled)', dynamically calculated deleteCount=\(deleteCount)")
             print("[TypeFlow-Debug] Accept spell correction: injecting \(deleteCount) backspaces and typing '\(spellCorrection.corrected)'")
             UsageStatsManager.shared.recordSpellCorrection()
-            TextInjector.shared.injectBackspaces(count: deleteCount)
-            TextInjector.shared.injectCharByChar(text: spellCorrection.corrected)
+            DispatchQueue.global().async {
+                TextInjector.shared.injectBackspaces(count: deleteCount)
+                TextInjector.shared.injectCharByChar(text: spellCorrection.corrected)
+            }
             clearCompletion()
             
             let correctedLine = String(activeLine.dropLast(deleteCount)) + spellCorrection.corrected
@@ -2627,10 +2652,12 @@ class CompletionManager: @unchecked Sendable {
             
             TypingHistoryManager.shared.logSentence(activeLine + completion)
             
-            // Inject the first segment only.
+            // Inject the first segment only asynchronously so we don't block the CGEventTap
             // CRITICAL: Use injectCharByChar (direct Unicode synthetic keystroke) NOT inject() here.
             UsageStatsManager.shared.recordCompletionAccepted(charactersSaved: completion.count)
-            TextInjector.shared.injectCharByChar(text: wordToInsert)
+            DispatchQueue.global().async {
+                TextInjector.shared.injectCharByChar(text: wordToInsert)
+            }
             
             if !remainder.isEmpty {
                 currentCompletion = remainder
@@ -2937,6 +2964,14 @@ struct SuggestionInteractionState {
         var preservedLeadingWhitespace = candidate.first?.isWhitespace == true
         let leadingWhitespace = String(candidate.prefix { $0.isWhitespace })
         let withoutLeadingWhitespace = String(candidate.dropFirst(leadingWhitespace.count))
+
+        let trimmedActive = activeLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedActive.count <= 4 {
+            let lower = trimmedActive.lowercased()
+            if ["the", "a", "an", "is", "in", "it", "to", "of", "and", "this", "that"].contains(lower) {
+                return makeContract("", .rejected, "activeLineTooShortAndGeneric", mode, rawCompletion, activeLine, partialWord, false, "")
+            }
+        }
 
         if mode == "partialWord" {
             if rawCompletion.first?.isWhitespace == true {

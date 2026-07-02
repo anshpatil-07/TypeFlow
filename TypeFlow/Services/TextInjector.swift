@@ -113,21 +113,26 @@ class TextInjector {
         
         for char in utf16Chars {
             var varChar = char
-            if let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
-                keyDownEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
+            let vKey: CGKeyCode = (char == 32) ? 49 : 0
+            if let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true) {
+                if vKey == 0 {
+                    keyDownEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
+                }
                 keyDownEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
                 keyDownEvent.flags = [] // Clear all modifiers
-                logSyntheticKey(action: "unicode-char-posted", keyCode: 0, keyDown: true, text: String(utf16CodeUnits: [char], count: 1), flags: keyDownEvent.flags)
+                logSyntheticKey(action: "unicode-char-posted", keyCode: vKey, keyDown: true, text: String(utf16CodeUnits: [char], count: 1), flags: keyDownEvent.flags)
                 keyDownEvent.post(tap: .cgSessionEventTap)
             }
-            if let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
-                keyUpEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
+            if let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false) {
+                if vKey == 0 {
+                    keyUpEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
+                }
                 keyUpEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
                 keyUpEvent.flags = [] // Clear all modifiers
-                logSyntheticKey(action: "unicode-char-posted", keyCode: 0, keyDown: false, text: String(utf16CodeUnits: [char], count: 1), flags: keyUpEvent.flags)
+                logSyntheticKey(action: "unicode-char-posted", keyCode: vKey, keyDown: false, text: String(utf16CodeUnits: [char], count: 1), flags: keyUpEvent.flags)
                 keyUpEvent.post(tap: .cgSessionEventTap)
             }
-            usleep(5000)
+            usleep(25000)
         }
     }
     

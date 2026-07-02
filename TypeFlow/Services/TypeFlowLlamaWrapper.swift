@@ -93,7 +93,14 @@ actor TypeFlowLlamaWrapper {
     }
     
     deinit {
-        unloadModel()
+        let capturedCtx = ctx
+        let capturedModel = model
+        if let ctx = capturedCtx {
+            llama_free(ctx)
+        }
+        if let model = capturedModel {
+            llama_free_model(model)
+        }
         llama_backend_free()
     }
     
@@ -270,7 +277,9 @@ actor TypeFlowLlamaWrapper {
         // We drop from `matchingLength` to the end, removing any trailing sequence or generated tokens
         llama_memory_seq_rm(llama_get_memory(ctx), 0, Int32(matchingLength), -1)
         
-        self.previousPromptTokens = newPromptTokens
+        // Safely reset our prefix array to the matched state.
+        // We only append the new tokens AFTER a successful decode to prevent KV cache corruption if aborted mid-decode.
+        self.previousPromptTokens = Array(newPromptTokens.prefix(matchingLength))
         self.currentCachePosition = Int32(matchingLength)
         
         // 3. Initial Prompt Decode (only the un-cached remainder)
@@ -288,6 +297,9 @@ actor TypeFlowLlamaWrapper {
                 }
                 throw NSError(domain: "TypeFlowLlamaWrapper", code: 5, userInfo: [NSLocalizedDescriptionKey: "llama_decode failed on prompt prefill"])
             }
+            
+            // Only after successful decode do we commit these tokens to the cache state
+            self.previousPromptTokens.append(contentsOf: remainderTokens)
         }
         
         var generatedText = ""

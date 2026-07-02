@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://typeflow.local/safari_benchmark_schema.json",
+  "title": "TypeFlow Safari Product Benchmark Cases",
+  "type": "object",
+  "required": ["version", "defaults", "cases"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "defaults": {
+      "type": "object",
+      "required": ["runsPerCase", "observationWindowMs", "defaultMaxLatencyMs", "absoluteHardCeilingMs"],
+      "additionalProperties": false,
+      "properties": {
+        "runsPerCase": { "type": "integer", "const": 1 },
+        "observationWindowMs": { "type": "integer", "const": 300 },
+        "defaultMaxLatencyMs": { "type": "integer", "const": 220 },
+        "absoluteHardCeilingMs": { "type": "integer", "const": 250 }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/case" }
+    }
+  },
+  "$defs": {
+    "case": {
+      "type": "object",
+      "required": [
+        "id",
+        "category",
+        "description",
+        "editorType",
+        "selector",
+        "prefix",
+        "typingProfile",
+        "maxLatencyMs",
+        "tabTest",
+        "requiredAnyKeywords",
+        "requiredAllKeywords",
+        "requiredGroups",
+        "forbiddenKeywords",
+        "unacceptableRegexes",
+        "semanticNote",
+        "contextAwarenessRequired",
+        "darkMode"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Z][0-9]_[a-z0-9_]+$" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "editorType": { "type": "string", "enum": ["textarea", "contenteditable"] },
+        "pageHTML": { "type": "string" },
+        "pageContext": { "type": "string" },
+        "selector": { "type": "string", "minLength": 1 },
+        "prefix": { "type": "string" },
+        "typingProfile": {
+          "type": "object",
+          "required": ["interKeyDelayMs", "jitterMs"],
+          "additionalProperties": false,
+          "properties": {
+            "interKeyDelayMs": { "type": "integer", "minimum": 1 },
+            "jitterMs": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "maxLatencyMs": { "type": "integer", "minimum": 1, "maximum": 250 },
+        "tabTest": { "type": "boolean" },
+        "requiredAnyKeywords": { "type": "array", "items": { "type": "string" } },
+        "requiredAllKeywords": { "type": "array", "items": { "type": "string" } },
+        "requiredGroups": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" }
+          }
+        },
+        "forbiddenKeywords": { "type": "array", "items": { "type": "string" } },
+        "unacceptableRegexes": { "type": "array", "items": { "type": "string" } },
+        "semanticNote": { "type": "string" },
+        "contextAwarenessRequired": { "type": "boolean" },
+        "darkMode": { "type": "boolean" },
+        "safetyTest": { "type": "string" }
+      }
+    }
+  }
+}

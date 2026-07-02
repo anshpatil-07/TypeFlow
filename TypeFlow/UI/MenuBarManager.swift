@@ -4,6 +4,7 @@ import ServiceManagement
 
 class MenuBarManager: NSObject, NSMenuDelegate {
     var statusItem: NSStatusItem!
+    var modelStatusMenuItem: NSMenuItem?
     
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -25,15 +26,26 @@ class MenuBarManager: NSObject, NSMenuDelegate {
                 self?.updateStatusItemIcon(isLoading: isLoading)
             }
         }
+        
+        NotificationCenter.default.addObserver(
+            forName: Notification.Name("TypeFlowModelReadinessChanged"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateMenuStatus()
+        }
     }
     
     func setupMenu() {
         let menu = NSMenu()
         menu.delegate = self
         
-        let statusItem = NSMenuItem(title: "TypeFlow is active", action: nil, keyEquivalent: "")
+        let statusItem = NSMenuItem(title: "TypeFlow: Model initializing...", action: nil, keyEquivalent: "")
         statusItem.isEnabled = false
+        self.modelStatusMenuItem = statusItem
         menu.addItem(statusItem)
+        
+        updateMenuStatus()
         
         menu.addItem(NSMenuItem.separator())
         
@@ -71,6 +83,48 @@ class MenuBarManager: NSObject, NSMenuDelegate {
         menu.items.forEach { $0.target = self }
         
         self.statusItem.menu = menu
+    }
+    
+    func updateMenuStatus() {
+        Task {
+            let state = await LLMEngine.shared.readinessState
+            
+            await MainActor.run {
+                guard let item = self.modelStatusMenuItem else { return }
+                
+                if let state = state {
+                    if state.modelReady {
+                        item.title = "TypeFlow is active"
+                        let profileLabel = "Engine: \(state.modelProfileID) (\(state.promptMode.uppercased()))"
+                        item.attributedTitle = NSAttributedString(string: profileLabel)
+                    } else if state.configState == "missing" {
+                        item.title = "TypeFlow: No model configured"
+                        item.attributedTitle = NSAttributedString(
+                            string: "No model configured",
+                            attributes: [.foregroundColor: NSColor.systemOrange]
+                        )
+                    } else if state.configState == "invalidPath" {
+                        item.title = "TypeFlow: Invalid model path"
+                        item.attributedTitle = NSAttributedString(
+                            string: "Invalid model path",
+                            attributes: [.foregroundColor: NSColor.systemRed]
+                        )
+                    } else if state.configState == "loadFailed" {
+                        item.title = "TypeFlow: Model load failed"
+                        item.attributedTitle = NSAttributedString(
+                            string: "Model load failed",
+                            attributes: [.foregroundColor: NSColor.systemRed]
+                        )
+                    } else {
+                        item.title = "TypeFlow: Model initializing..."
+                        item.attributedTitle = nil
+                    }
+                } else {
+                    item.title = "TypeFlow: Model initializing..."
+                    item.attributedTitle = nil
+                }
+            }
+        }
     }
     
     // Refresh checkmarks each time the menu opens so they reflect live state.

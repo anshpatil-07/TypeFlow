@@ -810,6 +810,13 @@ class OverlayWindowController: NSWindowController {
         return countSubviews(in: overlayWindow.contentView)
     }
 
+    func hasVisibleGhostText() -> Bool {
+        guard Thread.isMainThread else {
+            return DispatchQueue.main.sync { hasVisibleGhostText() }
+        }
+        return !lastRenderedAutocompleteText.isEmpty && overlayWindow.isVisible
+    }
+
     private func overlayLayerCount() -> Int {
         func countLayers(in layer: CALayer?) -> Int {
             guard let layer = layer else { return 0 }
