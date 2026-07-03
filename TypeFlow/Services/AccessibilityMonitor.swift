@@ -669,12 +669,15 @@ class AccessibilityMonitor {
                     return
                 }
                 if CompletionManager.shared.isRewrite { return }
-                // Real app switch — clear buffer and completions
+                // Real app switch — clear buffer and completions, then schedule focus-triggered generation
                 print("[TypeFlow-Debug] AXObserver: focus moved to different PID (\(obj.activeFocusPID) -> \(newPID)), clearing buffer")
                 obj.activeFocusPID = newPID
                 DispatchQueue.main.async {
                     CompletionManager.shared.clearCompletion()
                     obj.clearKeystrokeBuffer()
+                    // Schedule focus-triggered generation so ghost can appear in the new app
+                    // without the user needing to type first.
+                    obj.scheduleFocusTriggeredGeneration(reason: "interAppFocusChange", pid: newPID)
                 }
             } else {
                 // Intra-app focus jitter (same PID)
@@ -698,6 +701,8 @@ class AccessibilityMonitor {
                         CompletionManager.shared.cancelInflightTasks()
                         CompletionManager.shared.hideOverlay()
                         CompletionManager.shared.clearCompletion()
+                        // Schedule focus-triggered generation after intra-app field change
+                        obj.scheduleFocusTriggeredGeneration(reason: "intraAppFocusChange", pid: newPID)
                     }
                     obj.clearKeystrokeBuffer()
                 }
@@ -728,6 +733,103 @@ class AccessibilityMonitor {
         CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         activeAppObserver = nil
         print("[TypeFlow-Debug] Stopped active app observer")
+    }
+
+    // Tracks the last context hash used for a focus-triggered generation, so we
+    // don't spam the model if focus flickers on the same field.
+    private var lastFocusTriggerContextHash: String = ""
+    private var focusTriggerWorkItem: DispatchWorkItem?
+
+    /// Schedule a low-priority generation triggered by a focus or caret change.
+    /// Fires after `delayMs` ms (default 120ms). Skipped if:
+    ///  - Model not ready / autocomplete disabled
+    ///  - Active line is empty
+    ///  - Same context hash as the last focus-triggered generation
+    ///  - A visible ghost is already showing for this text
+    ///  - Synthetic injection happened recently
+    func scheduleFocusTriggeredGeneration(reason: String, pid: pid_t, delayMs: Int = 120) {
+        // Cancel any previously scheduled focus-trigger
+        focusTriggerWorkItem?.cancel()
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+
+            // Guard: synthetic injection in flight
+            if TextInjector.shared.syntheticEventWithinLast(milliseconds: 1500.0) {
+                print("[FocusTrigger] skipped reason=syntheticInjectionRecent triggerReason=\(reason)")
+                return
+            }
+
+            // Guard: autocomplete disabled
+            guard SettingsManager.shared.enableAutocomplete else {
+                print("[FocusTrigger] skipped reason=autocompleteDisabled triggerReason=\(reason)")
+                return
+            }
+
+            // Guard: excluded app
+            if let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+               SettingsManager.shared.isAppExcluded(bundleId: bundleId) {
+                print("[FocusTrigger] skipped reason=appExcluded bundleId=\(bundleId) triggerReason=\(reason)")
+                return
+            }
+
+            // Fetch active text before caret
+            let activeLine = self.getTextBeforeCaret() ?? ""
+            let trimmed = activeLine.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Guard: no useful text
+            guard !trimmed.isEmpty else {
+                print("[FocusTrigger] skipped reason=emptyLine triggerReason=\(reason)")
+                return
+            }
+
+            // Compute a lightweight context hash (FNV-1a on last 200 chars)
+            let sample = String(activeLine.suffix(200))
+            var contextHash: UInt64 = 14_695_981_039_346_656_037
+            for byte in sample.utf8 {
+                contextHash ^= UInt64(byte)
+                contextHash &*= 1_099_511_628_211
+            }
+            let hashStr = String(format: "%016llx", contextHash)
+
+            // Guard: same context as last focus-trigger (field didn't change)
+            if hashStr == self.lastFocusTriggerContextHash {
+                print("[FocusTrigger] skipped reason=sameContextHash contextHash=\(hashStr) triggerReason=\(reason)")
+                return
+            }
+
+            // Guard: visible ghost already current for this text
+            if let ghost = CompletionManager.shared.displayedCompletion, !ghost.isEmpty {
+                let expectedLine = activeLine  // ghost is shown for this text
+                let currentLine = self.getTextBeforeCaret() ?? ""
+                if currentLine == expectedLine {
+                    print("[FocusTrigger] skipped reason=ghostAlreadyVisible triggerReason=\(reason)")
+                    return
+                }
+            }
+
+            self.lastFocusTriggerContextHash = hashStr
+            print("[FocusTrigger] scheduling generation triggerReason=\(reason) pid=\(pid) contextHash=\(hashStr) activeLineLen=\(activeLine.count)")
+
+            DispatchQueue.main.async {
+                let diag: [String: Any] = [
+                    "epochSeconds": Date().timeIntervalSince1970,
+                    "focusRefreshScheduled": true,
+                    "triggerReason": reason,
+                    "contextHash": hashStr,
+                    "activeLineLen": activeLine.count
+                ]
+                if let data = try? JSONSerialization.data(withJSONObject: diag),
+                   let str = String(data: data, encoding: .utf8) {
+                    print("[FocusTriggerDiagnostic] \(str)")
+                    fflush(stdout)
+                }
+                CompletionManager.shared.onTextChanged(bufferFallback: activeLine)
+            }
+        }
+
+        focusTriggerWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delayMs), execute: item)
     }
     
     /// Called once at launch (after 1-second delay). Retries every 2 seconds

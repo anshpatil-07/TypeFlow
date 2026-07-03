@@ -1921,8 +1921,34 @@ class CompletionManager: @unchecked Sendable {
                 diagnostic["displayedCompletionAfter"] = advanced
                 
                 if advanced.isEmpty {
-                    clearCompletion()
+                    // Ghost fully consumed by typing. Clean up ghost state.
+                    displayedCompletion = nil
+                    pendingCandidate = nil
+                    accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "ghostFullyConsumed")
+                    overlayWindowController?.updateGhostText("", isStale: false)
                     diagnostic["ghostKeptVisible"] = false
+                    diagnostic["fullRefreshSuppressed"] = false
+                    
+                    if let dictData = try? JSONSerialization.data(withJSONObject: diagnostic),
+                       let jsonStr = String(data: dictData, encoding: .utf8) {
+                        print("[PrintableInputDiagnostic] \(jsonStr)")
+                        fflush(stdout)
+                    }
+                    
+                    // Schedule a fresh generation from the new text so the user
+                    // doesn't get stuck after manually typing the full suggestion.
+                    LatencyInstrumentation.shared.onTextChanged(bufferLen: curr.count)
+                    lastBufferSnapshot = curr
+                    let debounceDelayMs = 100  // short idle after full-consumption
+                    let scheduledWorkID = workController.replaceDebouncedWork(delayMilliseconds: debounceDelayMs) { [weak self] workID in
+                        _ = self?.debounceAuditMarkFired(workID: workID)
+                        LatencyInstrumentation.shared.debounceFired(workID: workID)
+                        print("[TypeFlow-Debug] Debounce timer fired (post ghost-consumed)!")
+                        self?.triggerGeneration(with: nil, workID: workID)
+                    }
+                    debounceAuditScheduled(text: curr, textHash: debounceAuditHash(curr), workID: scheduledWorkID, delayMs: debounceDelayMs)
+                    print("[PrintableInputDiagnostic] ghostFullyConsumed — scheduled fresh generation workID=\(scheduledWorkID)")
+                    return
                 } else {
                     displayedCompletion = advanced
                     pendingCandidate = advanced
@@ -1968,10 +1994,12 @@ class CompletionManager: @unchecked Sendable {
         requestActiveGenerationAbort(reason: "new-input")
         
         if workController.isGenerationRunning {
-            print("[TypeFlow-Debug] onTextChanged: ignoring because a background generation is actively running.")
-            return
+            // Do NOT return here — the active generation was already cancelled above via
+            // requestActiveGenerationAbort. The debounce must be scheduled so the latest
+            // typed text wins. replaceGenerationWork will cancel the old Task when the
+            // debounce fires and a new generation starts.
+            print("[TypeFlow-Debug] onTextChanged: background generation running but was cancelled — scheduling debounce for new input.")
         }
-        
         if isSuppressedUntilNextTyping {
             let activeLine = bufferFallback.trimmingCharacters(in: .whitespacesAndNewlines)
             if !activeLine.isEmpty {
