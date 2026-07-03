@@ -38,5 +38,41 @@ DerivedData/
 # macOS
 .DS_Store
 
-# Local benchmark runtime artifacts
+# Local benchmark runtime artifacts and reports
 benchmark_artifacts/
+devtools/reports/
+devtools/scratch/
+
+# Generated binaries and compiled utilities
+type_text
+devtools/benchmarks/type_text
+devtools/scripts/type_text
+*.o
+*.out
+
+# Logs and outputs
+*.log
+*.err
+*.patch
+*.diff
+stats_*.txt
+audit_report*.txt
+fim_probe_out.txt
+probe_out.txt
+raw_model_results.txt
+salvage_results*.txt
+type_text_output.txt
+devtools/probes/*.txt
+
+# Python and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+venv_gguf/
+
+# Xcode and build caches
+.build_derived_data/
+.xcode-spm/
+*.dSYM/
