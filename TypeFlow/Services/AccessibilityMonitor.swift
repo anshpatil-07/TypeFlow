@@ -778,6 +778,13 @@ class AccessibilityMonitor {
             let activeLine = self.getTextBeforeCaret() ?? ""
             let trimmed = activeLine.trimmingCharacters(in: .whitespacesAndNewlines)
 
+            // Trigger background page context cache refresh on focus changes
+            Task { [weak self] in
+                guard let self = self else { return }
+                await ScreenContextManager.shared.refreshScreenContextCache(accessibilityMonitor: self)
+            }
+
+
             // Guard: no useful text
             guard !trimmed.isEmpty else {
                 print("[FocusTrigger] skipped reason=emptyLine triggerReason=\(reason)")
@@ -1340,16 +1347,42 @@ class AccessibilityMonitor {
             return
         }
 
+        let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let currentTitle = self.getActiveWindowTitle()
+
+        let contextStale = ScreenContextManager.shared.cachedContext == nil ||
+            Date().timeIntervalSince(ScreenContextManager.shared.cachedContext!.timestamp) > 30.0 ||
+            currentPID != ScreenContextManager.lastPID ||
+            currentTitle != ScreenContextManager.lastWindowTitle
+
+        if contextStale {
+            ScreenContextManager.lastPID = currentPID
+            ScreenContextManager.lastWindowTitle = currentTitle
+        }
+
         let inputTime = LatencyInstrumentation.shared.recordInputEvent(bufferLen: bufferSnapshot.count, delay: 0)
         print("[DebounceAudit] no AccessibilityMonitor debounce before CompletionManager debounce")
         if delay > 0 {
             print("[DebounceAudit] AccessibilityMonitor delay bypassed oldDelayMs=\(Int(delay * 1000))")
         }
         contextFetchWorkItem?.cancel()
-        
+
+        let needsInlineRefresh = contextStale
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             LatencyInstrumentation.shared.contextFetchStart(inputTime: inputTime, bufferLen: bufferSnapshot.count)
+
+            // No synchronous inline refresh in the typing hot path to prevent input latency.
+            // Asynchronously dispatch cache refresh in the background.
+            if needsInlineRefresh && !ScreenContextManager.testingMode {
+                Task { [weak self] in
+                    guard let self = self else { return }
+                    await ScreenContextManager.shared.refreshScreenContextCache(accessibilityMonitor: self)
+                }
+            }
+            print("[ScreenContextDiagnostic] contextRefreshInHotPath=false extractionBlockedTypingMs=0.0")
+
+
             // NOTE: Caret rect is intentionally NOT fetched here.
             // getCurrentCaretRect() is a heavy AX IPC call. Executing it on every
             // keystroke was causing "Significant Energy" warnings and AXTextMarker spam.
@@ -1359,9 +1392,9 @@ class AccessibilityMonitor {
                 LatencyInstrumentation.shared.contextFetchEnd(bufferLen: bufferSnapshot.count)
             }
         }
-        
+
         contextFetchWorkItem = workItem
-        
+
         processingQueue.async(execute: workItem)
     }
     
@@ -2233,6 +2266,266 @@ class AccessibilityMonitor {
                         return string
                     }
                 }
+            }
+        }
+        return nil
+    }
+    
+    func getAXVisibleScreenText() -> String? {
+        guard let focused = getFocusedElement() else { return nil }
+        var current: AXUIElement = focused
+        var rootElement: AXUIElement = focused
+        
+        for _ in 0..<15 {
+            var roleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(current, kAXRoleAttribute as CFString, &roleRef) == .success,
+               let role = roleRef as? String {
+                if role == "AXWebArea" || role == "AXWindow" {
+                    rootElement = current
+                    if role == "AXWebArea" {
+                        break
+                    }
+                }
+            }
+            var parentRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parentRef) == .success {
+                current = parentRef as! AXUIElement
+            } else {
+                break
+            }
+        }
+        
+        var textPieces: [String] = []
+        var queue: [AXUIElement] = [rootElement]
+        var visited = 0
+        
+        // Helper to check if two AXUIElements are the same
+        func isSameElement(_ el1: AXUIElement, _ el2: AXUIElement) -> Bool {
+            return CFEqual(el1, el2)
+        }
+        
+        while !queue.isEmpty && visited < 150 {
+            let el = queue.removeFirst()
+            visited += 1
+            
+            // Skip the focused editor element entirely to avoid self-matching
+            if isSameElement(el, focused) {
+                continue
+            }
+            
+            var roleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef) == .success,
+               let role = roleRef as? String {
+                if role == "AXStaticText" || role == "AXTextArea" || role == "AXTextField" {
+                    var valueRef: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success,
+                       let val = valueRef as? String, !val.isEmpty {
+                        textPieces.append(val)
+                    }
+                } else {
+                    if role == "AXHeading" || role == "AXLink" {
+                        var titleRef: CFTypeRef?
+                        if AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleRef) == .success,
+                           let title = titleRef as? String, !title.isEmpty {
+                            textPieces.append(title)
+                        }
+                    }
+                    var childrenRef: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+                       let children = childrenRef as? [AXUIElement] {
+                        queue.append(contentsOf: children)
+                    }
+                }
+            }
+        }
+        return textPieces.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - Browser/page context extraction (full AXWebArea BFS)
+    //
+    // Must be called OFF the keystroke hot path (on focus/idle/page-change only).
+    // Returns up to 3000 chars of page text, excluding the active input field.
+
+    struct PageContextResult {
+        let text: String
+        let source: String      // "AXWebArea" | "AXWindow" | "traversal" | "none"
+        let rawCharCount: Int
+        let extractionMs: Double
+        let activeInputExcluded: Bool
+    }
+
+    func getBrowserPageText() -> PageContextResult {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        guard let focused = getFocusedElement() else {
+            return PageContextResult(text: "", source: "none", rawCharCount: 0,
+                                    extractionMs: 0, activeInputExcluded: false)
+        }
+
+        // Walk up to AXWebArea or AXWindow
+        var current: AXUIElement = focused
+        var rootElement: AXUIElement = focused
+        var rootRole = "traversal"
+        var foundWebArea = false
+
+        for _ in 0..<20 {
+            var roleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(current, kAXRoleAttribute as CFString, &roleRef) == .success,
+               let role = roleRef as? String {
+                if role == "AXWebArea" {
+                    rootElement = current
+                    rootRole = "AXWebArea"
+                    foundWebArea = true
+                    break
+                } else if role == "AXWindow" {
+                    rootElement = current
+                    rootRole = "AXWindow"
+                }
+            }
+            var parentRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parentRef) == .success {
+                current = parentRef as! AXUIElement
+            } else {
+                break
+            }
+        }
+
+        // Roles that are layout containers / nav chrome — expand their children but don't extract text
+        let navRoles: Set<String> = [
+            "AXToolbar", "AXMenuBar", "AXMenuBarItem", "AXMenu", "AXMenuItem",
+            "AXPopUpButton", "AXDisclosureTriangle", "AXSplitter",
+            "AXScrollBar", "AXProgressIndicator", "AXValueIndicator"
+        ]
+        // Roles whose children are not useful for page context
+        let pruneRoles: Set<String> = [
+            "AXScrollArea"  // let BFS enter but don't extract titles from it
+        ]
+        // Roles that contain page content text — prioritized
+        let contentRoles: Set<String> = [
+            "AXStaticText", "AXTextArea", "AXTextField", "AXHeading"
+        ]
+
+        let charLimit = 40_000
+        let nodeLimit = 5_000
+        var pieces: [String] = []
+        var seenLines = Set<String>()  // dedup identical repeated nav/header text
+        var queue: [AXUIElement] = [rootElement]
+        var visited = 0
+        var skippedInputChars = 0
+        var skippedNavChars = 0
+
+        while !queue.isEmpty && visited < nodeLimit {
+            let el = queue.removeFirst()
+            visited += 1
+
+            // Skip the active input/editor to avoid self-matching
+            if CFEqual(el, focused) {
+                var valueRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success,
+                   let val = valueRef as? String {
+                    skippedInputChars += val.count
+                }
+                continue
+            }
+
+            var roleRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef) == .success,
+                  let role = roleRef as? String else { continue }
+
+            // Skip known nav/chrome roles — extract no text, but still expand children
+            let isNavRole = navRoles.contains(role)
+
+            // Collect text value from content text roles
+            if !isNavRole && contentRoles.contains(role) {
+                var valueRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success,
+                   let val = valueRef as? String,
+                   !val.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // Deduplicate: skip if this exact text was already seen (catches repeated nav/header)
+                    let normalized = val.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !seenLines.contains(normalized) {
+                        seenLines.insert(normalized)
+                        pieces.append(val)
+                    }
+                }
+            }
+
+            // Collect title from headings/links (not from pure nav buttons)
+            let isHeadingOrLink = role == "AXHeading" || role == "AXLink"
+            if !isNavRole && isHeadingOrLink {
+                var titleRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(el, kAXTitleAttribute as CFString, &titleRef) == .success,
+                   let title = titleRef as? String,
+                   !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !seenLines.contains(normalized) {
+                        seenLines.insert(normalized)
+                        pieces.append(title)
+                    }
+                }
+            }
+
+            // For nav roles: track skipped chars (for diagnostics) but still expand children
+            if isNavRole {
+                var valueRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(el, kAXValueAttribute as CFString, &valueRef) == .success,
+                   let val = valueRef as? String {
+                    skippedNavChars += val.count
+                }
+            }
+
+            // Expand children for all non-leaf roles
+            if role != "AXStaticText" {
+                var childrenRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+                   let children = childrenRef as? [AXUIElement] {
+                    queue.append(contentsOf: children)
+                }
+            }
+
+            let totalSoFar = pieces.reduce(0) { $0 + $1.count }
+            if totalSoFar > charLimit { break }
+        }
+
+        var raw = pieces
+            .flatMap { $0.components(separatedBy: .newlines) }
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        if raw.count > charLimit { raw = String(raw.prefix(charLimit)) }
+
+        let rawDeduped = raw.count  // already deduplicated during collection
+        let extractionMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0
+        let sourceLabel = foundWebArea ? "AXWebArea" : rootRole
+
+        print("[PageContextExtractor] source=\(sourceLabel) visitedNodes=\(visited) rawChars=\(raw.count) rawCharsDeduped=\(rawDeduped) skippedInputChars=\(skippedInputChars) skippedNavChars=\(skippedNavChars) extractionMs=\(String(format: "%.1f", extractionMs)) activeInputExcluded=true")
+
+        return PageContextResult(
+            text: raw,
+            source: sourceLabel,
+            rawCharCount: raw.count,
+            extractionMs: extractionMs,
+            activeInputExcluded: true
+        )
+    }
+
+    func getActiveWindowTitle() -> String? {
+        guard let focused = getFocusedElement() else { return nil }
+        var current: AXUIElement = focused
+        for _ in 0..<15 {
+            var roleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(current, kAXRoleAttribute as CFString, &roleRef) == .success,
+               let role = roleRef as? String, role == "AXWindow" {
+                var titleRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(current, kAXTitleAttribute as CFString, &titleRef) == .success,
+                   let title = titleRef as? String {
+                    return title
+                }
+            }
+            var parentRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parentRef) == .success {
+                current = parentRef as! AXUIElement
+            } else {
+                break
             }
         }
         return nil

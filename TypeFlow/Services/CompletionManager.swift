@@ -482,11 +482,11 @@ class CompletionManager: @unchecked Sendable {
     weak var accessibilityMonitor: AccessibilityMonitor?
     weak var overlayWindowController: OverlayWindowController?
     
+    /// Thread-safe overlay visibility indicator.
+    /// Must NOT access NSWindow.isVisible from background threads (Main Thread Checker violation).
+    /// Relies on `displayedCompletion` which is only mutated on the main thread.
     var isOverlayVisible: Bool {
-        if displayedCompletion != nil && !displayedCompletion!.isEmpty {
-            return true
-        }
-        return overlayWindowController?.overlayWindow.isVisible ?? false
+        return displayedCompletion != nil && !displayedCompletion!.isEmpty
     }
     
     private let workController = SuggestionWorkController()
@@ -1915,7 +1915,7 @@ class CompletionManager: @unchecked Sendable {
                 print("[TypeFlow-Debug] onTextChanged: ignoring text change because of recent synthetic injection")
                 return
             }
-        
+
         // ── Dynamic Typing Invalidation / Prefix Consumption ──────────────────────────────────────
         // If an overlay is active, verify if user typed text matches the active prediction.
         // If so, consume the matching prefix and keep the remaining ghost visible.
@@ -1923,27 +1923,47 @@ class CompletionManager: @unchecked Sendable {
             let prev = lastBufferSnapshot
             let curr = bufferFallback
             let expectedFull = prev + ghost
-            
+
+            // Primary match: curr is prev + some typed chars, and expectedFull starts with curr
             let typedChars = curr.count > prev.count && curr.hasPrefix(prev) ? String(curr.dropFirst(prev.count)) : ""
-            let matches = (curr == prev) || (curr.count > prev.count && curr.hasPrefix(prev) && expectedFull.lowercased().hasPrefix(curr.lowercased()))
-            
+            var matches = (curr == prev) || (curr.count > prev.count && curr.hasPrefix(prev) && expectedFull.lowercased().hasPrefix(curr.lowercased()))
+
+            // AX-lag fallback: if AX text hasn't updated yet (curr == prev but keystroke buffer
+            // has one more char that matches the ghost), treat as a match using the keystroke buffer
+            var effectiveCurr = curr
+            if !matches, curr == prev,
+               let ksBuffer = accessibilityMonitor?.keystrokeBuffer,
+               ksBuffer.count == prev.count + 1,
+               ksBuffer.hasPrefix(prev),
+               expectedFull.lowercased().hasPrefix(ksBuffer.lowercased()) {
+                // Keystroke buffer already has the new char; AX just hasn't fired yet.
+                // Consume using keystroke buffer as source of truth.
+                effectiveCurr = ksBuffer
+                matches = true
+            }
+
+            let typedCharsEffective = effectiveCurr.count > prev.count && effectiveCurr.hasPrefix(prev) ? String(effectiveCurr.dropFirst(prev.count)) : typedChars
+
             var diagnostic: [String: Any] = [
                 "epochSeconds": Date().timeIntervalSince1970,
                 "printableInputWhileGhostVisible": true,
-                "typedChars": typedChars,
+                "eventPhase": "onTextChanged",
+                "typedChars": typedCharsEffective,
                 "displayedCompletionBefore": ghost,
                 "prefixMatched": matches,
-                "consumedChars": matches ? typedChars : "",
+                "consumedChars": matches ? typedCharsEffective : "",
                 "displayedCompletionAfter": ghost,
                 "diverged": !matches,
-                "ghostKeptVisible": matches
+                "ghostKeptVisible": matches,
+                "llmRequestSuppressed": matches && !typedCharsEffective.isEmpty,
+                "debounceSuppressed": matches && !typedCharsEffective.isEmpty
             ]
-            
+
             if matches {
-                let advanced = String(expectedFull.dropFirst(curr.count))
-                lastBufferSnapshot = curr
+                let advanced = String(expectedFull.dropFirst(effectiveCurr.count))
+                lastBufferSnapshot = effectiveCurr
                 diagnostic["displayedCompletionAfter"] = advanced
-                
+
                 if advanced.isEmpty {
                     // Ghost fully consumed by typing. Clean up ghost state.
                     displayedCompletion = nil
@@ -1951,35 +1971,37 @@ class CompletionManager: @unchecked Sendable {
                     accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "ghostFullyConsumed")
                     overlayWindowController?.updateGhostText("", isStale: false)
                     diagnostic["ghostKeptVisible"] = false
+                    diagnostic["consumedToEmpty"] = true
                     diagnostic["fullRefreshSuppressed"] = false
-                    
+
                     if let dictData = try? JSONSerialization.data(withJSONObject: diagnostic),
                        let jsonStr = String(data: dictData, encoding: .utf8) {
                         print("[PrintableInputDiagnostic] \(jsonStr)")
                         fflush(stdout)
                     }
-                    
+
                     // Schedule a fresh generation from the new text so the user
                     // doesn't get stuck after manually typing the full suggestion.
-                    LatencyInstrumentation.shared.onTextChanged(bufferLen: curr.count)
-                    lastBufferSnapshot = curr
-                    let debounceDelayMs = 100  // short idle after full-consumption
+                    LatencyInstrumentation.shared.onTextChanged(bufferLen: effectiveCurr.count)
+                    lastBufferSnapshot = effectiveCurr
+                    let debounceDelayMs = 25  // short idle after full-consumption
                     let scheduledWorkID = workController.replaceDebouncedWork(delayMilliseconds: debounceDelayMs) { [weak self] workID in
                         _ = self?.debounceAuditMarkFired(workID: workID)
                         LatencyInstrumentation.shared.debounceFired(workID: workID)
                         print("[TypeFlow-Debug] Debounce timer fired (post ghost-consumed)!")
                         self?.triggerGeneration(with: nil, workID: workID)
                     }
-                    debounceAuditScheduled(text: curr, textHash: debounceAuditHash(curr), workID: scheduledWorkID, delayMs: debounceDelayMs)
+                    debounceAuditScheduled(text: effectiveCurr, textHash: debounceAuditHash(effectiveCurr), workID: scheduledWorkID, delayMs: debounceDelayMs)
                     print("[PrintableInputDiagnostic] ghostFullyConsumed — scheduled fresh generation workID=\(scheduledWorkID)")
                     return
                 } else {
                     displayedCompletion = advanced
                     pendingCandidate = advanced
-                    if !typedChars.isEmpty {
-                        overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: typedChars, remainder: advanced, source: "typedPrefix")
+                    if !typedCharsEffective.isEmpty {
+                        overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: typedCharsEffective, remainder: advanced, source: "typedPrefix")
                     }
                 }
+
                 
                 if let dictData = try? JSONSerialization.data(withJSONObject: diagnostic),
                    let jsonStr = String(data: dictData, encoding: .utf8) {
@@ -2000,10 +2022,13 @@ class CompletionManager: @unchecked Sendable {
                     fflush(stdout)
                 }
                 
+                // User diverged from ghost text — clear state immediately and hide overlay.
+                // Do NOT show stale grey ghost; fall through to the normal debounce path so a
+                // fresh generation starts quickly.
                 displayedCompletion = nil
                 pendingCandidate = nil
                 workController.cancelAll()
-                overlayWindowController?.updateGhostText(ghost, isStale: true)
+                overlayWindowController?.updateGhostText("", isStale: false)
             }
         }
         
@@ -2166,12 +2191,12 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // Adaptive debounce: if typing rapidly (<150ms between keystrokes) use 75ms,
-        // otherwise drop to 25ms so the first word gets a prediction nearly instantly.
+        // Adaptive debounce: 25ms when stable (after-space or slow typing), 50ms for rapid mid-word.
+        // 25ms is sufficient to avoid duplicate generation from keyDown/keyUp for the same text.
         let now = Date()
         let keystrokeInterval = now.timeIntervalSince(lastKeystrokeTime)
         lastKeystrokeTime = now
-        let debounceInterval: TimeInterval = keystrokeInterval < 0.15 ? 0.075 : 0.025
+        let debounceInterval: TimeInterval = keystrokeInterval < 0.12 ? 0.050 : 0.025
         // Suppressed: print("[TypeFlow-Debug] Adaptive debounce...")
         
         NotificationCenter.default.post(name: Notification.Name("UserDidType"), object: nil)
@@ -2212,7 +2237,9 @@ class CompletionManager: @unchecked Sendable {
             let historyCounts = UniversalContextManager.shared.contextHistory.count
             let snapshotCounts = 1
             let activeTaskCount = (self.workController.isGenerationRunning ? 1 : 0)
-            let subviewCount = self.overlayWindowController?.overlayWindow.contentView?.subviews.count ?? 0
+            // Do NOT access overlayWindow.contentView from a background thread — Main Thread Checker violation.
+            // overlaySubviewCount() is a main-thread method on OverlayWindowController; skip here.
+            let subviewCount = -1  // unavailable off main thread
             
             print("[MemoryDiagnostic] rssMB=\(String(format: "%.1f", currentRSS)) deltaFromWarmMB=\(String(format: "%.1f", deltaFromWarm)) requestCount=\(self.requestCount) historyCounts=\(historyCounts) snapshotCounts=\(snapshotCounts) activeTaskCount=\(activeTaskCount) overlaySubviewCount=\(subviewCount)")
             
@@ -2248,7 +2275,185 @@ class CompletionManager: @unchecked Sendable {
         }
     }
     
+    // MARK: - Page context direct continuation matcher
+    //
+    // Checks whether the user's active text is a verbatim prefix of text in the cached page.
+    // If so, returns the continuation directly from the cache — no LLM needed.
+    // Requirements:
+    //   - 12+ normalized chars of exact suffix match, OR 3+ meaningful words match
+    //   - Mid-word: if high-confidence, handles the partial-word boundary
+    //   - Returns prose: next 3–8 words capped at 90 chars / code: 120 chars
+
+    struct PageDirectCandidate {
+        let suggestion: String
+        let matchChars: Int
+        let matchWords: Int
+        let matchOffset: Int         // byte offset in page text where match was found
+        let pageDirectSuffix: String // the raw page text after match
+        let latencyMs: Double
+    }
+
+    func findPageDirectCandidate(activeLine: String, pageText: String) -> PageDirectCandidate? {
+        let t0 = CFAbsoluteTimeGetCurrent()
+        guard !activeLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !pageText.isEmpty else { return nil }
+
+        // Normalize: collapse whitespace, replace NBSP, smart quotes → ASCII
+        func normalize(_ s: String) -> String {
+            s.replacingOccurrences(of: "\u{00A0}", with: " ")
+             .replacingOccurrences(of: "\u{2018}", with: "'")
+             .replacingOccurrences(of: "\u{2019}", with: "'")
+             .replacingOccurrences(of: "\u{201C}", with: "\"")
+             .replacingOccurrences(of: "\u{201D}", with: "\"")
+             .replacingOccurrences(of: "  ", with: " ")
+        }
+
+        let normPage = normalize(pageText)
+        let normActive = normalize(activeLine)
+
+        // Extract the active line suffix (last line only, to avoid multi-paragraph false matches)
+        let activeLastLine = normActive.components(separatedBy: "\n").last ?? normActive
+        let trimmedLine = activeLastLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Safety check: require at least 2 non-whitespace characters to prevent matching single spaces/letters
+        guard trimmedLine.count >= 2 else { return nil }
+
+        // Identify alphanumeric suffix (representing current partial word typing)
+        let trimmedLineChars = Array(trimmedLine)
+        var i = trimmedLineChars.count - 1
+        let wordChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "'-"))
+        while i >= 0 {
+            let char = trimmedLineChars[i]
+            if let scalar = char.unicodeScalars.first, wordChars.contains(scalar) {
+                i -= 1
+            } else {
+                break
+            }
+        }
+        let partialWord = String(trimmedLineChars[(i + 1)...])
+
+        // Determine if we are mid-word (ends in alphanumeric char)
+        let lastChar = trimmedLine.last ?? " "
+        let isMidWord = !partialWord.isEmpty && (lastChar.isLetter || lastChar.isNumber)
+
+        var suffixesToTry: [(suffix: String, droppedText: String)] = []
+
+        if isMidWord {
+            // Try verbatim first
+            suffixesToTry.append((trimmedLine, ""))
+            // Try dropping characters from partialWord one by one
+            let partialLen = partialWord.count
+            if partialLen >= 1 {
+                for drop in 1...partialLen {
+                    let suffixLen = trimmedLine.count - drop
+                    if suffixLen >= 2 {
+                        let suffix = String(trimmedLine.prefix(suffixLen))
+                        let dropped = String(trimmedLine.suffix(drop))
+                        suffixesToTry.append((suffix, dropped))
+                    }
+                }
+            }
+        } else {
+            // After space/punctuation: try longest suffix first, down to 6 chars
+            let maxLen = min(trimmedLine.count, 80)
+            if maxLen >= 6 {
+                for len in stride(from: maxLen, through: 6, by: -4) {
+                    let suffix = String(trimmedLine.suffix(len))
+                    suffixesToTry.append((suffix, ""))
+                }
+            }
+        }
+
+        let lowerPage = normPage.lowercased()
+
+        for (suffix, droppedText) in suffixesToTry {
+            guard suffix.count >= 6 else { continue }
+            let lowerSuffix = suffix.lowercased()
+
+            // Find last occurrence of suffix in page
+            guard let matchRange = lowerPage.range(of: lowerSuffix, options: .backwards) else {
+                continue
+            }
+
+            // Calculate match quality
+            let matchChars = suffix.count
+            let matchWords = suffix.components(separatedBy: .whitespaces).filter { !$0.isEmpty }.count
+
+            // Require minimum confidence: 12+ chars OR 3+ words
+            guard matchChars >= 12 || matchWords >= 3 else { continue }
+
+            // Get the page text after the match
+            let matchEnd = normPage.index(normPage.startIndex, offsetBy: normPage.distance(from: normPage.startIndex, to: matchRange.upperBound), limitedBy: normPage.endIndex) ?? normPage.endIndex
+            let pageAfterMatch = String(normPage[matchEnd...])
+
+            var wordRemainder = ""
+            var remainingPageText = pageAfterMatch
+
+            if !droppedText.isEmpty {
+                // Get the next word in the page starting at pageAfterMatch
+                let pageWordPrefix = pageAfterMatch.prefix(while: { $0.isLetter || $0.isNumber || $0 == "'" || $0 == "-" })
+                let pageWord = String(pageWordPrefix)
+
+                // Must start with droppedText (case-insensitive)
+                guard pageWord.lowercased().hasPrefix(droppedText.lowercased()) else {
+                    continue
+                }
+
+                // Word remainder is the rest of pageWord after droppedText
+                let droppedLen = droppedText.count
+                if pageWord.count >= droppedLen {
+                    let index = pageWord.index(pageWord.startIndex, offsetBy: droppedLen)
+                    wordRemainder = String(pageWord[index...])
+                }
+                
+                remainingPageText = String(pageAfterMatch.dropFirst(pageWord.count))
+            }
+
+            guard !(wordRemainder + remainingPageText).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+
+            // Determine if the continuation is code or prose
+            let isCode = remainingPageText.contains("{") || remainingPageText.contains("(") ||
+                         remainingPageText.contains("->") || remainingPageText.contains("=>")
+            let capLen = isCode ? 120 : 90
+
+            // Combine remainder and subsequent text
+            var continuation = (wordRemainder + remainingPageText).trimmingCharacters(in: .init(charactersIn: " \t"))
+            
+            // Take next N words up to capLen
+            let words = continuation.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            var built = ""
+            for word in words.prefix(isCode ? 20 : 8) {
+                let candidate = built.isEmpty ? word : built + " " + word
+                if candidate.count > capLen { break }
+                built = candidate
+            }
+            continuation = built
+            
+            guard !continuation.isEmpty else { continue }
+
+            let suggestion = continuation
+            guard !suggestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+
+            let matchOffset = normPage.distance(from: normPage.startIndex, to: matchRange.lowerBound)
+            let latencyMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0
+
+            return PageDirectCandidate(
+                suggestion: suggestion,
+                matchChars: matchChars,
+                matchWords: matchWords,
+                matchOffset: matchOffset,
+                pageDirectSuffix: String(pageAfterMatch.prefix(200)),
+                latencyMs: latencyMs
+            )
+        }
+
+        return nil
+    }
+
     private func continueGeneration(snapshot: PredictionSnapshot) {
+
         let canonicalContext = canonicalizePredictionSnapshot(snapshot)
         syncFallbackBufferIfAuthoritative(canonicalContext, source: snapshot.source)
         let activeLine = canonicalContext.canonicalTextBeforeCaret
@@ -2293,9 +2498,48 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         activeSnippetKey = nil
-        
+
+        // ── Direct page-context continuation path ─────────────────────────────────
+        // Before scheduling the LLM, check if the user is typing verbatim text from
+        // the cached page. If so, serve the continuation directly from cache.
+        // This is instant (<20ms) and wins over the LLM path when confident.
         let fullActiveLine = canonicalContext.canonicalTextBeforeCaret
         let effectiveLiveBuffer = canonicalContext.liveBufferForPrompt
+        let pageText = ScreenContextManager.shared.cachedContext?.text ?? ""
+        let pageDirectAttempted = !pageText.isEmpty
+
+        if pageDirectAttempted {
+            let directCandidate = findPageDirectCandidate(activeLine: fullActiveLine, pageText: pageText)
+            let used = directCandidate != nil
+
+            let rejectReason = used ? "none" : "noHighConfidenceMatch"
+            print("[PageDirectCandidate] attempt=\(pageDirectAttempted) used=\(used) matchChars=\(directCandidate?.matchChars ?? 0) matchWords=\(directCandidate?.matchWords ?? 0) matchOffset=\(directCandidate?.matchOffset ?? -1) pageDirectSuffix='\(directCandidate?.pageDirectSuffix.prefix(60) ?? "")' rejectReason=\(rejectReason) latencyMs=\(String(format: "%.1f", directCandidate?.latencyMs ?? 0))")
+
+            if let dc = directCandidate {
+                let suggestion = dc.suggestion
+                let requestID = beginResultRequest(activeLine: fullActiveLine)
+                LatencyInstrumentation.shared.requestStarted(requestID: requestID, workID: workController.currentWorkID)
+                print("[Stage1B] pageContextContinuation candidateKind=pageContextContinuation requestID=\(requestID) matchChars=\(dc.matchChars) suggestion='\(suggestion.prefix(60))'")
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.pendingCandidate = suggestion
+                    self.displayedCompletion = suggestion
+                    self.lastBufferSnapshot = self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                    let caretRect = self.accessibilityMonitor?.getCurrentCaretRect()
+                    if let rect = caretRect {
+                        self.overlayWindowController?.moveOverlay(to: rect)
+                    }
+                    self.overlayWindowController?.updateText(suggestion)
+                    self.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(true, reason: "pageContextContinuation")
+                    print("[VisibleSuggestionAudit] requestID=\(requestID) decision=visibleApplied mode=pageContextContinuation activeLine='\(fullActiveLine.prefix(40))' finalSuggestion='\(suggestion)' source=pageContextContinuation promptIsolationPolicy=fullContext elapsedMs=1.0")
+                }
+                return
+            }
+
+        }
+        // ── End direct page-context path ──────────────────────────────────────────
+
+
         logContextAudit("continueGeneration resolved source=\(snapshot.source.rawValue) didAppendLiveBuffer=\(canonicalContext.didAppendLiveBuffer) appendReason='\(canonicalContext.appendReason)' textBeforeCaretLen=\(fullActiveLine.count) textBeforeCaret='\(contextAuditPreview(fullActiveLine))' effectiveLiveBufferLen=\(effectiveLiveBuffer.count) effectiveLiveBuffer='\(contextAuditPreview(effectiveLiveBuffer))' originalRawTextLen=\(snapshot.rawTextBeforeCaret.count) originalLiveBufferLen=\(keystrokeBuffer.count)")
         
         self.generationStartCaretText = fullActiveLine
@@ -2332,13 +2576,11 @@ class CompletionManager: @unchecked Sendable {
             // If this task was cancelled while waiting, abort early
             if Task.isCancelled || !self.workController.isCurrent(workID) { return }
             
-            if Task.isCancelled { return }
-            
             let completion = await LLMEngine.shared.generateCompletion(
                 textBeforeCaret: fullActiveLine,
                 liveBuffer: effectiveLiveBuffer,
                 cancellationToken: generationCancellationToken,
-                policy: .inlineActiveTextOnly,
+                policy: .fullContext,
                 onStream: { [weak self] partialText in
                     guard let self = self else { return }
                     guard !generationCancellationToken.isCancelled else {
@@ -3074,8 +3316,12 @@ class CompletionManager: @unchecked Sendable {
         overlayWindowController?.updateText("", isSpellCorrection: false, isRewrite: false, isLoading: false, isSmartReply: false, smartReplyOptions: [])
     }
 
-    func clearCompletion(hideUI: Bool = true) {
-        accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "clearCompletion")
+    func clearCompletion(hideUI: Bool = true, reason: String = "unspecified") {
+        let hadCompletion = displayedCompletion?.isEmpty == false || pendingCandidate?.isEmpty == false
+        if hadCompletion {
+            print("[GhostVisibility] cleared reason=\(reason) hadDisplayed=\(displayedCompletion?.isEmpty == false) hadPending=\(pendingCandidate?.isEmpty == false)")
+        }
+        accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "clearCompletion:\(reason)")
         pendingCandidate = nil
         displayedCompletion = nil
         activeSpellCorrection = nil

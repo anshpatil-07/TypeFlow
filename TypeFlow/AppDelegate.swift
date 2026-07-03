@@ -7,8 +7,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var overlayWindowController: OverlayWindowController?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Disable stdout and stderr buffering to ensure log lines write to disk immediately during benchmarks
+        setvbuf(stdout, nil, _IONBF, 0)
+        setvbuf(stderr, nil, _IONBF, 0)
+
         let inputIsolationMode = InputIsolationMode.current
         print("[TypeFlow-InputIsolation] launch \(inputIsolationMode.summary)")
+
 
         let isTestingMode = ProcessInfo.processInfo.arguments.contains("-runTQB") || UserDefaults.standard.bool(forKey: "runTQB") || FileManager.default.fileExists(atPath: "/tmp/typeflow_tqb_active")
         if isTestingMode {

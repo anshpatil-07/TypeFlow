@@ -74,18 +74,29 @@ class PromptBuilder {
 
     /// Builds the full prompt passed to the LLM for inline completion.
     func buildPrompt(textBeforeCaret: String, liveBuffer: String, systemInstructions: String, requestID: UInt64? = nil, workID: UInt64? = nil, policy: AutocompleteContextPolicy = .fullContext) -> String {
+        let textBeforeCaret = textBeforeCaret.replacingOccurrences(of: "\u{00A0}", with: " ")
+        let liveBuffer = liveBuffer.replacingOccurrences(of: "\u{00A0}", with: " ")
         let profile = ModelProfile.current()
         if profile.promptMode == .fim {
-            let (contextPrefix, clipboardIncluded, ocrIncluded, ctxIncluded) = buildPromptPrefix(systemInstructions: systemInstructions, policy: policy)
-            let (prefix, truncated, len, lines) = buildBoundedFIMPrefix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, policy: policy)
+            let (contextPrefix, clipboardIncluded, ocrIncluded, ctxIncluded, fimOcrSnippet) = buildPromptPrefix(textBeforeCaret: textBeforeCaret, systemInstructions: systemInstructions, policy: policy)
+            let (fimBounded, truncated, len, lines) = buildBoundedFIMPrefix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, policy: policy)
             
-            let finalPrefix = contextPrefix.isEmpty ? prefix : "\(contextPrefix)\n\n\(prefix)"
-            
-            if let workID = workID {
-                LatencyInstrumentation.shared.setPromptMetrics(requestID: requestID, workID: workID, boundedLen: len, lineCount: lines, suffixLen: 0, truncated: truncated, trailingPreserved: prefix.last?.isWhitespace ?? false, mode: "fim")
+            // Append the per-keystroke OCR snippet (if relevant) to the FIM context prefix.
+            var enrichedContextPrefix = contextPrefix
+            if !fimOcrSnippet.isEmpty {
+                let snippet = fimOcrSnippet.trimmingCharacters(in: .whitespacesAndNewlines)
+                let ocrBlock = "Nearby on screen: \(snippet)"
+                enrichedContextPrefix = enrichedContextPrefix.isEmpty ? ocrBlock : enrichedContextPrefix + "\n" + ocrBlock
             }
             
-            print("[TypeFlow-Debug] FIM Context: rawLen=\(textBeforeCaret.count) boundedLen=\(len) lines=\(lines) truncated=\(truncated) trailingSpacePreserved=\(prefix.last?.isWhitespace ?? false)")
+            let finalPrefix = enrichedContextPrefix.isEmpty ? fimBounded : "\(enrichedContextPrefix)\n\n\(fimBounded)"
+            
+            if let workID = workID {
+                LatencyInstrumentation.shared.setPromptMetrics(requestID: requestID, workID: workID, boundedLen: len, lineCount: lines, suffixLen: 0, truncated: truncated, trailingPreserved: fimBounded.last?.isWhitespace ?? false, mode: "fim")
+            }
+            
+            print("[TypeFlow-Debug] FIM Context: rawLen=\(textBeforeCaret.count) boundedLen=\(len) lines=\(lines) truncated=\(truncated) trailingSpacePreserved=\(fimBounded.last?.isWhitespace ?? false)")
+            let _ = (clipboardIncluded, ocrIncluded, ctxIncluded)  // suppress unused warnings
             
             let suffix = ""
             
@@ -139,20 +150,29 @@ class PromptBuilder {
                 \(activeLine)
                 """
             case .suffixOnlyBase:
-                let prefix = buildPromptPrefix(systemInstructions: systemInstructions, policy: .inlineActiveTextOnly).text
+                let prefix = buildPromptPrefix(textBeforeCaret: textBeforeCaret, systemInstructions: systemInstructions, policy: .inlineActiveTextOnly).text
                 let suffix = buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, policy: .inlineActiveTextOnly).text
                 return prefix + suffix
             }
         }
         
-        let prefix = buildPromptPrefix(systemInstructions: systemInstructions, policy: policy).text
+        let prefixResult = buildPromptPrefix(textBeforeCaret: textBeforeCaret, systemInstructions: systemInstructions, policy: policy)
         let suffix = buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, policy: policy).text
-        return prefix + suffix
+        // Append the per-keystroke OCR snippet immediately before the typed suffix so the LLM
+        // sees relevant on-screen context just before the active line. This is not frozen.
+        let ocrInfix: String
+        if !prefixResult.ocrSnippet.isEmpty {
+            let snippet = prefixResult.ocrSnippet.trimmingCharacters(in: .whitespacesAndNewlines)
+            ocrInfix = "Nearby on screen: \(snippet)\n\n"
+        } else {
+            ocrInfix = ""
+        }
+        return prefixResult.text + ocrInfix + suffix
     }
 
     /// Returns the frozen conditioning preface for prewarm prefill.
     func buildStaticPrefix(systemInstructions: String) -> String {
-        return buildPromptPrefix(systemInstructions: systemInstructions, policy: .fullContext).text
+        return buildPromptPrefix(textBeforeCaret: "", systemInstructions: systemInstructions, policy: .fullContext).text
     }
 
     /// Call this when the active app or screen context changes so the frozen prefix
@@ -219,51 +239,201 @@ class PromptBuilder {
     // There are NO <start_of_turn> / <end_of_turn> / instruct wrappers here. Base models
     // treat those as literal document text and will echo them, causing hallucination.
 
-    func buildPromptPrefix(systemInstructions: String, policy: AutocompleteContextPolicy = .fullContext) -> (text: String, clipboardIncluded: Bool, ocrIncluded: Bool, universalContextIncluded: Bool) {
+    func buildPromptPrefix(textBeforeCaret: String, systemInstructions: String, policy: AutocompleteContextPolicy = .fullContext) -> (text: String, clipboardIncluded: Bool, ocrIncluded: Bool, universalContextIncluded: Bool, ocrSnippet: String) {
         let british = SettingsManager.shared.useBritishEnglish
         let context = UniversalContextManager.shared.latestContext
-        let currentScreen = ScreenContextManager.shared.latestScreenText
         let recentClip = ClipboardMonitor.shared.recentItems.last ?? ""
 
-        // Stable cache key — invalidate when tone, spelling, app, screen text, or clipboard changes.
+        let activeLine = textBeforeCaret.components(separatedBy: .newlines).last ?? ""
+        let trimmedActive = activeLine.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var ocrSnippet = ""
+        var screenUsed = false
+        var screenReason = "notRelevant"
+        var screenChars = 0
+        var screenRawChars = 0
+        var screenCacheAgeMs = 0.0
+        var screenExtractionMs = 0.0
+        var screenActiveInputExcluded = true
+        var promptCharsAdded = 0
+
+        let rawScreen: String
+        let screenSource: String
+
+        if ScreenContextManager.testingMode {
+            rawScreen = ScreenContextManager.shared.latestScreenText
+            screenSource = "OCR"
+        } else if let cached = ScreenContextManager.shared.cachedContext {
+            rawScreen = cached.text
+            screenSource = cached.source
+            screenRawChars = cached.rawCharCount
+            screenExtractionMs = cached.extractionMs
+            screenCacheAgeMs = Date().timeIntervalSince(cached.timestamp) * 1000.0
+        } else {
+            rawScreen = ScreenContextManager.shared.latestScreenText
+            screenSource = "OCR"
+        }
+        let currentScreen = rawScreen.replacingOccurrences(of: "\u{00A0}", with: " ")
+        if screenRawChars == 0 { screenRawChars = currentScreen.count }
+
+        // Screen context stopwords: common words that do not prove topical relevance.
+        let screenStopWords: Set<String> = [
+            "the", "and", "is", "in", "it", "to", "of", "a", "that", "on", "for", "with",
+            "as", "by", "this", "or", "are", "be", "from", "at", "an", "was", "but", "not",
+            "you", "he", "she", "they", "we", "i", "my", "his", "her", "our", "its", "can",
+            "will", "would", "have", "has", "had", "do", "did", "been", "being", "if", "so",
+            "up", "out", "use", "get", "than", "then", "also", "just", "like", "into", "more"
+        ]
+
+        if policy != .inlineActiveTextOnly && !currentScreen.isEmpty && !trimmedActive.isEmpty {
+            let lowerActive = trimmedActive.lowercased()
+            let lowerScreen = currentScreen.lowercased()
+
+            // Define search ranges excluding the active line itself to prevent self-matching.
+            // AX traversal already excludes the focused input field, so for AX sources we
+            // search the full extracted text. For OCR, exclude the region matching the typed text.
+            var searchRanges: [Range<String.Index>] = []
+            if screenSource == "OCR", let activeLineRange = lowerScreen.range(of: lowerActive, options: .backwards) {
+                if activeLineRange.lowerBound > lowerScreen.startIndex {
+                    searchRanges.append(lowerScreen.startIndex..<activeLineRange.lowerBound)
+                }
+                if activeLineRange.upperBound < lowerScreen.endIndex {
+                    searchRanges.append(activeLineRange.upperBound..<lowerScreen.endIndex)
+                }
+            } else {
+                searchRanges.append(lowerScreen.startIndex..<lowerScreen.endIndex)
+            }
+
+            func findMatchRange(of target: String) -> Range<String.Index>? {
+                for range in searchRanges {
+                    if let mRange = lowerScreen.range(of: target, range: range) {
+                        return mRange
+                    }
+                }
+                return nil
+            }
+
+            // Extract meaningful (non-stopword) keywords from what the user is typing.
+            let activeWords = lowerActive
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count >= 3 && !screenStopWords.contains($0) }
+
+            var matchRange: Range<String.Index>? = nil
+
+            // 1. Longest suffix matching: find the longest suffix of lowerActive (up to 100 chars, down to 6 chars) that exists in lowerScreen
+            let maxSuffixLen = min(lowerActive.count, 100)
+            if maxSuffixLen >= 6 {
+                for len in stride(from: maxSuffixLen, through: 6, by: -1) {
+                    let suffix = String(lowerActive.suffix(len))
+                    if let range = findMatchRange(of: suffix) {
+                        matchRange = range
+                        screenReason = "longestSuffixMatch(len=\(len))"
+                        break
+                    }
+                }
+            }
+
+            // 2. Heuristic keyword matches when direct suffix matching yields nothing
+            if matchRange == nil {
+                // Check two-keyword phrase overlap
+                if activeWords.count >= 2 {
+                    let twoWordPhrase = activeWords.suffix(2).joined(separator: " ")
+                    if let range = findMatchRange(of: twoWordPhrase) {
+                        matchRange = range
+                        screenReason = "twoKeywordOverlap"
+                    }
+                }
+
+                // Single meaningful keyword overlap (≥4 chars to catch short technical terms)
+                if matchRange == nil, let lastMeaningfulWord = activeWords.last(where: { $0.count >= 4 }) {
+                    if let range = findMatchRange(of: lastMeaningfulWord) {
+                        matchRange = range
+                        screenReason = "singleKeywordOverlap"
+                    }
+                }
+
+                // Multi-keyword relevance (at least 2 out of N meaningful keywords)
+                if matchRange == nil && activeWords.count >= 3 {
+                    let hits = activeWords.filter { word in
+                        for range in searchRanges {
+                            if lowerScreen.range(of: word, range: range) != nil {
+                                return true
+                            }
+                        }
+                        return false
+                    }
+                    if hits.count >= 2 {
+                        if let firstHit = hits.first,
+                           let range = findMatchRange(of: firstHit) {
+                            matchRange = range
+                            screenReason = "multiKeywordRelevance(\(hits.count)of\(activeWords.count))"
+                        }
+                    }
+                }
+            }
+
+            if let range = matchRange {
+                // Build a centered snippet: up to 200 chars before the match + up to 300 chars after
+                // This gives a 200–500 char window around the relevant passage.
+                let matchStart = range.lowerBound
+                let preStart = currentScreen.index(matchStart, offsetBy: -min(200, currentScreen.distance(from: currentScreen.startIndex, to: matchStart)), limitedBy: currentScreen.startIndex) ?? currentScreen.startIndex
+                let snippetEnd = currentScreen.index(matchStart, offsetBy: 300, limitedBy: currentScreen.endIndex) ?? currentScreen.endIndex
+                ocrSnippet = String(currentScreen[preStart..<snippetEnd])
+                screenUsed = true
+                screenChars = ocrSnippet.count
+                promptCharsAdded = screenChars
+            }
+        }
+
+        var clipboardUsed = false
+        var clipSnippet = ""
+
+        if policy != .inlineActiveTextOnly && !recentClip.isEmpty && !trimmedActive.isEmpty && trimmedActive.count >= 6 {
+            let lowerActive = trimmedActive.lowercased()
+            let clipWords = lowerActive
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count >= 5 }
+            var matchRange: Range<String.Index>? = nil
+
+            if let meaningfulWord = clipWords.last, let range = recentClip.range(of: meaningfulWord, options: .caseInsensitive) {
+                matchRange = range
+            }
+
+            if let range = matchRange {
+                let start = range.lowerBound
+                let end = recentClip.index(start, offsetBy: 200, limitedBy: recentClip.endIndex) ?? recentClip.endIndex
+                clipSnippet = String(recentClip[start..<end])
+                clipboardUsed = true
+            }
+        }
+
         var historyHash = ""
         for snap in UniversalContextManager.shared.contextHistory {
             historyHash += "\(snap.appTitle)|\(snap.windowTitle ?? "nil")|"
         }
-        let screenHash = String(currentScreen.prefix(200))
-        let clipHash   = String(recentClip.prefix(100))
-        let stableKey  = "\(policy.rawValue)|\(historyHash)\(systemInstructions.hashValue)|\(british)|\(context.appBundleId)|\(screenHash)|\(clipHash)"
+        // Exclude per-keystroke screenUsed/screenChars from the stableKey so that the frozen prefix
+        // is not invalidated every keystroke. Screen snippets are per-request, not per-context-window.
+        let stableKey = "\(policy.rawValue)|\(historyHash)\(systemInstructions.hashValue)|\(british)|\(context.appBundleId)|\(clipboardUsed)"
 
-        var clipboardIncluded = false
-        var ocrIncluded = false
         var universalContextIncluded = false
-
-        // In this refactor we don't cache the boolean flags to keep it simple, but we can compute them inline for return.
-        // But since we want to return them, let's bypass cache or recompute the bools for the cache hit. 
-        // Actually, let's just always compute the bools even on cache hit, it's cheap.
 
         if policy != .inlineActiveTextOnly {
             let history = UniversalContextManager.shared.contextHistory
             if let snap = history.last, !snap.screenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 universalContextIncluded = true
             }
-            let trimmedScreen = currentScreen.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedScreen.isEmpty {
-                ocrIncluded = true
-            }
-            let trimmedClip = recentClip.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedClip.isEmpty {
-                clipboardIncluded = true
-            }
         }
+
+        // Estimate prompt token count: rough 4-char-per-token heuristic
+        let promptTokenEstimate = (screenChars + trimmedActive.count) / 4
+        print("[ScreenContextDiagnostic] screenContextAvailable=\(!currentScreen.isEmpty) screenContextUsed=\(screenUsed) screenContextChars=\(screenChars) screenContextSource=\(screenSource) screenContextReason=\(screenReason) previousContextIncluded=\(policy == .fullContext) previousContextOmittedReason=none pageContextAvailable=\(!currentScreen.isEmpty) pageContextSource=\(screenSource) pageContextCharsRaw=\(screenRawChars) pageContextCharsUsed=\(screenChars) pageContextUsed=\(screenUsed) activeInputExcluded=\(screenActiveInputExcluded) extractionMs=\(String(format: "%.1f", screenExtractionMs)) cacheAgeMs=\(String(format: "%.0f", screenCacheAgeMs)) promptCharsAdded=\(promptCharsAdded) promptTokenEstimate=\(promptTokenEstimate)")
 
         if frozenPrefixKey == stableKey && !frozenPrefix.isEmpty {
-            return (frozenPrefix, clipboardIncluded, ocrIncluded, universalContextIncluded)
+            // Return the cached prefix, but still attach the freshly computed ocrSnippet
+            // so the caller can inject it into the per-keystroke suffix.
+            return (frozenPrefix, clipboardUsed, screenUsed, universalContextIncluded, screenUsed ? ocrSnippet : "")
         }
 
-        // ── Block 1: Style / persona conditioning ─────────────────────────────
-        // "Writing style: <rules>." – base model conditions on this description;
-        // it does not obey commands, so imperative phrasing is intentionally absent.
         var prefaceLines: [String] = []
 
         let isCode = isCodeEditor(bundleId: context.appBundleId, title: context.appTitle)
@@ -272,36 +442,23 @@ class PromptBuilder {
         }
 
         if policy != .inlineActiveTextOnly {
-            // ── Block 2: Dual-window rolling history (previous window screen text) ──
             let history = UniversalContextManager.shared.contextHistory
             if let snap = history.last, !snap.screenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 var text = snap.screenText
-                if text.count > 800 { text = String(text.prefix(800)) }
+                // Cap to 300 chars to avoid OCR noise dominating the prompt.
+                if text.count > 300 { text = String(text.prefix(300)) }
                 prefaceLines.append("Nearby on screen: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
             }
 
-        // ── Block 3: Live OCR snapshot ────────────────────────────────────────
-        let trimmedScreen = currentScreen
-            .replacingOccurrences(of: "|", with: "")
-            .replacingOccurrences(of: "█", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedScreen.isEmpty {
-            var screen = trimmedScreen
-            if screen.count > 800 { screen = String(screen.prefix(800)) }
-            prefaceLines.append("Nearby on screen: \(screen)")
+            // NOTE: ocrSnippet is intentionally NOT added here.
+            // It is per-keystroke (depends on active-line keywords) and must not be frozen.
+            // The caller receives it as a separate return value and appends it to the suffix.
+
+            if clipboardUsed && !clipSnippet.isEmpty {
+                prefaceLines.append("On the clipboard: \(clipSnippet.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
         }
 
-        // ── Block 4: Clipboard context ────────────────────────────────────────
-        let trimmedClip = recentClip.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedClip.isEmpty {
-            let clipped = trimmedClip.count > 300 ? String(trimmedClip.prefix(300)) : trimmedClip
-            prefaceLines.append("On the clipboard: \(clipped)")
-        }
-        }
-
-        // ── Final preface: joined with \n, then \n\n boundary before the live prefix ──
-        // The blank-line separator isolates the conditioning context from the live text
-        // without a label the model could copy — exactly as in Cotabby's renderer.
         let built: String
         if prefaceLines.isEmpty {
             built = ""
@@ -317,7 +474,7 @@ class PromptBuilder {
         frozenPrefix = built
         frozenPrefixKey = stableKey
         print("[TypeFlow-Debug] PromptBuilder: Conditioning preface frozen (\(built.count) chars, \(prefaceLines.count) blocks).")
-        return (built, clipboardIncluded, ocrIncluded, universalContextIncluded)
+        return (built, clipboardUsed, screenUsed, universalContextIncluded, screenUsed ? ocrSnippet : "")
     }
 
     // MARK: - Suffix builder — live typing prefix (per-keystroke)

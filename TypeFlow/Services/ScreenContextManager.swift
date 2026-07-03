@@ -8,14 +8,31 @@ class ScreenContextManager {
     var latestScreenText: String = ""
     private var timer: Timer?
     
+    static var lastPID: pid_t? = nil
+    static var lastWindowTitle: String? = nil
+    
     // Evaluated at class-load time via ProcessInfo and file trigger — same pattern as TypingHistoryManager.
-    private static let testingMode: Bool = FileManager.default.fileExists(atPath: "/tmp/typeflow_tqb_active") || ProcessInfo.processInfo.arguments.contains("-runTQB")
+    static let testingMode: Bool = FileManager.default.fileExists(atPath: "/tmp/typeflow_tqb_active") || ProcessInfo.processInfo.arguments.contains("-runTQB")
     
     init() {
         if ScreenContextManager.testingMode {
             print("[TypeFlow-Debug] ScreenContextManager: TQB Test Mode - physical OCR bypassed")
         }
+        
+        // Start background timer to refresh screen context cache every 5 seconds off the typing hot path.
+        DispatchQueue.main.async {
+            self.timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                if !InputCriticalSection.shared.isActive {
+                    let monitor = CompletionManager.shared.accessibilityMonitor
+                    Task {
+                        await self.refreshScreenContextCache(accessibilityMonitor: monitor)
+                    }
+                }
+            }
+        }
     }
+
     
     func checkAndRequestPermission() {
         if !CGPreflightScreenCaptureAccess() {
@@ -37,9 +54,91 @@ class ScreenContextManager {
         }
     }
     
+    struct ScreenContextCache {
+        let text: String
+        let source: String   // "AXWebArea" | "AXWindow" | "traversal" | "OCR" | "focusedAX" | "none"
+        let timestamp: Date
+        let pageHash: Int    // hash of the extracted text to detect page changes
+        let rawCharCount: Int
+        let extractionMs: Double
+    }
+    
+    var cachedContext: ScreenContextCache?
+
+    // Dedup: avoid re-running expensive extraction when the page content hash is unchanged.
+    private var lastExtractionHash: Int = 0
+    
+    /// Refresh the page context cache using full AXWebArea traversal (primary) or OCR (fallback).
+    /// MUST be called off the keystroke hot path — only on focus change, idle, or page-change.
+    func refreshScreenContextCache(accessibilityMonitor: AccessibilityMonitor?) async {
+        guard !ScreenContextManager.testingMode else { return }
+
+        let t0 = CFAbsoluteTimeGetCurrent()
+        var text = ""
+        var source = "none"
+        var rawCharCount = 0
+        var extractionMs = 0.0
+
+        // 1. Try full AXWebArea/AXWindow BFS traversal (primary method)
+        if let monitor = accessibilityMonitor {
+            let result = monitor.getBrowserPageText()
+            if !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                text = result.text
+                source = result.source   // "AXWebArea" | "AXWindow" | "traversal"
+                rawCharCount = result.rawCharCount
+                extractionMs = result.extractionMs
+            }
+        }
+
+        // 2. If BFS yielded nothing, try the focused field's full text as context (focusedAX)
+        if text.isEmpty, let monitor = accessibilityMonitor {
+            if let fieldText = monitor.getFullFieldText(),
+               !fieldText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                text = fieldText
+                source = "focusedAX"
+                rawCharCount = text.count
+                extractionMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0
+            }
+        }
+
+        // 3. OCR fallback when AX extraction gave nothing
+        if text.isEmpty {
+            await performOCR()
+            if !latestScreenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                text = latestScreenText
+                source = "OCR"
+                rawCharCount = text.count
+                extractionMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0
+            }
+        }
+
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            print("[ScreenContextManager] refresh: no context available source=none")
+            return
+        }
+
+        // Dedup: skip cache update if page text content hash unchanged
+        let newHash = text.hashValue
+        if newHash == lastExtractionHash, let existing = cachedContext {
+            let ageMs = Date().timeIntervalSince(existing.timestamp) * 1000.0
+            print("[ScreenContextManager] refresh: unchanged hash=\(newHash) cacheAgeMs=\(String(format: "%.0f", ageMs)) — skipping update")
+            return
+        }
+
+        lastExtractionHash = newHash
+        let totalMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0
+        cachedContext = ScreenContextCache(
+            text: text,
+            source: source,
+            timestamp: Date(),
+            pageHash: newHash,
+            rawCharCount: rawCharCount,
+            extractionMs: extractionMs
+        )
+        print("[ScreenContextManager] refreshed source=\(source) rawChars=\(rawCharCount) totalMs=\(String(format: "%.1f", totalMs))")
+    }
+    
     func performOCROnDemand() async {
-        // In TQB test mode, latestScreenText is already set by the test harness.
-        // Do not call the physical capture API which requires TCC permission.
         guard !ScreenContextManager.testingMode else { return }
         await performOCR()
     }

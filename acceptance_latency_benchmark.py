@@ -218,6 +218,7 @@ body { margin: 0; background: #fff; }
         displayed_completion = None
         
         for attempt in range(2):
+            activate_safari()
             focus_and_clear()
             time.sleep(0.3)
             
@@ -244,9 +245,6 @@ body { margin: 0; background: #fff; }
                 "prefix": case["prefix"],
                 "displayedCompletion": "",
                 "acceptedText": "",
-                "insertionMethod": "none",
-                "acceptToFirstInsertedMs": 0,
-                "acceptToFullInsertedMs": 0,
                 "insertedAtomically": False,
                 "perCharacterFallback": False,
                 "pass": False,
@@ -257,7 +255,7 @@ body { margin: 0; background: #fff; }
         print(f"  Ghost visible: '{displayed_completion}'")
         
         js_get_text = "document.querySelector('#editor').innerText"
-        editor_before = json.loads(safari_eval_javascript(f"JSON.stringify({js_get_text})")).replace("\u00a0", " ").strip()
+        editor_before = safari_eval_javascript(js_get_text).replace("\u00a0", " ").strip()
         
         tab_start_time = time.time()
         osascript('tell application "System Events" to tell process "Safari" to key code 48')
@@ -268,7 +266,7 @@ body { margin: 0; background: #fff; }
         
         last_current_text = ""
         while time.time() < poll_deadline:
-            current_text = json.loads(safari_eval_javascript(f"JSON.stringify({js_get_text})")).replace("\u00a0", " ").strip()
+            current_text = safari_eval_javascript(js_get_text).replace("\u00a0", " ").strip()
             last_current_text = current_text
             if len(current_text) > len(editor_before) or current_text.endswith(displayed_completion.strip()):
                 tab_full_inserted_time = time.time()
