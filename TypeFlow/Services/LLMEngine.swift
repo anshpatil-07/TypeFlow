@@ -297,12 +297,12 @@ actor LLMEngine {
         let hardcodedInstructions = "Complete the text. Output only the next few words. No explanation."
         let temperature = Float(UserDefaults.standard.double(forKey: "globalTemperature"))
         var maxTokens = UserDefaults.standard.integer(forKey: "globalMaxLength")
-        if maxTokens == 0 { maxTokens = 20 }
+        if maxTokens == 0 { maxTokens = 40 }
         
         LatencyInstrumentation.shared.promptBuildStart(requestID: instrumentationRequestID, workID: instrumentationWorkID)
-        let fullPrompt = PromptBuilder.shared.buildPrompt(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, systemInstructions: hardcodedInstructions, requestID: instrumentationRequestID, workID: instrumentationWorkID)
+        let fullPrompt = PromptBuilder.shared.buildPrompt(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, systemInstructions: hardcodedInstructions, requestID: instrumentationRequestID, workID: instrumentationWorkID, policy: policy)
         // Extract suffixResult just for context audit log compatibility
-        let suffixResult = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer)
+        let suffixResult = PromptBuilder.shared.buildPromptSuffix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, policy: policy)
         LatencyInstrumentation.shared.promptBuildEnd(requestID: instrumentationRequestID, workID: instrumentationWorkID)
         logContextAudit("LLMEngine generate textBeforeCaretLen=\(textBeforeCaret.count) textBeforeCaret='\(contextAuditPreview(textBeforeCaret))' liveBufferLen=\(liveBuffer.count) liveBuffer='\(contextAuditPreview(liveBuffer))' suffixLen=\(suffixResult.text.count) suffix='\(contextAuditPreview(suffixResult.text))' fullPromptLen=\(fullPrompt.count) fullPromptTail='\(contextAuditPreview(fullPrompt))'")
         
@@ -310,7 +310,7 @@ actor LLMEngine {
             LatencyInstrumentation.shared.llamaGenerationStart(requestID: instrumentationRequestID, workID: instrumentationWorkID)
             let output = try await runtime.generate(
                 prompt: fullPrompt,
-                maxTokens: activeProfile.maxTokens,
+                maxTokens: maxTokens,
                 temperature: activeProfile.temperature == 0.0 ? 0.2 : activeProfile.temperature,
                 cancellationToken: cancellationToken,
                 workID: instrumentationWorkID,

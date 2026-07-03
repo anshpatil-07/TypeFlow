@@ -477,11 +477,15 @@ final class LatencyInstrumentation: @unchecked Sendable {
 class CompletionManager: @unchecked Sendable {
     static let shared = CompletionManager()
     
-    var currentCompletion: String?
+    var pendingCandidate: String?
+    var displayedCompletion: String?
     weak var accessibilityMonitor: AccessibilityMonitor?
     weak var overlayWindowController: OverlayWindowController?
     
     var isOverlayVisible: Bool {
+        if displayedCompletion != nil && !displayedCompletion!.isEmpty {
+            return true
+        }
         return overlayWindowController?.overlayWindow.isVisible ?? false
     }
     
@@ -652,6 +656,7 @@ class CompletionManager: @unchecked Sendable {
         private var repeatedLoopBlocked = false
         private var didLogSuppressedAfterVisible = false
         private var didLogCancelledAfterVisible = false
+        private var currentlyDisplayedSuggestion: String = ""
 
         func observe(partialRawOutput: String, requestID: UInt64) -> String {
             let accumulatedChars: Int
@@ -696,6 +701,44 @@ class CompletionManager: @unchecked Sendable {
             return visibleReserved
         }
 
+        func isFullyUpgraded() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            let currentWords = currentlyDisplayedSuggestion.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+            return visibleReserved && currentWords.count >= 6
+        }
+
+        func tryUpdateDisplayedSuggestion(_ newSuggestion: String) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            
+            let newWords = newSuggestion.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+            
+            // Limit suggestions to generally 2-6 words
+            guard newWords.count <= 6 else { return false }
+            
+            if !visibleReserved {
+                guard newWords.count >= 1 else { return false }
+                visibleReserved = true
+                currentlyDisplayedSuggestion = newSuggestion
+                return true
+            }
+            
+            // This is a subsequent candidate. Check if it's a valid upgrade.
+            let currentWords = currentlyDisplayedSuggestion.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+            
+            guard newWords.count > currentWords.count else { return false }
+            
+            let cleanNew = newSuggestion.lowercased().replacingOccurrences(of: " ", with: "")
+            let cleanCurrent = currentlyDisplayedSuggestion.lowercased().replacingOccurrences(of: " ", with: "")
+            if cleanNew.hasPrefix(cleanCurrent) {
+                currentlyDisplayedSuggestion = newSuggestion
+                return true
+            }
+            
+            return false
+        }
+
         func reserveVisibleApply() -> Bool {
             lock.lock()
             defer { lock.unlock() }
@@ -713,14 +756,14 @@ class CompletionManager: @unchecked Sendable {
         func latestCandidateForStabilityWindow() -> Candidate? {
             lock.lock()
             defer { lock.unlock() }
-            guard !visibleReserved, !repeatedLoopBlocked else { return nil }
+            guard !repeatedLoopBlocked else { return nil }
             return latestStableCandidate
         }
 
         func shouldScheduleStabilityWindow() -> Bool {
             lock.lock()
             defer { lock.unlock() }
-            guard !visibleReserved, !stabilityWindowScheduled else { return false }
+            guard !stabilityWindowScheduled else { return false }
             stabilityWindowScheduled = true
             return true
         }
@@ -1581,7 +1624,7 @@ class CompletionManager: @unchecked Sendable {
             return
         }
 
-        guard streamBuffer.reserveVisibleApply() else {
+        guard streamBuffer.tryUpdateDisplayedSuggestion(candidate.suggestion) else {
             streamBuffer.logSuppressedAfterVisible(requestID: requestID)
             return
         }
@@ -1647,7 +1690,7 @@ class CompletionManager: @unchecked Sendable {
         source: String,
         recordShown: Bool = false
     ) {
-        currentCompletion = text
+        pendingCandidate = text
         if !text.isEmpty {
             if recordShown {
                 UsageStatsManager.shared.recordCompletionShown()
@@ -1844,6 +1887,76 @@ class CompletionManager: @unchecked Sendable {
     
     func onTextChanged(bufferFallback: String = "") {
         if isRewrite || isSmartReply { return }
+        if TextInjector.shared.syntheticEventWithinLast(milliseconds: 1500.0) {
+            print("[TypeFlow-Debug] onTextChanged: ignoring text change because of recent synthetic injection")
+            return
+        }
+        
+        // ── Dynamic Typing Invalidation / Prefix Consumption ──────────────────────────────────────
+        // If an overlay is active, verify if user typed text matches the active prediction.
+        // If so, consume the matching prefix and keep the remaining ghost visible.
+        if let ghost = displayedCompletion, !ghost.isEmpty {
+            let prev = lastBufferSnapshot
+            let curr = bufferFallback
+            let expectedFull = prev + ghost
+            
+            let typedChars = curr.count > prev.count && curr.hasPrefix(prev) ? String(curr.dropFirst(prev.count)) : ""
+            let matches = (curr == prev) || (curr.count > prev.count && curr.hasPrefix(prev) && expectedFull.lowercased().hasPrefix(curr.lowercased()))
+            
+            var diagnostic: [String: Any] = [
+                "epochSeconds": Date().timeIntervalSince1970,
+                "printableInputWhileGhostVisible": true,
+                "typedChars": typedChars,
+                "displayedCompletionBefore": ghost,
+                "prefixMatched": matches,
+                "consumedChars": matches ? typedChars : "",
+                "displayedCompletionAfter": ghost,
+                "diverged": !matches,
+                "ghostKeptVisible": matches
+            ]
+            
+            if matches {
+                let advanced = String(expectedFull.dropFirst(curr.count))
+                lastBufferSnapshot = curr
+                diagnostic["displayedCompletionAfter"] = advanced
+                
+                if advanced.isEmpty {
+                    clearCompletion()
+                    diagnostic["ghostKeptVisible"] = false
+                } else {
+                    displayedCompletion = advanced
+                    pendingCandidate = advanced
+                    if !typedChars.isEmpty {
+                        overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: typedChars, remainder: advanced, source: "typedPrefix")
+                    }
+                }
+                
+                if let dictData = try? JSONSerialization.data(withJSONObject: diagnostic),
+                   let jsonStr = String(data: dictData, encoding: .utf8) {
+                    print("[PrintableInputDiagnostic] \(jsonStr)")
+                    fflush(stdout)
+                }
+                
+                // Keep ghost visible, abort active generation since user is typing, but do NOT schedule a new one
+                requestActiveGenerationAbort(reason: "new-input")
+                return
+            } else {
+                diagnostic["displayedCompletionAfter"] = ""
+                diagnostic["ghostKeptVisible"] = false
+                
+                if let dictData = try? JSONSerialization.data(withJSONObject: diagnostic),
+                   let jsonStr = String(data: dictData, encoding: .utf8) {
+                    print("[PrintableInputDiagnostic] \(jsonStr)")
+                    fflush(stdout)
+                }
+                
+                displayedCompletion = nil
+                pendingCandidate = nil
+                workController.cancelAll()
+                overlayWindowController?.updateGhostText(ghost, isStale: true)
+            }
+        }
+        
         LatencyInstrumentation.shared.onTextChanged(bufferLen: bufferFallback.count)
         let debounceAudit = debounceAuditTextChanged(bufferFallback)
         if debounceAudit.shouldSkip {
@@ -1853,11 +1966,6 @@ class CompletionManager: @unchecked Sendable {
         invalidateGenerationResults(reason: "text-changed", bufferSnapshot: bufferFallback)
         overlayWindowController?.dropPendingAutocompleteRenders(reason: "textChanged")
         requestActiveGenerationAbort(reason: "new-input")
-        
-        if currentCompletion != nil && !currentCompletion!.isEmpty {
-            print("[TypeFlow-Debug] onTextChanged: ignoring clear command because an active completion is present.")
-            return
-        }
         
         if workController.isGenerationRunning {
             print("[TypeFlow-Debug] onTextChanged: ignoring because a background generation is actively running.")
@@ -1872,44 +1980,6 @@ class CompletionManager: @unchecked Sendable {
             }
         }
         
-        // ── Dynamic Typing Invalidation ──────────────────────────────────────
-        // If an overlay is active, extract the newly typed character by diffing
-        // against the previous buffer snapshot. If it matches the first char of
-        // the ghost text, advance the suggestion instead of discarding it.
-        if let ghost = currentCompletion, !ghost.isEmpty, !isRewrite, !isSmartReply {
-            // Extract new characters appended since last snapshot
-            let prev = lastBufferSnapshot
-            let curr = bufferFallback
-            if curr.count == prev.count + 1 && curr.hasPrefix(prev) {
-                let newChar = String(curr.last!)
-                let ghostFirst = String(ghost.prefix(1))
-                if newChar == ghostFirst {
-                    // Match — advance the canonical ghost text and redraw the remainder.
-                    let advanced = String(ghost.dropFirst())
-                    lastBufferSnapshot = curr
-                    if advanced.isEmpty {
-                        clearCompletion()
-                    } else {
-                        currentCompletion = advanced
-                        overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: newChar, remainder: advanced, source: "typedPrefix")
-                        // Suppressed: print("[TypeFlow-Debug] DynamicInvalidation matched...")
-                    }
-                    return
-                } else {
-                    // Mismatch — mark as stale and cancel any pending debounce work,
-                    // then fall through so a new completion is generated immediately.
-                    // Suppressed: print("[TypeFlow-Debug] DynamicInvalidation mismatched...")
-                    currentCompletion = nil
-                    workController.cancelAll()
-                    overlayWindowController?.updateGhostText(ghost, isStale: true)
-                }
-            } else {
-                // Multi-char jump or deletion — mark as stale
-                currentCompletion = nil
-                workController.cancelAll()
-                overlayWindowController?.updateGhostText(ghost, isStale: true)
-            }
-        }
         lastBufferSnapshot = bufferFallback
         
         // Clear existing completion state immediately when user types, but leave UI visible
@@ -1971,7 +2041,7 @@ class CompletionManager: @unchecked Sendable {
                     // Fetch caret rect lazily on the main thread just before showing the overlay —
                     // never during the hot typing loop.
                     DispatchQueue.main.async {
-                        self.currentCompletion = ghostText
+                        self.pendingCandidate = ghostText
                         if !ghostText.isEmpty {
                             if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
                                 self.overlayWindowController?.moveOverlay(to: rect)
@@ -2028,7 +2098,7 @@ class CompletionManager: @unchecked Sendable {
                         // Fetch caret rect lazily on the main thread just before showing the overlay —
                         // never during the hot typing loop.
                         DispatchQueue.main.async {
-                            self.currentCompletion = ghostText
+                            self.pendingCandidate = ghostText
                             if !ghostText.isEmpty {
                                 if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
                                     self.overlayWindowController?.moveOverlay(to: rect)
@@ -2186,7 +2256,7 @@ class CompletionManager: @unchecked Sendable {
                 let (displayText, _) = processCursorPlaceholder(resolved)
                 
                 DispatchQueue.main.async {
-                    self.currentCompletion = value
+                    self.pendingCandidate = value
                     self.overlayWindowController?.updateText(displayText)
                 }
                 return
@@ -2249,8 +2319,7 @@ class CompletionManager: @unchecked Sendable {
                         return
                     }
                     guard self.isGenerationResultCurrent(requestID: resultRequestID, workID: workID) else { return }
-                    if atomicGhostStreamBuffer.isVisibleReserved() {
-                        atomicGhostStreamBuffer.logSuppressedAfterVisible(requestID: resultRequestID)
+                    if atomicGhostStreamBuffer.isFullyUpgraded() {
                         return
                     }
 
@@ -2304,8 +2373,7 @@ class CompletionManager: @unchecked Sendable {
                 LatencyInstrumentation.shared.cancelled(requestID: resultRequestID, workID: workID, abortedByStage1B: true)
                 return
             }
-            if atomicGhostStreamBuffer.isVisibleReserved() {
-                atomicGhostStreamBuffer.logSuppressedAfterVisible(requestID: resultRequestID)
+            if atomicGhostStreamBuffer.isFullyUpgraded() {
                 return
             }
             let finalRawOutput = atomicGhostStreamBuffer.finalRawOutput(engineOutput: completion)
@@ -2388,7 +2456,8 @@ class CompletionManager: @unchecked Sendable {
             self.activeRewritePID = self.accessibilityMonitor?.activeFocusPID
             self.activeRewriteApp = NSWorkspace.shared.frontmostApplication
             self.activeRewriteText = nil
-            self.currentCompletion = nil
+            self.pendingCandidate = nil
+            self.displayedCompletion = nil
             
             // Show the loading/mode selection overlay anchored to the selection
             DispatchQueue.main.async {
@@ -2466,7 +2535,7 @@ class CompletionManager: @unchecked Sendable {
 
             DispatchQueue.main.async {
                 if !rewritten.isEmpty {
-                    self.currentCompletion = rewritten
+                    self.pendingCandidate = rewritten
                     // Re-anchor overlay in case selection rect changed
                     if let rect = self.accessibilityMonitor?.getSelectionRect() {
                         self.overlayWindowController?.moveOverlay(to: rect)
@@ -2487,7 +2556,8 @@ class CompletionManager: @unchecked Sendable {
         activeSnippetKey = nil
         
         self.activeSmartReplyPID = self.accessibilityMonitor?.activeFocusPID
-        self.currentCompletion = nil
+        self.pendingCandidate = nil
+        self.displayedCompletion = nil
         
         DispatchQueue.main.async {
             if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
@@ -2552,9 +2622,47 @@ class CompletionManager: @unchecked Sendable {
         }
     }
     
+    struct RenderCommit {
+        let committed: Bool
+        let displayedText: String
+        let overlayVisible: Bool
+        let requestID: UInt64?
+    }
+    
+    func notifyRenderCommit(_ commit: RenderCommit) {
+        guard commit.committed, commit.overlayVisible else {
+            print("[InvisibleGhostGuard] renderCommitFailed reason=not-committed-or-invisible text='\(commit.displayedText)'")
+            return
+        }
+        
+        let isStandardCompletion = !isRewrite && activeSpellCorrection == nil && activeSnippetKey == nil
+        
+        if commit.displayedText == pendingCandidate {
+            displayedCompletion = commit.displayedText
+            lastBufferSnapshot = accessibilityMonitor?.keystrokeBuffer ?? ""
+            accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(true, reason: "render-commit")
+        } else if !isStandardCompletion {
+            displayedCompletion = commit.displayedText
+            lastBufferSnapshot = accessibilityMonitor?.keystrokeBuffer ?? ""
+            accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(true, reason: "render-commit-special")
+        } else {
+             print("[InvisibleGhostGuard] renderCommitFailed reason=text-mismatch pending='\(pendingCandidate ?? "")' rendered='\(commit.displayedText)'")
+        }
+    }
+    
     func handleTabPressed() -> Bool {
+        let isVisible = overlayWindowController?.overlayWindow.isVisible ?? false
+        let hasDisplayedCompletion = displayedCompletion != nil && !displayedCompletion!.isEmpty
+        
+        if hasDisplayedCompletion && !isVisible {
+            print("[InvisibleGhostGuard] tabRejected reason=overlayHiddenWhileDisplayedCompletionExists text='\(displayedCompletion!)'")
+            displayedCompletion = nil
+            accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "invisible-guard-tab")
+            return false
+        }
+        
         if isRewrite {
-            if let completion = currentCompletion, !completion.isEmpty {
+            if let completion = displayedCompletion, !completion.isEmpty {
                 print("[TypeFlow-Debug] Accepting rewrite: replacing selection with '\(completion)'")
                 
                 let targetApp = activeRewriteApp
@@ -2601,7 +2709,7 @@ class CompletionManager: @unchecked Sendable {
             return true
         }
         
-        if let snippetKey = activeSnippetKey, let rawCompletion = currentCompletion {
+        if let snippetKey = activeSnippetKey, let rawCompletion = displayedCompletion {
             let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
             let resolved = resolveSnippetPlaceholders(rawCompletion)
             let (finalText, cursorOffset) = processCursorPlaceholder(resolved)
@@ -2620,60 +2728,144 @@ class CompletionManager: @unchecked Sendable {
             return true
         }
         
-        if let completion = currentCompletion, !completion.isEmpty {
+        if let completion = displayedCompletion, !completion.isEmpty {
+            let startTime = CFAbsoluteTimeGetCurrent()
             let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+            let activeElement = getFreshFocusedElement()
             
-            // ── Word-by-Word Tab Acceptance ────────────────────────────────────
-            // Break at spaces, punctuation AND newlines. If the completion *starts*
-            // with \n, accept only the newline so the user steps through line by line.
-            let wordBreakChars: Set<Character> = [" ", ".", "_", "(", ")", ":", "/", ",", ";", "{", "}", "\n"]
+            // Extract the next word/chunk
+            let (acceptedChunk, remainder) = CompletionManager.getNextChunk(from: completion)
+            guard !acceptedChunk.isEmpty else { return false }
             
-            let wordToInsert: String
-            let remainder: String
+            // Clear completion state immediately so UI/ghost clears or resets
+            clearCompletion(hideUI: remainder.isEmpty)
             
-            if completion.hasPrefix("\n") {
-                // Leading newline — accept just the newline, keep the rest
-                wordToInsert = "\n"
-                let after = String(completion.dropFirst())
-                remainder = after
-            } else {
-                var breakIndex = completion.endIndex
-                var foundBreak = false
-                for (idx, ch) in completion.enumerated() {
-                    if idx > 0 && wordBreakChars.contains(ch) {
-                        breakIndex = completion.index(completion.startIndex, offsetBy: idx)
-                        foundBreak = true
+            // Inject the accepted chunk atomically
+            UsageStatsManager.shared.recordCompletionAccepted(charactersSaved: acceptedChunk.count)
+            
+            var resultDict = TextInjector.shared.injectAcceptance(
+                text: acceptedChunk,
+                activeElement: activeElement,
+                startTime: startTime
+            )
+            
+            // Retrieve updated text before caret for safety verification
+            var updatedLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+            var expectedLineAfter = activeLine + acceptedChunk
+            var insertedAtCaretVerified = (updatedLine == expectedLineAfter)
+            
+            if !insertedAtCaretVerified {
+                print("[TypeFlow-Debug] Direct AX injection failed verification. Falling back to keyboard eventTap simulation.")
+                resultDict = TextInjector.shared.injectAcceptance(
+                    text: acceptedChunk,
+                    activeElement: activeElement,
+                    startTime: startTime,
+                    forceKeyboardFallback: true
+                )
+                
+                // Poll every 10ms for up to 250ms (25 iterations) while pumping the runloop to let async tasks execute
+                for _ in 0..<25 {
+                    RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+                    updatedLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+                    expectedLineAfter = activeLine + acceptedChunk
+                    insertedAtCaretVerified = (updatedLine == expectedLineAfter)
+                    if insertedAtCaretVerified {
                         break
                     }
                 }
-                wordToInsert = String(completion[..<breakIndex])
-                remainder = foundBreak ? String(completion[breakIndex...]) : ""
             }
             
-            TypingHistoryManager.shared.logSentence(activeLine + completion)
-            
-            // Inject the first segment only asynchronously so we don't block the CGEventTap
-            // CRITICAL: Use injectCharByChar (direct Unicode synthetic keystroke) NOT inject() here.
-            UsageStatsManager.shared.recordCompletionAccepted(charactersSaved: completion.count)
-            DispatchQueue.global().async {
-                TextInjector.shared.injectCharByChar(text: wordToInsert)
-            }
-            
+            // Restore remaining ghost text if any
             if !remainder.isEmpty {
-                currentCompletion = remainder
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self else { return }
-                    self.overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: wordToInsert, remainder: remainder, source: "tabAccept")
-                }
-                print("[TypeFlow-Debug] Word-by-word Tab: injected '\(wordToInsert)', remainder '\(remainder)' still shown")
-            } else {
-                print("[OverlayRender] tabAccept recomputeRemainderFromScratch inserted='\(wordToInsert)' remainder=''")
-                print("[OverlayRender] hideBecauseEmptyRemainder")
-                clearCompletion()
+                displayedCompletion = remainder
+                pendingCandidate = remainder
+                accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(true, reason: "tabAcceptRemainder")
+                overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: acceptedChunk, remainder: remainder, source: "tabAccept")
             }
+            
+            let unrelatedTextChanged = !updatedLine.hasPrefix(activeLine)
+            
+            // Merge final diagnostics and print to log
+            var diagnostic: [String: Any] = [
+                "epochSeconds": Date().timeIntervalSince1970,
+                "tabAcceptMode": "wordChunk",
+                "displayedCompletionBefore": completion,
+                "acceptedChunk": acceptedChunk,
+                "displayedCompletionAfter": remainder,
+                "insertionMethod": resultDict["insertionMethod"] ?? "unknown",
+                "acceptToFullInsertedMs": resultDict["acceptToFullInsertedMs"] ?? 0.0,
+                "insertedAtCaretVerified": insertedAtCaretVerified,
+                "insertedAtomically": resultDict["insertedAtomically"] ?? false,
+                "perCharacterFallback": resultDict["perCharacterFallback"] ?? false,
+                "lineBefore": activeLine,
+                "lineAfter": updatedLine,
+                "unrelatedTextChanged": unrelatedTextChanged,
+                "acceptSuccess": resultDict["acceptSuccess"] ?? false,
+                "failReason": resultDict["failReason"] ?? "none"
+            ]
+            
+            if let dictData = try? JSONSerialization.data(withJSONObject: diagnostic),
+               let jsonStr = String(data: dictData, encoding: .utf8) {
+                print("[AcceptDiagnostic] \(jsonStr)")
+                fflush(stdout)
+            }
+            
             return true // We handled it
         }
         return false // Let the event pass through
+    }
+    
+    static func getNextChunk(from completion: String) -> (chunk: String, remainder: String) {
+        if completion.isEmpty {
+            return ("", "")
+        }
+        
+        let chars = Array(completion)
+        var idx = 0
+        
+        // 1. Consume any leading whitespace
+        while idx < chars.count && chars[idx].isWhitespace {
+            idx += 1
+        }
+        
+        // 2. Consume word characters or punctuation
+        if idx < chars.count {
+            let isPunct = chars[idx].isPunctuation
+            if isPunct {
+                // If starting with punctuation, consume all consecutive punctuation
+                while idx < chars.count && chars[idx].isPunctuation {
+                    idx += 1
+                }
+            } else {
+                // Consume normal word characters (alphanumeric) plus any attached punctuation at the end (like comma, period)
+                while idx < chars.count && !chars[idx].isWhitespace && !chars[idx].isPunctuation {
+                    idx += 1
+                }
+                // Consume trailing punctuation attached to the word (e.g., "word," or "word.") but not bracket/parenthesis boundaries
+                while idx < chars.count && chars[idx].isPunctuation && chars[idx] != "(" && chars[idx] != "{" && chars[idx] != "[" {
+                    idx += 1
+                }
+            }
+        }
+        
+        // 3. Consume one trailing space if present
+        if idx < chars.count && chars[idx] == " " {
+            idx += 1
+        }
+        
+        let chunk = String(chars[..<idx])
+        let remainder = String(chars[idx...])
+        return (chunk, remainder)
+    }
+    
+    private func getFreshFocusedElement() -> AXUIElement? {
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedRef: AnyObject?
+        let err = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef)
+        if err == .success, let element = focusedRef {
+            return (element as! AXUIElement)
+        }
+        return nil
     }
     
     func cancelInflightTasks() {
@@ -2689,7 +2881,8 @@ class CompletionManager: @unchecked Sendable {
 
     func clearCompletion(hideUI: Bool = true) {
         accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "clearCompletion")
-        currentCompletion = nil
+        pendingCandidate = nil
+        displayedCompletion = nil
         activeSpellCorrection = nil
         activeSnippetKey = nil
         activeRewriteText = nil

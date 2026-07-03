@@ -75,10 +75,11 @@ class PromptBuilder {
     /// Builds the full prompt passed to the LLM for inline completion.
     func buildPrompt(textBeforeCaret: String, liveBuffer: String, systemInstructions: String, requestID: UInt64? = nil, workID: UInt64? = nil, policy: AutocompleteContextPolicy = .fullContext) -> String {
         let profile = ModelProfile.current()
-        
         if profile.promptMode == .fim {
-            // FIM production path: Bounded context, NO OCR, NO clipboard.
-            let (prefix, truncated, len, lines) = buildBoundedFIMPrefix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer)
+            let (contextPrefix, clipboardIncluded, ocrIncluded, ctxIncluded) = buildPromptPrefix(systemInstructions: systemInstructions, policy: policy)
+            let (prefix, truncated, len, lines) = buildBoundedFIMPrefix(textBeforeCaret: textBeforeCaret, liveBuffer: liveBuffer, policy: policy)
+            
+            let finalPrefix = contextPrefix.isEmpty ? prefix : "\(contextPrefix)\n\n\(prefix)"
             
             if let workID = workID {
                 LatencyInstrumentation.shared.setPromptMetrics(requestID: requestID, workID: workID, boundedLen: len, lineCount: lines, suffixLen: 0, truncated: truncated, trailingPreserved: prefix.last?.isWhitespace ?? false, mode: "fim")
@@ -86,11 +87,9 @@ class PromptBuilder {
             
             print("[TypeFlow-Debug] FIM Context: rawLen=\(textBeforeCaret.count) boundedLen=\(len) lines=\(lines) truncated=\(truncated) trailingSpacePreserved=\(prefix.last?.isWhitespace ?? false)")
             
-            // FIM suffix: text after caret (currently not passed to buildPrompt, but we could pass it if available)
-            // For now, suffix is empty, as we only have textBeforeCaret and liveBuffer.
             let suffix = ""
             
-            return "\(profile.fimPrefix ?? "")\(prefix)\(profile.fimSuffix ?? "")\(suffix)\(profile.fimMiddle ?? "")"
+            return "\(profile.fimPrefix ?? "")\(finalPrefix)\(profile.fimSuffix ?? "")\(suffix)\(profile.fimMiddle ?? "")"
         }
         
         let lines = textBeforeCaret.components(separatedBy: .newlines)
@@ -166,7 +165,7 @@ class PromptBuilder {
     
     // MARK: - FIM Context Builder
     
-    private func buildBoundedFIMPrefix(textBeforeCaret: String, liveBuffer: String) -> (String, Bool, Int, Int) {
+    private func buildBoundedFIMPrefix(textBeforeCaret: String, liveBuffer: String, policy: AutocompleteContextPolicy) -> (String, Bool, Int, Int) {
         var mergedText = textBeforeCaret
         if !liveBuffer.isEmpty {
             let components = mergedText.components(separatedBy: "\t")
@@ -187,6 +186,8 @@ class PromptBuilder {
         var currentLen = activeLine.count
         var truncated = false
         
+        if policy != .inlineActiveTextOnly {
+        
         // Iterate backwards from the second-to-last line
         for i in stride(from: allLines.count - 2, through: 0, by: -1) {
             let line = allLines[i]
@@ -201,6 +202,7 @@ class PromptBuilder {
             }
             prefixLines.insert(line, at: 0)
             currentLen += line.count + 1
+        }
         }
         
         // Exact reconstruction with newlines to preserve trailing whitespace and formatting
@@ -279,7 +281,10 @@ class PromptBuilder {
             }
 
         // ── Block 3: Live OCR snapshot ────────────────────────────────────────
-        let trimmedScreen = currentScreen.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedScreen = currentScreen
+            .replacingOccurrences(of: "|", with: "")
+            .replacingOccurrences(of: "█", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedScreen.isEmpty {
             var screen = trimmedScreen
             if screen.count > 800 { screen = String(screen.prefix(800)) }
@@ -299,11 +304,14 @@ class PromptBuilder {
         // without a label the model could copy — exactly as in Cotabby's renderer.
         let built: String
         if prefaceLines.isEmpty {
-            // No context: the suffix will be handed to the model bare. We still emit an
-            // empty string so the suffix is appended directly (no leading separator).
             built = ""
         } else {
-            built = prefaceLines.joined(separator: "\n") + "\n\n"
+            let joined = prefaceLines.joined(separator: "\n")
+            if isCode {
+                built = "/* System Context:\n\(joined)\n*/\n\n"
+            } else {
+                built = "――― System Context ―――\n\(joined)\n――――――――――――――――――――――\n\n"
+            }
         }
 
         frozenPrefix = built

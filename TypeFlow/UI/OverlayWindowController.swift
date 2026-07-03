@@ -188,7 +188,7 @@ class OverlayWindow: NSPanel {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let keyCode = event.keyCode
         if keyCode == 48 { // Tab
-            if CompletionManager.shared.activeRewriteText != nil && CompletionManager.shared.currentCompletion != nil {
+            if CompletionManager.shared.activeRewriteText != nil && CompletionManager.shared.displayedCompletion != nil {
                 print("[TypeFlow-Debug] OverlayWindow performKeyEquivalent: Intercepted Tab during rewrite")
                 DispatchQueue.main.async {
                     _ = CompletionManager.shared.handleTabPressed()
@@ -493,7 +493,9 @@ struct GhostSuggestionLayout: Equatable {
 
     func panelFrame(for contentSize: CGSize, caretRect: CGRect) -> CGRect {
         let topLineCenterY = caretRect.midY + topLineCenterOffsetFromCaret
-        let originY = topLineCenterY - contentSize.height + (lineHeight / 2)
+        
+        // Offset Y slightly UP (positive in AppKit) to counteract font baseline descent differences
+        let originY = ceil(topLineCenterY - contentSize.height + (lineHeight / 2)) + 1.5
         let originX = isRightToLeft ? panelOriginX - contentSize.width : panelOriginX
 
         return CGRect(
@@ -660,96 +662,129 @@ struct GhostSuggestionLayout: Equatable {
         ]).width
     }
 }
-
-struct GhostSuggestionView: View {
-    @Environment(\.colorScheme) var colorScheme
+class GhostSuggestionAppKitView: NSView {
     let layout: GhostSuggestionLayout
     let fontSize: CGFloat
     let fieldFont: NSFont?
-    let fieldColor: Color?
-    let customColor: Color?
+    let fieldColor: NSColor?
+    let customColor: NSColor?
     let keycapLabel: String?
     let opacity: Double
     let isCorrection: Bool
+    
+    private var isDarkMode: Bool {
+        if #available(macOS 10.14, *) {
+            return effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        }
+        return false
+    }
 
-    var ghostColor: Color {
+    var ghostColor: NSColor {
         if isCorrection {
-            return (colorScheme == .dark
-                ? Color(red: 0.45, green: 0.85, blue: 0.45)
-                : Color(red: 0.15, green: 0.60, blue: 0.20)).opacity(opacity)
+            return (isDarkMode
+                ? NSColor(red: 0.45, green: 0.85, blue: 0.45, alpha: 1.0)
+                : NSColor(red: 0.15, green: 0.60, blue: 0.20, alpha: 1.0)).withAlphaComponent(opacity)
         }
         let baseColor = customColor
             ?? fieldColor
-            ?? Color.secondary
-        return baseColor.opacity(opacity)
+            ?? NSColor.secondaryLabelColor
+        return baseColor.withAlphaComponent(opacity)
     }
 
-    private var resolvedFont: Font {
+    private var resolvedFont: NSFont {
         if let fieldFont {
-            return Font(fieldFont as CTFont)
+            return fieldFont
         }
-        return .system(size: fontSize)
+        return NSFont.systemFont(ofSize: fontSize)
     }
 
-    var body: some View {
-        let alignment: HorizontalAlignment = layout.isRightToLeft ? .trailing : .leading
-        VStack(alignment: alignment, spacing: 0) {
-            ForEach(layout.lines) { line in
-                let showsKeycap = line.showsKeycap && keycapLabel != nil
-                HStack(alignment: .firstTextBaseline, spacing: showsKeycap ? 6 : 0) {
-                    if layout.isRightToLeft, showsKeycap, let keycapLabel {
-                        GhostKeycap(label: keycapLabel)
-                    }
+    private var contentSize: CGSize = .zero
 
-                    Text(line.text)
-                        .font(resolvedFont)
-                        .foregroundStyle(ghostColor)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: true)
-
-                    if !layout.isRightToLeft, showsKeycap, let keycapLabel {
-                        GhostKeycap(label: keycapLabel)
-                    }
-                }
-                .padding(layout.isRightToLeft ? .trailing : .leading, line.leadingIndent)
-                .fixedSize(horizontal: true, vertical: true)
+    init(layout: GhostSuggestionLayout,
+         fontSize: CGFloat,
+         fieldFont: NSFont?,
+         fieldColor: NSColor?,
+         customColor: NSColor?,
+         keycapLabel: String?,
+         opacity: Double,
+         isCorrection: Bool) {
+        
+        self.layout = layout
+        self.fontSize = fontSize
+        self.fieldFont = fieldFont
+        self.fieldColor = fieldColor
+        self.customColor = customColor
+        self.keycapLabel = keycapLabel
+        self.opacity = opacity
+        self.isCorrection = isCorrection
+        
+        super.init(frame: .zero)
+        
+        setupViews()
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    private func setupViews() {
+        wantsLayer = true
+        
+        // Compute total width and height
+        var totalHeight: CGFloat = 0
+        var totalWidth: CGFloat = 0
+        
+        // In SwiftUI it was a VStack, so each line goes below the previous.
+        // We layout from top to bottom. (AppKit coordinates are bottom-left origin by default, but we can flip it)
+        
+        // It's easier to just calculate frames manually
+        let font = resolvedFont
+        let color = ghostColor
+        
+        var currentY: CGFloat = 0
+        
+        for line in layout.lines.reversed() { // AppKit draws from bottom up
+            let label = NSTextField(labelWithString: line.text)
+            label.font = font
+            label.textColor = color
+            label.isBordered = false
+            label.isEditable = false
+            label.isSelectable = false
+            label.drawsBackground = false
+            label.lineBreakMode = .byClipping
+            label.maximumNumberOfLines = 1
+            
+            label.sizeToFit()
+            
+            // NSTextField sizeToFit sometimes underestimates by a fraction, causing clipping
+            let lineWidth = ceil(label.frame.width) + 4.0
+            let padding = line.leadingIndent
+            
+            let xOffset: CGFloat
+            if layout.isRightToLeft {
+                // trailing padding
+                xOffset = 0 // simplify: just draw text.
+            } else {
+                xOffset = padding
             }
+            
+            label.frame = CGRect(x: xOffset, y: currentY, width: lineWidth, height: ceil(layout.lineHeight))
+            
+            addSubview(label)
+            
+            currentY += ceil(layout.lineHeight)
+            totalWidth = max(totalWidth, xOffset + lineWidth)
         }
-        .fixedSize(horizontal: true, vertical: true)
+        totalHeight = currentY
+        
+        // Add minimal padding to total width to avoid window-level border clipping
+        contentSize = CGSize(width: ceil(totalWidth) + 4.0, height: ceil(totalHeight))
+        self.frame = CGRect(origin: .zero, size: contentSize)
     }
-}
-
-private struct GhostKeycap: View {
-    @Environment(\.colorScheme) var colorScheme
-    let label: String
-
-    var textColor: Color {
-        colorScheme == .dark ? Color(white: 0.65) : Color(white: 0.45)
-    }
-
-    var bgColor: Color {
-        colorScheme == .dark ? Color(white: 0.18) : Color(white: 0.95)
-    }
-
-    var borderColor: Color {
-        colorScheme == .dark ? Color(white: 0.3) : Color(white: 0.8)
-    }
-
-    var body: some View {
-        Text(label)
-            .font(.system(size: 10, weight: .medium, design: .rounded))
-            .foregroundStyle(textColor)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 2)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(bgColor)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(borderColor, lineWidth: 1)
-            )
-            .fixedSize(horizontal: true, vertical: true)
+    
+    // For fitting size
+    override var fittingSize: CGSize {
+        return contentSize
     }
 }
 
@@ -782,7 +817,7 @@ class OverlayWindowController: NSWindowController {
     private var lastCaretRect = CGRect.zero
     private var localEventMonitor: Any?
 
-    private var inlineHostingView: NSHostingView<GhostSuggestionView>?
+    private var inlineAppKitView: GhostSuggestionAppKitView?
     private var completionOverlayHostingView: NSHostingView<CompletionOverlayView>?
     
     private var ghostFontStabilizer = GhostFontSizeStabilizer()
@@ -817,24 +852,16 @@ class OverlayWindowController: NSWindowController {
         return !lastRenderedAutocompleteText.isEmpty && overlayWindow.isVisible
     }
 
-    private func overlayLayerCount() -> Int {
-        func countLayers(in layer: CALayer?) -> Int {
-            guard let layer = layer else { return 0 }
-            let sublayers = layer.sublayers ?? []
-            return sublayers.count + sublayers.reduce(0) { $0 + countLayers(in: $1) }
-        }
-        return countLayers(in: overlayWindow.contentView?.layer)
-    }
+
 
     private func clearAllRenderedGhostText(resetGeometry: Bool = false, clearPendingMutations: Bool = false) {
-        let oldLayerCount = overlayLayerCount()
         let oldSubviewCount = overlaySubviewCount()
-        print("[OverlayRender] clearAllRenderedGhostText oldLayerCount=\(oldLayerCount) oldSubviewCount=\(oldSubviewCount)")
+        print("[OverlayRender] clearAllRenderedGhostText oldSubviewCount=\(oldSubviewCount)")
+        fflush(stdout)
 
-        overlayWindow.contentView?.layer?.sublayers?.forEach { $0.removeFromSuperlayer() }
         overlayWindow.contentView?.subviews.forEach { $0.removeFromSuperview() }
         overlayWindow.contentView = nil
-        inlineHostingView = nil
+        inlineAppKitView = nil
         completionOverlayHostingView = nil
 
         if resetGeometry {
@@ -859,7 +886,8 @@ class OverlayWindowController: NSWindowController {
     }
 
     private func logRenderReplace(text: String) {
-        print("[OverlayRender] renderReplace text='\(text)' layerCountAfter=\(overlayLayerCount()) subviewCountAfter=\(overlaySubviewCount())")
+        print("[OverlayRender] renderReplace text='\(text)' subviewCountAfter=\(overlaySubviewCount())")
+        fflush(stdout)
     }
 
     func dropPendingAutocompleteRenders(reason: String) {
@@ -962,7 +990,7 @@ class OverlayWindowController: NSWindowController {
     }
 
     private func deferMoveOverlayIfNeeded(to rect: CGRect) -> Bool {
-        guard InputCriticalSection.shared.isActive else { return false }
+        return false
         pendingMoveOverlayRect = rect
         print("[InputCriticalSection] overlay update blocked/deferred because physical key is down action=moveOverlay")
         print("[RenderSchedule] blockedByInputCriticalSection requestID=nil depth=\(InputCriticalSection.shared.activeDepth) reason=moveOverlay")
@@ -971,7 +999,7 @@ class OverlayWindowController: NSWindowController {
     }
 
     private func deferShiftOverlayIfNeeded(by points: CGFloat) -> Bool {
-        guard InputCriticalSection.shared.isActive else { return false }
+        return false
         pendingShiftOverlayX += points
         print("[InputCriticalSection] overlay update blocked/deferred because physical key is down action=shiftOverlayX points=\(String(format: "%.2f", points))")
         print("[RenderSchedule] blockedByInputCriticalSection requestID=nil depth=\(InputCriticalSection.shared.activeDepth) reason=shiftOverlayX")
@@ -980,7 +1008,7 @@ class OverlayWindowController: NSWindowController {
     }
 
     private func deferOverlayMutationIfNeeded(_ mutation: PendingOverlayMutation, action: String) -> Bool {
-        guard InputCriticalSection.shared.isActive else { return false }
+        return false
         if case .updateAutocompleteText(let text, let requestID) = mutation, text.isEmpty {
             print("[RenderSchedule] pendingRenderDropped reason=emptyCompletion requestID=\(requestID)")
             LatencyInstrumentation.shared.renderExcluded(requestID: requestID, reason: "emptyCompletion")
@@ -1025,12 +1053,7 @@ class OverlayWindowController: NSWindowController {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
-            if InputCriticalSection.shared.isActive {
-                self.isDeferredOverlayFlushScheduled = false
-                self.scheduleDeferredOverlayFlush()
-                return
-            }
-
+            // InputCriticalSection deferral bypassed for overlay flushes
             let moveRect = self.pendingMoveOverlayRect
             let mutation = self.pendingOverlayMutation
             let shiftX = mutation == nil ? self.pendingShiftOverlayX : 0
@@ -1056,6 +1079,7 @@ class OverlayWindowController: NSWindowController {
                     return
                 }
                 print("[RenderSchedule] visibleApplyAfterFlush requestID=\(requestID) waitMs=\(waitMs.map { String(format: "%.1f", $0) } ?? "nil")")
+                CompletionManager.shared.notifyRenderCommit(CompletionManager.RenderCommit(committed: true, displayedText: "", overlayVisible: true, requestID: requestID))
             }
 
             if let moveRect {
@@ -1286,14 +1310,8 @@ class OverlayWindowController: NSWindowController {
         }
 
         if InputCriticalSection.shared.isActive {
-            pendingAutocompleteRender = PendingAutocompleteRender(
-                requestID: pending.requestID,
-                text: pending.text,
-                requestedAt: pending.requestedAt,
-                mainStartedAt: pending.mainStartedAt ?? CFAbsoluteTimeGetCurrent()
-            )
-            print("[RenderSchedule] blockedByInputCriticalSection requestID=\(pending.requestID) depth=\(InputCriticalSection.shared.activeDepth) reason=autocompleteFlush")
-            scheduleDeferredOverlayFlush()
+            // InputCriticalSection bypass for standard autocomplete flush
+            applyAutocompleteRender(text: pending.text, requestID: pending.requestID, requestedAt: pending.requestedAt)
             return
         }
 
@@ -1320,9 +1338,10 @@ class OverlayWindowController: NSWindowController {
         if lastRenderedAutocompleteRequestID == requestID && lastRenderedAutocompleteText == text {
             print("[RenderPipeline] render applied requestID=\(requestID) textLen=\(text.count) durationMs=0.0")
             print("[RenderPipeline] reused existing text layer=true")
-            print("[RenderPipeline] layerCountBefore=\(overlayLayerCount()) layerCountAfter=\(overlayLayerCount())")
+            print("[RenderPipeline] subviewCountBefore=\(overlaySubviewCount()) subviewCountAfter=\(overlaySubviewCount())")
             print("[RenderPipeline] renderMs=0.0")
             print("[RenderSchedule] applyFinished requestID=\(requestID) applyMs=0.0 requestToApplyMs=\(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - requestedAt) * 1000.0))")
+            fflush(stdout)
             return
         }
 
@@ -1344,13 +1363,13 @@ class OverlayWindowController: NSWindowController {
             print("[RenderPipeline] render applied requestID=\(requestID) textLen=0 durationMs=\(String(format: "%.1f", durationMs))")
             print("[RenderPipeline] renderMs=\(String(format: "%.1f", durationMs))")
             print("[RenderSchedule] applyFinished requestID=\(requestID) applyMs=\(String(format: "%.1f", durationMs)) requestToApplyMs=\(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - requestedAt) * 1000.0))")
+            fflush(stdout)
             LatencyInstrumentation.shared.renderExcluded(requestID: requestID, reason: "emptyCompletion")
             LatencyInstrumentation.shared.renderApplied(requestID: nil, textLen: 0, source: "updateAutocompleteText")
             return
         }
 
-        let layerCountBefore = overlayLayerCount()
-        let reusedExistingLayer = inlineHostingView != nil && overlayWindow.contentView === inlineHostingView
+        let reusedExistingLayer = inlineAppKitView != nil && overlayWindow.contentView === inlineAppKitView
         guard renderInlineGhostText(text, isStale: false) else {
             print("[RenderPipeline] skipped render because geometry unavailable")
             return
@@ -1358,20 +1377,77 @@ class OverlayWindowController: NSWindowController {
 
         print("[TypeFlow-InputAudit] overlayWindowEvent=orderFront source=updateAutocompleteText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
         overlayWindow.orderFront(nil)
-        let hasActiveCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
-        CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(hasActiveCompletion, reason: "updateAutocompleteText-visible")
+        
+        let isVisible = overlayWindow.isVisible
+        
+        // Strict deterministic render commit check
+        let isAppKitViewVisible = inlineAppKitView != nil && !(inlineAppKitView!.isHidden) && overlayWindow.alphaValue > 0
+        let committed = isVisible && isAppKitViewVisible && overlayWindow.frame.size != .zero
+        
+        let commit = CompletionManager.RenderCommit(
+            committed: committed,
+            displayedText: text,
+            overlayVisible: isVisible,
+            requestID: requestID
+        )
+        CompletionManager.shared.notifyRenderCommit(commit)
 
         lastRenderedAutocompleteText = text
         lastRenderedAutocompleteRequestID = requestID
 
-        let layerCountAfter = overlayLayerCount()
         let durationMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000
         let queueMs = (startedAt - requestedAt) * 1000
         print("[RenderPipeline] render applied requestID=\(requestID) textLen=\(text.count) durationMs=\(String(format: "%.1f", durationMs))")
         print("[RenderPipeline] reused existing text layer=\(reusedExistingLayer)")
-        print("[RenderPipeline] layerCountBefore=\(layerCountBefore) layerCountAfter=\(layerCountAfter)")
+        print("[RenderPipeline] subviewCountBefore=\(overlaySubviewCount()) subviewCountAfter=\(overlaySubviewCount())")
         print("[RenderPipeline] renderMs=\(String(format: "%.1f", durationMs)) queueMs=\(String(format: "%.1f", queueMs))")
         print("[RenderSchedule] applyFinished requestID=\(requestID) applyMs=\(String(format: "%.1f", durationMs)) requestToApplyMs=\(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - requestedAt) * 1000.0))")
+        
+        if let appKitView = self.inlineAppKitView {
+            let caretRect = self.lastGeometry?.caretRect ?? .zero
+            let overlayFrame = self.overlayWindow.frame
+            let contentViewFrame = appKitView.frame
+            
+            var isTextClipped = false
+            var isTextTruncated = false
+            let renderedTextWidth = appKitView.fittingSize.width
+            let renderedTextHeight = appKitView.fittingSize.height
+            
+            if renderedTextWidth > contentViewFrame.width + 1.0 {
+                isTextClipped = true
+            }
+            
+            let firstLineY = overlayFrame.maxY - appKitView.layout.lineHeight
+            let verticalOffset = firstLineY - caretRect.minY
+            let horizontalOffset = overlayFrame.minX - caretRect.minX
+            let isOverlayBelowTypingLine = firstLineY < (caretRect.minY - 5.0)
+            
+            let isOverlayFrameTooSmall = overlayFrame.height < 5 || overlayFrame.width < 5
+            
+            let visualIntegrityPass = !isTextClipped && !isTextTruncated && !isOverlayBelowTypingLine && !isOverlayFrameTooSmall
+            
+            let payload: [String: Any] = [
+                "visualIntegrityPass": visualIntegrityPass,
+                "isTextClipped": isTextClipped,
+                "isTextTruncated": isTextTruncated,
+                "isOverlayBelowTypingLine": isOverlayBelowTypingLine,
+                "isOverlayFrameTooSmall": isOverlayFrameTooSmall,
+                "caretRect": NSStringFromRect(caretRect),
+                "overlayFrame": NSStringFromRect(overlayFrame),
+                "contentViewFrame": NSStringFromRect(contentViewFrame),
+                "renderedTextWidth": renderedTextWidth,
+                "renderedTextHeight": renderedTextHeight,
+                "verticalOffsetFromCaretPx": verticalOffset,
+                "horizontalOffsetFromCaretPx": horizontalOffset,
+                "renderedText": text
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload),
+               let jsonStr = String(data: data, encoding: .utf8) {
+                print("[VisualIntegrity] \(jsonStr)")
+            }
+        }
+        
+        fflush(stdout)
         CompletionManager.shared.recordAtomicGhostVisibleApply(requestID: requestID, textLen: text.count)
         LatencyInstrumentation.shared.renderApplied(requestID: requestID, textLen: text.count, source: "updateAutocompleteText")
     }
@@ -1425,7 +1501,7 @@ class OverlayWindowController: NSWindowController {
             font: renderFont
         )
 
-        let rootView = GhostSuggestionView(
+        let appKitView = GhostSuggestionAppKitView(
             layout: layout,
             fontSize: fontSize,
             fieldFont: renderFont,
@@ -1436,21 +1512,12 @@ class OverlayWindowController: NSWindowController {
             isCorrection: geom.isCorrection
         )
 
-        if let inlineHostingView {
-            inlineHostingView.rootView = rootView
-        } else {
-            inlineHostingView = NSHostingView(rootView: rootView)
-            inlineHostingView?.wantsLayer = false
-        }
-
-        if overlayWindow.contentView !== inlineHostingView {
-            overlayWindow.contentView = inlineHostingView
-        }
-        overlayWindow.contentView?.wantsLayer = false
+        inlineAppKitView = appKitView
+        overlayWindow.contentView = appKitView
+        overlayWindow.contentView?.wantsLayer = true
         overlayWindow.ignoresMouseEvents = true
 
-        inlineHostingView?.layoutSubtreeIfNeeded()
-        let contentSize = inlineHostingView?.fittingSize ?? .zero
+        let contentSize = appKitView.fittingSize
         let frame = layout.panelFrame(for: contentSize, caretRect: geom.caretRect)
         guard AXHelper_rectHasFiniteComponents(frame) else { return false }
 
@@ -1525,14 +1592,18 @@ class OverlayWindowController: NSWindowController {
             return
         }
 
-	        let hasActiveCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
+	        let hasActiveCompletion = CompletionManager.shared.displayedCompletion?.isEmpty == false
 	        CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(hasActiveCompletion && !isStale, reason: isStale ? "updateGhostText-stale" : "updateGhostText-active")
 
-	        let before = overlayLayerCount()
+	        let before = overlaySubviewCount()
 	        if renderInlineGhostText(newText, isStale: isStale) {
-	            print("[RenderPipeline] reused existing text layer=\(inlineHostingView != nil)")
-	            print("[RenderPipeline] layerCountBefore=\(before) layerCountAfter=\(overlayLayerCount())")
+	            print("[RenderPipeline] reused existing text layer=\(inlineAppKitView != nil)")
+	            print("[RenderPipeline] subviewCountBefore=\(before) subviewCountAfter=\(overlaySubviewCount())")
 	            LatencyInstrumentation.shared.renderApplied(requestID: nil, textLen: newText.count, source: "updateGhostText")
+                if !overlayWindow.isVisible {
+                    print("[TypeFlow-InputAudit] overlayWindowEvent=orderFront source=updateGhostText visibleBefore=false key=false main=false")
+                    overlayWindow.orderFront(nil)
+                }
 	        } else {
 	            print("[RenderPipeline] skipped render because geometry unavailable")
 	        }
@@ -1595,9 +1666,15 @@ class OverlayWindowController: NSWindowController {
             print("[TypeFlow-InputAudit] overlayWindowEvent=orderFront source=updateText visibleBefore=\(overlayWindow.isVisible) key=\(overlayWindow.isKeyWindow) main=\(overlayWindow.isMainWindow)")
             overlayWindow.orderFront(nil)
             LatencyInstrumentation.shared.renderApplied(requestID: nil, textLen: newText.count, source: "updateText")
-            let hasActiveCompletion = CompletionManager.shared.currentCompletion?.isEmpty == false
-            let shouldEnableAcceptTap = hasActiveCompletion && !newText.isEmpty && !isLoading && smartReplyOptions.isEmpty
-            CompletionManager.shared.accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(shouldEnableAcceptTap, reason: "updateText-visible")
+            
+            let isVisible = overlayWindow.isVisible
+            let commit = CompletionManager.RenderCommit(
+                committed: isVisible,
+                displayedText: newText,
+                overlayVisible: isVisible,
+                requestID: nil
+            )
+            CompletionManager.shared.notifyRenderCommit(commit)
         }
     }
 
@@ -1679,7 +1756,7 @@ class OverlayWindowController: NSWindowController {
         return String(format: "%02X%02X%02X", r, g, b)
     }
 
-    private func fieldGhostColor(from style: ResolvedFieldStyle?) -> Color? {
+    private func fieldGhostColor(from style: ResolvedFieldStyle?) -> NSColor? {
         guard let hex = style?.colorHex,
               let nsColor = nsColor(fromHex: hex)?.usingColorSpace(.sRGB)
         else {
@@ -1693,7 +1770,7 @@ class OverlayWindowController: NSWindowController {
             return nil
         }
 
-        return Color(nsColor: nsColor)
+        return nsColor
     }
 
     private func nsColor(fromHex hex: String) -> NSColor? {

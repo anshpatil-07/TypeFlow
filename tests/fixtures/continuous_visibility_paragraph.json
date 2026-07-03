@@ -1,0 +1,7 @@
+{
+  "paragraph": "The new autocomplete tool should help writers stay focused while they draft long messages and technical notes.\nIt should show calm suggestions near the cursor, update quickly as the sentence changes, and disappear when the idea no longer fits.\nA useful ghost text system feels predictable, fast, and quiet, giving the writer enough words to continue without taking control.",
+  "divergeScenario": {
+    "prefix": "the quick brown ",
+    "divergeText": "cat "
+  }
+}
