@@ -1515,26 +1515,29 @@ class CompletionManager: @unchecked Sendable {
                 } else {
                     let firstSuffixSegment = suggestion.components(separatedBy: CharacterSet.letters.inverted).first ?? ""
                     let completedWord = partialWord + firstSuffixSegment
-                    
-                    let hasBoundary = suggestion.rangeOfCharacter(from: CharacterSet.letters.inverted) != nil
                     let lowerCompletedWord = completedWord.lowercased()
                     
-                    if partialWord.count < 3 {
-                        accepted = false; rejectionReason = "shortStemSpeculativeMidWord"
-                    } else if partialWord.count < 4 && firstSuffixSegment.count >= 3 {
+                    if partialWord.count < 2 {
+                        // 1-char stems: reject
                         accepted = false; rejectionReason = "shortStemSpeculativeMidWord"
                     } else {
-                        let isFinalSafeWord = (source != "early" && source != "early-stable") && ["brown", "return", "overlook", "generate", "generation", "quality", "completion"].contains(lowerCompletedWord)
+                        let spellRange = NSSpellChecker.shared.checkSpelling(of: completedWord, startingAt: 0)
+                        let isWordSpelledCorrectly = (spellRange.location == NSNotFound)
                         
-                        if !hasBoundary && !isFinalSafeWord {
-                            accepted = false; rejectionReason = "midWordNeedsBoundary"
-                        } else {
-                            let range = NSSpellChecker.shared.checkSpelling(of: completedWord, startingAt: 0)
-                            if range.location != NSNotFound {
-                                accepted = false; rejectionReason = "invalidPartialWordSuffix"
-                            } else if ["overlord", "qualms"].contains(lowerCompletedWord) {
+                        if !isWordSpelledCorrectly {
+                            accepted = false; rejectionReason = "invalidPartialWordSuffix"
+                        } else if suggestion.lowercased().hasPrefix(partialWord.lowercased()) {
+                            // Suffix must not restart/duplicate the typed word
+                            accepted = false; rejectionReason = "invalidPartialWordSuffix"
+                        } else if partialWord.count == 2 {
+                            // 2-char stems: allow only if the completed word is a common/strong word, or is long enough (>= 5 chars)
+                            let isCommonWord = ["the", "this", "that", "there", "their", "then", "them", "these", "they", "to", "you", "your", "with", "would", "about", "could", "should", "will", "from"].contains(lowerCompletedWord)
+                            let isLongValidWord = completedWord.count >= 5
+                            if !isCommonWord && !isLongValidWord {
                                 accepted = false; rejectionReason = "shortStemSpeculativeMidWord"
                             }
+                        } else {
+                            // 3+ char stems: allowed if the completed word is spelled correctly. No whitelist or boundary required!
                         }
                     }
                 }
@@ -2057,7 +2060,7 @@ class CompletionManager: @unchecked Sendable {
                     }
                     return
                 } else {
-                    let enableSpellcheckGhosts = false
+                    let enableSpellcheckGhosts = true
                     if !enableSpellcheckGhosts {
                         print("[SpellcheckGhost] suppressed reason=disabledForInlineAutocomplete")
                         return
@@ -2109,7 +2112,7 @@ class CompletionManager: @unchecked Sendable {
                         // Cancel any pending LLM generation tasks
                         workController.cancelAll()
                         
-                        let enableSpellcheckGhosts = false
+                        let enableSpellcheckGhosts = true
                         if !enableSpellcheckGhosts {
                             print("[SpellcheckGhost] suppressed reason=disabledForInlineAutocomplete")
                             return
@@ -2261,6 +2264,13 @@ class CompletionManager: @unchecked Sendable {
         logContextAudit("continueGeneration input source=\(snapshot.source.rawValue) canonicalTextLen=\(activeLine.count) canonicalText='\(contextAuditPreview(activeLine))' rawTextLen=\(snapshot.rawTextBeforeCaret.count) liveBufferLen=\(keystrokeBuffer.count) liveBuffer='\(contextAuditPreview(keystrokeBuffer))'")
         guard !activeLine.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             print("[TypeFlow-Debug] Active line is empty, skipping generation.")
+            return
+        }
+        
+        // Guard: do not complete placeholder text like "Ask anything" or "Type a message"
+        let lowerActive = activeLine.lowercased()
+        if lowerActive.contains("ask anything") || lowerActive.contains("type a message") {
+            print("[TypeFlow-Debug] skipping generation on placeholder text.")
             return
         }
         
