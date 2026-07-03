@@ -136,6 +136,96 @@ class TextInjector {
         }
     }
 
+    // Returns true when the focused process is a browser whose contenteditable
+    // uses AX bridges that do NOT safely support kAXSelectedTextAttribute writes.
+    // Writing kAXSelectedTextAttribute in these processes replaces the entire
+    // editable node content instead of inserting at the caret.
+    static func isBrowserProcess(pid: pid_t) -> Bool {
+        guard pid > 0 else { return false }
+        // Check by frontmost app bundle identifier first (fast path)
+        if let app = NSRunningApplication(processIdentifier: pid) {
+            let bundle = app.bundleIdentifier ?? ""
+            let browserBundles: Set<String> = [
+                "com.apple.Safari",
+                "com.google.Chrome",
+                "com.google.Chrome.canary",
+                "org.mozilla.firefox",
+                "com.microsoft.edgemac",
+                "com.brave.Browser",
+                "company.thebrowser.Browser",  // Arc
+                "com.zen.browser",               // Zen
+                "io.zen.browser",
+                "com.operasoftware.Opera",
+                "com.vivaldi.Vivaldi",
+            ]
+            if browserBundles.contains(bundle) { return true }
+            // Fallback: any app whose bundle prefix suggests a web engine
+            if bundle.contains("webkit") || bundle.contains("browser") || bundle.contains("chrome") {
+                return true
+            }
+        }
+        return false
+    }
+
+    // Returns the PID of the focused element's owning process.
+    private func focusedElementPID(element: AXUIElement) -> pid_t {
+        var pid: pid_t = 0
+        AXUIElementGetPid(element, &pid)
+        return pid
+    }
+
+    // Injects text purely via Unicode CGEvent keystrokes, typing one char at a time.
+    // This physically types at the caret and never touches existing text.
+    private func injectCharByCharAtomic(text: String, startTime: CFAbsoluteTime) -> [String: Any] {
+        let start = startTime
+        guard let source = CGEventSource(stateID: .combinedSessionState) else {
+            return [
+                "insertionMethod": "charByChar",
+                "insertedAtomically": false,
+                "perCharacterFallback": true,
+                "acceptToFirstInsertedMs": 0.0,
+                "acceptToFullInsertedMs": 0.0,
+                "insertionAPIReportedSuccess": false,
+                "acceptSuccess": false,
+                "failReason": "no-event-source"
+            ]
+        }
+        isInjecting = true
+        var acceptToFirstInsertedMs: Double = 0
+        let utf16Chars = Array(text.utf16)
+        for (idx, char) in utf16Chars.enumerated() {
+            var varChar = char
+            let vKey: CGKeyCode = (char == 32) ? 49 : 0
+            if let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true) {
+                if vKey == 0 { keyDownEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar) }
+                keyDownEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
+                keyDownEvent.flags = []
+                logSyntheticKey(action: "unicode-char-accept", keyCode: vKey, keyDown: true, text: String(utf16CodeUnits: [char], count: 1), flags: [])
+                keyDownEvent.post(tap: .cgSessionEventTap)
+            }
+            if let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false) {
+                if vKey == 0 { keyUpEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar) }
+                keyUpEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
+                keyUpEvent.flags = []
+                keyUpEvent.post(tap: .cgSessionEventTap)
+            }
+            if idx == 0 { acceptToFirstInsertedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0 }
+            usleep(5000)
+        }
+        isInjecting = false
+        let acceptToFullInsertedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+        return [
+            "insertionMethod": "charByChar",
+            "insertedAtomically": false,
+            "perCharacterFallback": true,
+            "acceptToFirstInsertedMs": acceptToFirstInsertedMs,
+            "acceptToFullInsertedMs": acceptToFullInsertedMs,
+            "insertionAPIReportedSuccess": true,
+            "acceptSuccess": true,
+            "failReason": "none"
+        ]
+    }
+
     func injectAcceptance(
         text: String,
         activeElement: AXUIElement?,
@@ -144,19 +234,34 @@ class TextInjector {
     ) -> [String: Any] {
         markSyntheticEvent()
         let acceptStartedAt = startTime
-        var insertionMethod = "characterFallback"
+        var insertionMethod = "charByChar"
         var insertedAtomically = false
         var perCharacterFallback = true
         var acceptToFirstInsertedMs: Double = 0
         var acceptToFullInsertedMs: Double = 0
-        var acceptSuccess = false
+        var insertionAPIReportedSuccess = false
         var failReason = "none"
-        
+
         let start = CFAbsoluteTimeGetCurrent()
-        
-        // Option 1: Accessibility API (Direct insertion)
-        if !forceKeyboardFallback, let element = activeElement, verifyCaretCorrectness(element: element) {
+
+        // Detect whether the focused process is a browser whose AX layer does NOT
+        // safely support kAXSelectedTextAttribute writes. In these processes, writing
+        // kAXSelectedTextAttribute replaces the entire contenteditable content even
+        // when the selection length is 0 (zero-width caret).
+        var isBrowser = false
+        if let element = activeElement {
+            let pid = focusedElementPID(element: element)
+            isBrowser = TextInjector.isBrowserProcess(pid: pid)
+        }
+        print("[TypeFlow-Debug] injectAcceptance isBrowser=\(isBrowser) forceKeyboardFallback=\(forceKeyboardFallback) text='\(text)'")
+
+        // --- Path 1: AX selected-text (ONLY for non-browser native AppKit fields) ---
+        // NEVER use this path for browser/contenteditable.
+        if !isBrowser && !forceKeyboardFallback,
+           let element = activeElement,
+           verifyCaretCorrectness(element: element) {
             let status = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString)
+            insertionAPIReportedSuccess = (status == .success)
             if status == .success {
                 let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
                 acceptToFirstInsertedMs = elapsed
@@ -164,125 +269,31 @@ class TextInjector {
                 insertionMethod = "accessibility"
                 insertedAtomically = true
                 perCharacterFallback = false
-                acceptSuccess = true
+                // NOTE: We do NOT set acceptSuccess=true here.
+                // acceptSuccess is determined by the caller's transform verification.
+                print("[TypeFlow-Debug] AX selected-text write returned success (not browser)")
             } else {
-                print("[TypeFlow-Debug] Accessibility injection failed with status: \(status.rawValue)")
+                print("[TypeFlow-Debug] AX selected-text write failed status=\(status.rawValue), falling through to charByChar")
             }
+        } else if isBrowser {
+            print("[TypeFlow-Debug] Browser detected — skipping AX selected-text, using charByChar injection")
         }
-        
-        // Option 2: Clipboard Pasteboard (Cmd+V)
-        if !acceptSuccess {
-            let start2 = CFAbsoluteTimeGetCurrent()
-            let pasteboard = NSPasteboard.general
-            
-            // Save clipboard
-            let savedItems = pasteboard.pasteboardItems?.compactMap { item -> NSPasteboardItem? in
-                let newItem = NSPasteboardItem()
-                for type in item.types {
-                    if let data = item.data(forType: type) {
-                        newItem.setData(data, forType: type)
-                    }
-                }
-                return newItem
-            }
-            
-            pasteboard.clearContents()
-            pasteboard.setString(text, forType: .string)
-            
-            // Post Cmd+V asynchronously after 50ms to let the Tab key event processing settle
-            DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                guard let self = self else { return }
-                let vKeyCode: CGKeyCode = 9
-                if let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: vKeyCode, keyDown: true),
-                   let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: vKeyCode, keyDown: false) {
-                    
-                    keyDown.flags = .maskCommand
-                    keyUp.flags = .maskCommand
-                    keyDown.setIntegerValueField(.eventSourceUserData, value: 9999)
-                    keyUp.setIntegerValueField(.eventSourceUserData, value: 9999)
-                    
-                    self.isInjecting = true
-                    self.logSyntheticKey(action: "cmd-v-posted-wordaccept", keyCode: vKeyCode, keyDown: true, text: "v", flags: keyDown.flags)
-                    keyDown.post(tap: .cgSessionEventTap)
-                    self.logSyntheticKey(action: "cmd-v-posted-wordaccept", keyCode: vKeyCode, keyDown: false, text: "v", flags: keyUp.flags)
-                    keyUp.post(tap: .cgSessionEventTap)
-                    self.isInjecting = false
-                    
-                    // Wait 80ms and restore
-                    DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.08) {
-                        self.restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
-                    }
-                } else {
-                    self.restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
-                }
-            }
-            
-            let elapsed = (CFAbsoluteTimeGetCurrent() - start2) * 1000.0
-            acceptToFirstInsertedMs = elapsed
-            acceptToFullInsertedMs = elapsed
-            insertionMethod = "clipboard"
-            insertedAtomically = true
-            perCharacterFallback = false
-            acceptSuccess = true
+
+        // --- Path 2: Char-by-char Unicode CGEvent injection ---
+        // Used for browsers and as fallback for native fields where AX write failed.
+        // This path physically types characters at the current caret position without
+        // touching any existing content — equivalent to the user typing the text.
+        if insertionMethod != "accessibility" {
+            let charResult = injectCharByCharAtomic(text: text, startTime: start)
+            insertionMethod = charResult["insertionMethod"] as? String ?? "charByChar"
+            insertedAtomically = charResult["insertedAtomically"] as? Bool ?? false
+            perCharacterFallback = charResult["perCharacterFallback"] as? Bool ?? true
+            acceptToFirstInsertedMs = charResult["acceptToFirstInsertedMs"] as? Double ?? 0
+            acceptToFullInsertedMs = charResult["acceptToFullInsertedMs"] as? Double ?? 0
+            insertionAPIReportedSuccess = charResult["insertionAPIReportedSuccess"] as? Bool ?? false
+            failReason = charResult["failReason"] as? String ?? "none"
         }
-        
-        // Option 4: Character-by-Character Fallback
-        if !acceptSuccess {
-            let start4 = CFAbsoluteTimeGetCurrent()
-            guard let source = CGEventSource(stateID: .combinedSessionState) else {
-                failReason = "no-event-source"
-                return [
-                    "acceptStartedAt": acceptStartedAt,
-                    "insertionMethod": insertionMethod,
-                    "acceptedText": text,
-                    "acceptedTextLength": text.count,
-                    "acceptToFirstInsertedMs": acceptToFirstInsertedMs,
-                    "acceptToFullInsertedMs": acceptToFullInsertedMs,
-                    "insertedAtomically": insertedAtomically,
-                    "perCharacterFallback": perCharacterFallback,
-                    "acceptSuccess": false,
-                    "failReason": "no-event-source"
-                ]
-            }
-            
-            isInjecting = true
-            let utf16Chars = Array(text.utf16)
-            for (idx, char) in utf16Chars.enumerated() {
-                var varChar = char
-                let vKey: CGKeyCode = (char == 32) ? 49 : 0
-                if let keyDownEvent = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true) {
-                    if vKey == 0 {
-                        keyDownEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
-                    }
-                    keyDownEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
-                    keyDownEvent.flags = []
-                    keyDownEvent.post(tap: .cgSessionEventTap)
-                }
-                if let keyUpEvent = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false) {
-                    if vKey == 0 {
-                        keyUpEvent.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
-                    }
-                    keyUpEvent.setIntegerValueField(.eventSourceUserData, value: 9999)
-                    keyUpEvent.flags = []
-                    keyUpEvent.post(tap: .cgSessionEventTap)
-                }
-                
-                if idx == 0 {
-                    acceptToFirstInsertedMs = (CFAbsoluteTimeGetCurrent() - start4) * 1000.0
-                }
-                
-                // Sleep briefly (5ms)
-                usleep(5000)
-            }
-            isInjecting = false
-            
-            acceptToFullInsertedMs = (CFAbsoluteTimeGetCurrent() - start4) * 1000.0
-            insertionMethod = "characterFallback"
-            insertedAtomically = false
-            perCharacterFallback = true
-            acceptSuccess = true
-        }
-        
+
         return [
             "acceptStartedAt": acceptStartedAt,
             "insertionMethod": insertionMethod,
@@ -292,7 +303,12 @@ class TextInjector {
             "acceptToFullInsertedMs": acceptToFullInsertedMs,
             "insertedAtomically": insertedAtomically,
             "perCharacterFallback": perCharacterFallback,
-            "acceptSuccess": acceptSuccess,
+            // NOTE: acceptSuccess is intentionally NOT set here to true.
+            // The caller (CompletionManager.handleTabPressed) must verify the
+            // actual text transform before declaring success.
+            "acceptSuccess": insertionAPIReportedSuccess,
+            "insertionAPIReportedSuccess": insertionAPIReportedSuccess,
+            "isBrowser": isBrowser,
             "failReason": failReason
         ]
     }

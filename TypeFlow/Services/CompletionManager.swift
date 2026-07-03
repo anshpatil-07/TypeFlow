@@ -2730,78 +2730,158 @@ class CompletionManager: @unchecked Sendable {
         
         if let completion = displayedCompletion, !completion.isEmpty {
             let startTime = CFAbsoluteTimeGetCurrent()
+            
+            // --- Pre-insertion snapshot ---
             let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
             let activeElement = getFreshFocusedElement()
             
-            // Extract the next word/chunk
-            let (acceptedChunk, remainder) = CompletionManager.getNextChunk(from: completion)
-            guard !acceptedChunk.isEmpty else { return false }
-            
-            // Clear completion state immediately so UI/ghost clears or resets
-            clearCompletion(hideUI: remainder.isEmpty)
-            
-            // Inject the accepted chunk atomically
-            UsageStatsManager.shared.recordCompletionAccepted(charactersSaved: acceptedChunk.count)
-            
-            var resultDict = TextInjector.shared.injectAcceptance(
-                text: acceptedChunk,
-                activeElement: activeElement,
-                startTime: startTime
-            )
-            
-            // Retrieve updated text before caret for safety verification
-            var updatedLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
-            var expectedLineAfter = activeLine + acceptedChunk
-            var insertedAtCaretVerified = (updatedLine == expectedLineAfter)
-            
-            if !insertedAtCaretVerified {
-                print("[TypeFlow-Debug] Direct AX injection failed verification. Falling back to keyboard eventTap simulation.")
-                resultDict = TextInjector.shared.injectAcceptance(
-                    text: acceptedChunk,
-                    activeElement: activeElement,
-                    startTime: startTime,
-                    forceKeyboardFallback: true
-                )
-                
-                // Poll every 10ms for up to 250ms (25 iterations) while pumping the runloop to let async tasks execute
-                for _ in 0..<25 {
-                    RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
-                    updatedLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
-                    expectedLineAfter = activeLine + acceptedChunk
-                    insertedAtCaretVerified = (updatedLine == expectedLineAfter)
-                    if insertedAtCaretVerified {
-                        break
+            // Read selected range before insertion (for diagnostics and safety)
+            var selectedRangeLocationBefore = -1
+            var selectedRangeLengthBefore = -1
+            if let elem = activeElement {
+                var rangeRef: AnyObject?
+                let status = AXUIElementCopyAttributeValue(elem, kAXSelectedTextRangeAttribute as CFString, &rangeRef)
+                if status == .success, let axValue = rangeRef {
+                    var range = CFRange(location: 0, length: 0)
+                    if AXValueGetValue(axValue as! AXValue, .cfRange, &range) {
+                        selectedRangeLocationBefore = range.location
+                        selectedRangeLengthBefore = range.length
                     }
                 }
             }
             
-            // Restore remaining ghost text if any
-            if !remainder.isEmpty {
-                displayedCompletion = remainder
-                pendingCandidate = remainder
-                accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(true, reason: "tabAcceptRemainder")
-                overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: acceptedChunk, remainder: remainder, source: "tabAccept")
+            // Compute focused PID for diagnostics
+            var focusedPID: pid_t = 0
+            if let elem = activeElement { AXUIElementGetPid(elem, &focusedPID) }
+            let isBrowser = TextInjector.isBrowserProcess(pid: focusedPID)
+            
+            // Extract the next word/chunk (compute once, never repeat)
+            let (acceptedChunk, remainder) = CompletionManager.getNextChunk(from: completion)
+            guard !acceptedChunk.isEmpty else { return false }
+            
+            let expectedLineAfter = activeLine + acceptedChunk
+            
+            // --- Inject ---
+            UsageStatsManager.shared.recordCompletionAccepted(charactersSaved: acceptedChunk.count)
+            let resultDict = TextInjector.shared.injectAcceptance(
+                text: acceptedChunk,
+                activeElement: activeElement,
+                startTime: startTime
+            )
+            let insertionMethod = resultDict["insertionMethod"] as? String ?? "unknown"
+            let insertionAPIReportedSuccess = resultDict["insertionAPIReportedSuccess"] as? Bool ?? false
+            
+            // --- Post-insertion: poll for text to settle ---
+            // For char-by-char paths we need to wait for all keystrokes to land.
+            var updatedLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+            var transformVerified = (updatedLine == expectedLineAfter)
+            if !transformVerified {
+                for _ in 0..<30 {
+                    RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+                    updatedLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+                    transformVerified = (updatedLine == expectedLineAfter)
+                    if transformVerified { break }
+                }
             }
             
-            let unrelatedTextChanged = !updatedLine.hasPrefix(activeLine)
+            // --- Transform verification ---
+            // Success ONLY if existing text was preserved and chunk was inserted exactly once.
+            let replacedExistingText = !updatedLine.hasPrefix(activeLine)
+            let unrelatedTextChanged = replacedExistingText  // same check from caret perspective
+            let duplicatedAcceptedChunk = updatedLine.hasSuffix(acceptedChunk + acceptedChunk)
             
-            // Merge final diagnostics and print to log
-            var diagnostic: [String: Any] = [
+            var acceptSuccess = transformVerified && !replacedExistingText && !duplicatedAcceptedChunk
+            var failReason = "none"
+            var rollbackAttempted = false
+            var rollbackSucceeded = false
+            
+            if !acceptSuccess {
+                if replacedExistingText {
+                    failReason = "destructiveInsertTransform"
+                } else if duplicatedAcceptedChunk {
+                    failReason = "duplicatedChunk"
+                } else if !transformVerified {
+                    failReason = "transformNotVerified"
+                }
+                
+                // Attempt Cmd+Z rollback to restore text before giving up
+                if replacedExistingText || duplicatedAcceptedChunk {
+                    rollbackAttempted = true
+                    print("[TypeFlow-Debug] Destructive insertion detected — attempting Cmd+Z rollback. failReason=\(failReason)")
+                    if let source = CGEventSource(stateID: .combinedSessionState),
+                       let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 6, keyDown: true),  // Z = keyCode 6
+                       let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 6, keyDown: false) {
+                        keyDown.flags = .maskCommand
+                        keyUp.flags = .maskCommand
+                        keyDown.setIntegerValueField(.eventSourceUserData, value: 9999)
+                        keyUp.setIntegerValueField(.eventSourceUserData, value: 9999)
+                        TextInjector.shared.isInjecting = true
+                        keyDown.post(tap: .cgSessionEventTap)
+                        keyUp.post(tap: .cgSessionEventTap)
+                        TextInjector.shared.isInjecting = false
+                        // Wait for undo to land
+                        for _ in 0..<15 {
+                            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+                            let restored = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+                            if restored == activeLine {
+                                rollbackSucceeded = true
+                                break
+                            }
+                        }
+                    }
+                    print("[TypeFlow-Debug] Rollback result: rollbackSucceeded=\(rollbackSucceeded)")
+                }
+            }
+            
+            // --- Commit ghost state ONLY on verified success ---
+            if acceptSuccess {
+                if remainder.isEmpty {
+                    clearCompletion(hideUI: true)
+                } else {
+                    displayedCompletion = remainder
+                    pendingCandidate = remainder
+                    accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(true, reason: "tabAcceptRemainder")
+                    overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: acceptedChunk, remainder: remainder, source: "tabAccept")
+                }
+            } else {
+                // Insertion failed or was destructive — ghost state unchanged
+                print("[TypeFlow-Debug] Accept failed: failReason=\(failReason), ghost state preserved as-is")
+            }
+            
+            // --- Full diagnostics ---
+            let diagnostic: [String: Any] = [
                 "epochSeconds": Date().timeIntervalSince1970,
                 "tabAcceptMode": "wordChunk",
                 "displayedCompletionBefore": completion,
                 "acceptedChunk": acceptedChunk,
-                "displayedCompletionAfter": remainder,
-                "insertionMethod": resultDict["insertionMethod"] ?? "unknown",
-                "acceptToFullInsertedMs": resultDict["acceptToFullInsertedMs"] ?? 0.0,
-                "insertedAtCaretVerified": insertedAtCaretVerified,
-                "insertedAtomically": resultDict["insertedAtomically"] ?? false,
-                "perCharacterFallback": resultDict["perCharacterFallback"] ?? false,
+                "displayedCompletionAfter": acceptSuccess ? remainder : completion,
                 "lineBefore": activeLine,
                 "lineAfter": updatedLine,
+                "expectedLineAfter": expectedLineAfter,
+                "selectedRangeLocationBefore": selectedRangeLocationBefore,
+                "selectedRangeLengthBefore": selectedRangeLengthBefore,
+                "insertionMethod": insertionMethod,
+                "insertionAPIReportedSuccess": insertionAPIReportedSuccess,
+                "isBrowser": isBrowser,
+                "transformVerified": transformVerified,
+                "acceptSuccess": acceptSuccess,
+                "replacedExistingText": replacedExistingText,
                 "unrelatedTextChanged": unrelatedTextChanged,
-                "acceptSuccess": resultDict["acceptSuccess"] ?? false,
-                "failReason": resultDict["failReason"] ?? "none"
+                "duplicatedAcceptedChunk": duplicatedAcceptedChunk,
+                "rollbackAttempted": rollbackAttempted,
+                "rollbackSucceeded": rollbackSucceeded,
+                "failReason": failReason,
+                // Legacy keys for benchmark scorer
+                "insertedAtomically": resultDict["insertedAtomically"] ?? false,
+                "perCharacterFallback": resultDict["perCharacterFallback"] ?? false,
+                "acceptToFullInsertedMs": resultDict["acceptToFullInsertedMs"] ?? 0.0,
+                "unrelatedTextChanged_legacy": unrelatedTextChanged,
+                "insertedAtCaretVerified": transformVerified,
+                "insertionSucceeded": acceptSuccess,
+                "fallbackPathUsed": false,
+                "duplicatedAcceptedChunk_legacy": duplicatedAcceptedChunk,
+                "replacedExistingText_legacy": replacedExistingText,
+                "finalEditorTextSuffix": String(updatedLine.suffix(30))
             ]
             
             if let dictData = try? JSONSerialization.data(withJSONObject: diagnostic),
@@ -2810,7 +2890,7 @@ class CompletionManager: @unchecked Sendable {
                 fflush(stdout)
             }
             
-            return true // We handled it
+            return true // We handled the Tab key
         }
         return false // Let the event pass through
     }
