@@ -43,11 +43,6 @@ for char in text {
     let down = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true)
     let up = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false)
     
-    if vKey == 0 || !charToKeyCode.keys.contains(char) {
-        down?.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
-        up?.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
-    }
-    
     if needsShift {
         down?.flags = .maskShift
         up?.flags = .maskShift
@@ -55,6 +50,9 @@ for char in text {
         down?.flags = []
         up?.flags = []
     }
+    
+    down?.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
+    up?.keyboardSetUnicodeString(stringLength: 1, unicodeString: &varChar)
     
     down?.post(tap: .cghidEventTap)
     up?.post(tap: .cghidEventTap)

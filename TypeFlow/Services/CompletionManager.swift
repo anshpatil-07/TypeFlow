@@ -478,7 +478,9 @@ class CompletionManager: @unchecked Sendable {
     static let shared = CompletionManager()
     
     var pendingCandidate: String?
+    var pendingCandidatePrefix: String = ""
     var displayedCompletion: String?
+    var displayedCompletionPrefix: String = ""
     weak var accessibilityMonitor: AccessibilityMonitor?
     weak var overlayWindowController: OverlayWindowController?
     
@@ -1714,6 +1716,7 @@ class CompletionManager: @unchecked Sendable {
         recordShown: Bool = false
     ) {
         pendingCandidate = text
+        pendingCandidatePrefix = requestSnapshot.canonicalTextBeforeCaret
         if !text.isEmpty {
             if recordShown {
                 UsageStatsManager.shared.recordCompletionShown()
@@ -1725,6 +1728,8 @@ class CompletionManager: @unchecked Sendable {
             }
             overlayWindowController?.updateAutocompleteText(text, requestID: requestSnapshot.requestID)
         } else {
+            pendingCandidate = nil
+            pendingCandidatePrefix = ""
             overlayWindowController?.updateAutocompleteText("", requestID: requestSnapshot.requestID)
         }
     }
@@ -1920,70 +1925,94 @@ class CompletionManager: @unchecked Sendable {
         // If an overlay is active, verify if user typed text matches the active prediction.
         // If so, consume the matching prefix and keep the remaining ghost visible.
         if let ghost = displayedCompletion, !ghost.isEmpty {
-            let prev = lastBufferSnapshot
+            let prev = displayedCompletionPrefix
             let curr = bufferFallback
-            let expectedFull = prev + ghost
 
-            // Primary match: curr is prev + some typed chars, and expectedFull starts with curr
-            let typedChars = curr.count > prev.count && curr.hasPrefix(prev) ? String(curr.dropFirst(prev.count)) : ""
-            var matches = (curr == prev) || (curr.count > prev.count && curr.hasPrefix(prev) && expectedFull.lowercased().hasPrefix(curr.lowercased()))
+            // Extract the active line (the last line) of prev and curr to ensure
+            // matching is completely independent of whether they contain preceding lines.
+            let prevActive = prev.components(separatedBy: .newlines).last ?? ""
+            let currActive = curr.components(separatedBy: .newlines).last ?? ""
+            let expectedFullActive = prevActive + ghost
 
-            // AX-lag fallback: if AX text hasn't updated yet (curr == prev but keystroke buffer
-            // has one more char that matches the ghost), treat as a match using the keystroke buffer
-            var effectiveCurr = curr
-            if !matches, curr == prev,
-               let ksBuffer = accessibilityMonitor?.keystrokeBuffer,
-               ksBuffer.count == prev.count + 1,
-               ksBuffer.hasPrefix(prev),
-               expectedFull.lowercased().hasPrefix(ksBuffer.lowercased()) {
-                // Keystroke buffer already has the new char; AX just hasn't fired yet.
-                // Consume using keystroke buffer as source of truth.
-                effectiveCurr = ksBuffer
+            // Primary match: currActive is prevActive + some typed chars, and expectedFullActive starts with currActive
+            let typedChars = currActive.count > prevActive.count && currActive.hasPrefix(prevActive) ? String(currActive.dropFirst(prevActive.count)) : ""
+            var matches = (currActive == prevActive) || (currActive.count > prevActive.count && currActive.hasPrefix(prevActive) && expectedFullActive.lowercased().hasPrefix(currActive.lowercased()))
+
+            // AX-lag fallback: if AX text hasn't updated yet or has skipped events, and keystroke buffer
+            // has one or more chars that match the ghost, treat as a match using the keystroke buffer.
+            var effectiveCurrActive = currActive
+            if !matches, let ksBuffer = accessibilityMonitor?.keystrokeBuffer {
+                let ksBufferActive = ksBuffer.components(separatedBy: .newlines).last ?? ""
+                if ksBufferActive.count > prevActive.count,
+                   ksBufferActive.hasPrefix(prevActive),
+                   expectedFullActive.lowercased().hasPrefix(ksBufferActive.lowercased()) {
+                    // Keystroke buffer already has the new chars; AX is just lagging.
+                    // Consume using keystroke buffer as source of truth.
+                    effectiveCurrActive = ksBufferActive
+                    matches = true
+                }
+            }
+
+            // AX-lag catch-up: if effectiveCurrActive is behind prevActive but is still a valid prefix
+            // of expectedFullActive, this is just AX lag. Keep matches = true, and do not advance or clear.
+            if !matches && effectiveCurrActive.count < prevActive.count && expectedFullActive.lowercased().hasPrefix(effectiveCurrActive.lowercased()) {
                 matches = true
             }
 
-            let typedCharsEffective = effectiveCurr.count > prev.count && effectiveCurr.hasPrefix(prev) ? String(effectiveCurr.dropFirst(prev.count)) : typedChars
+            let typedCharsEffective = effectiveCurrActive.count > prevActive.count && effectiveCurrActive.hasPrefix(prevActive) ? String(effectiveCurrActive.dropFirst(prevActive.count)) : typedChars
+            let advanced = matches ? String(expectedFullActive.dropFirst(effectiveCurrActive.count)) : ""
 
-            var diagnostic: [String: Any] = [
+            let diagnostic: [String: Any] = [
                 "epochSeconds": Date().timeIntervalSince1970,
-                "printableInputWhileGhostVisible": true,
                 "eventPhase": "onTextChanged",
+                "prefixConsumptionActive": matches,
                 "typedChars": typedCharsEffective,
                 "displayedCompletionBefore": ghost,
+                "displayedCompletionAfter": matches ? advanced : "",
                 "prefixMatched": matches,
                 "consumedChars": matches ? typedCharsEffective : "",
-                "displayedCompletionAfter": ghost,
-                "diverged": !matches,
-                "ghostKeptVisible": matches,
-                "llmRequestSuppressed": matches && !typedCharsEffective.isEmpty,
-                "debounceSuppressed": matches && !typedCharsEffective.isEmpty
+                "consumedToEmpty": matches && advanced.isEmpty,
+                "ghostKeptVisible": matches && !advanced.isEmpty,
+                "llmRequestSuppressed": matches,
+                "debounceSuppressed": matches,
+                "staleRenderSuppressed": matches,
+                "axLagHandled": matches && effectiveCurrActive != currActive,
+                "divergenceDetected": !matches,
+                "reason": matches ? (advanced.isEmpty ? "ghostFullyConsumed" : "prefixMatched") : "divergence"
             ]
 
+            if let dictData = try? JSONSerialization.data(withJSONObject: diagnostic),
+               let jsonStr = String(data: dictData, encoding: .utf8) {
+                print("[PrefixConsumptionDiagnostic] \(jsonStr)")
+                fflush(stdout)
+            }
+
             if matches {
-                let advanced = String(expectedFull.dropFirst(effectiveCurr.count))
-                lastBufferSnapshot = effectiveCurr
-                diagnostic["displayedCompletionAfter"] = advanced
+                let isAXLagCatchUp = prevActive.lowercased().hasPrefix(effectiveCurrActive.lowercased()) && effectiveCurrActive.count < prevActive.count
+                if isAXLagCatchUp {
+                    // Keep ghost visible, abort active generation since user is typing, but do NOT schedule a new one
+                    requestActiveGenerationAbort(reason: "new-input")
+                    return
+                }
+
+                let finalPrefix = prev + typedCharsEffective
+                lastBufferSnapshot = finalPrefix
+                displayedCompletionPrefix = finalPrefix
+                pendingCandidatePrefix = finalPrefix
 
                 if advanced.isEmpty {
                     // Ghost fully consumed by typing. Clean up ghost state.
                     displayedCompletion = nil
+                    displayedCompletionPrefix = ""
                     pendingCandidate = nil
+                    pendingCandidatePrefix = ""
                     accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "ghostFullyConsumed")
                     overlayWindowController?.updateGhostText("", isStale: false)
-                    diagnostic["ghostKeptVisible"] = false
-                    diagnostic["consumedToEmpty"] = true
-                    diagnostic["fullRefreshSuppressed"] = false
-
-                    if let dictData = try? JSONSerialization.data(withJSONObject: diagnostic),
-                       let jsonStr = String(data: dictData, encoding: .utf8) {
-                        print("[PrintableInputDiagnostic] \(jsonStr)")
-                        fflush(stdout)
-                    }
 
                     // Schedule a fresh generation from the new text so the user
                     // doesn't get stuck after manually typing the full suggestion.
-                    LatencyInstrumentation.shared.onTextChanged(bufferLen: effectiveCurr.count)
-                    lastBufferSnapshot = effectiveCurr
+                    LatencyInstrumentation.shared.onTextChanged(bufferLen: finalPrefix.count)
+                    lastBufferSnapshot = finalPrefix
                     let debounceDelayMs = 25  // short idle after full-consumption
                     let scheduledWorkID = workController.replaceDebouncedWork(delayMilliseconds: debounceDelayMs) { [weak self] workID in
                         _ = self?.debounceAuditMarkFired(workID: workID)
@@ -1991,7 +2020,7 @@ class CompletionManager: @unchecked Sendable {
                         print("[TypeFlow-Debug] Debounce timer fired (post ghost-consumed)!")
                         self?.triggerGeneration(with: nil, workID: workID)
                     }
-                    debounceAuditScheduled(text: effectiveCurr, textHash: debounceAuditHash(effectiveCurr), workID: scheduledWorkID, delayMs: debounceDelayMs)
+                    debounceAuditScheduled(text: finalPrefix, textHash: debounceAuditHash(finalPrefix), workID: scheduledWorkID, delayMs: debounceDelayMs)
                     print("[PrintableInputDiagnostic] ghostFullyConsumed — scheduled fresh generation workID=\(scheduledWorkID)")
                     return
                 } else {
@@ -2002,31 +2031,17 @@ class CompletionManager: @unchecked Sendable {
                     }
                 }
 
-                
-                if let dictData = try? JSONSerialization.data(withJSONObject: diagnostic),
-                   let jsonStr = String(data: dictData, encoding: .utf8) {
-                    print("[PrintableInputDiagnostic] \(jsonStr)")
-                    fflush(stdout)
-                }
-                
                 // Keep ghost visible, abort active generation since user is typing, but do NOT schedule a new one
                 requestActiveGenerationAbort(reason: "new-input")
                 return
             } else {
-                diagnostic["displayedCompletionAfter"] = ""
-                diagnostic["ghostKeptVisible"] = false
-                
-                if let dictData = try? JSONSerialization.data(withJSONObject: diagnostic),
-                   let jsonStr = String(data: dictData, encoding: .utf8) {
-                    print("[PrintableInputDiagnostic] \(jsonStr)")
-                    fflush(stdout)
-                }
-                
                 // User diverged from ghost text — clear state immediately and hide overlay.
                 // Do NOT show stale grey ghost; fall through to the normal debounce path so a
                 // fresh generation starts quickly.
                 displayedCompletion = nil
+                displayedCompletionPrefix = ""
                 pendingCandidate = nil
+                pendingCandidatePrefix = ""
                 workController.cancelAll()
                 overlayWindowController?.updateGhostText("", isStale: false)
             }
@@ -2119,6 +2134,7 @@ class CompletionManager: @unchecked Sendable {
                     // never during the hot typing loop.
                     DispatchQueue.main.async {
                         self.pendingCandidate = ghostText
+                        self.pendingCandidatePrefix = activeLine
                         if !ghostText.isEmpty {
                             if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
                                 self.overlayWindowController?.moveOverlay(to: rect)
@@ -2176,6 +2192,7 @@ class CompletionManager: @unchecked Sendable {
                         // never during the hot typing loop.
                         DispatchQueue.main.async {
                             self.pendingCandidate = ghostText
+                            self.pendingCandidatePrefix = activeLine
                             if !ghostText.isEmpty {
                                 if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
                                     self.overlayWindowController?.moveOverlay(to: rect)
@@ -2492,6 +2509,7 @@ class CompletionManager: @unchecked Sendable {
                 
                 DispatchQueue.main.async {
                     self.pendingCandidate = value
+                    self.pendingCandidatePrefix = activeLine
                     self.overlayWindowController?.updateText(displayText)
                 }
                 return
@@ -2513,7 +2531,7 @@ class CompletionManager: @unchecked Sendable {
             let used = directCandidate != nil
 
             let rejectReason = used ? "none" : "noHighConfidenceMatch"
-            print("[PageDirectCandidate] attempt=\(pageDirectAttempted) used=\(used) matchChars=\(directCandidate?.matchChars ?? 0) matchWords=\(directCandidate?.matchWords ?? 0) matchOffset=\(directCandidate?.matchOffset ?? -1) pageDirectSuffix='\(directCandidate?.pageDirectSuffix.prefix(60) ?? "")' rejectReason=\(rejectReason) latencyMs=\(String(format: "%.1f", directCandidate?.latencyMs ?? 0))")
+            print("[PageDirectCandidate] attempt=\(pageDirectAttempted) used=\(used) matchChars=\(directCandidate?.matchChars ?? 0) matchWords=\(directCandidate?.matchWords ?? 0) matchOffset=\(directCandidate?.matchOffset ?? -1) pageDirectSuffix='\(directCandidate?.pageDirectSuffix.prefix(60) ?? "")' rejectReason=\(rejectReason) latencyMs=\(String(format: "%.1f", directCandidate?.latencyMs ?? 0.0))")
 
             if let dc = directCandidate {
                 let suggestion = dc.suggestion
@@ -2523,7 +2541,9 @@ class CompletionManager: @unchecked Sendable {
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.pendingCandidate = suggestion
+                    self.pendingCandidatePrefix = fullActiveLine
                     self.displayedCompletion = suggestion
+                    self.displayedCompletionPrefix = fullActiveLine
                     self.lastBufferSnapshot = self.accessibilityMonitor?.keystrokeBuffer ?? ""
                     let caretRect = self.accessibilityMonitor?.getCurrentCaretRect()
                     if let rect = caretRect {
@@ -2729,7 +2749,9 @@ class CompletionManager: @unchecked Sendable {
             self.activeRewriteApp = NSWorkspace.shared.frontmostApplication
             self.activeRewriteText = nil
             self.pendingCandidate = nil
+            self.pendingCandidatePrefix = ""
             self.displayedCompletion = nil
+            self.displayedCompletionPrefix = ""
             
             // Show the loading/mode selection overlay anchored to the selection
             DispatchQueue.main.async {
@@ -2808,6 +2830,7 @@ class CompletionManager: @unchecked Sendable {
             DispatchQueue.main.async {
                 if !rewritten.isEmpty {
                     self.pendingCandidate = rewritten
+                    self.pendingCandidatePrefix = ""
                     // Re-anchor overlay in case selection rect changed
                     if let rect = self.accessibilityMonitor?.getSelectionRect() {
                         self.overlayWindowController?.moveOverlay(to: rect)
@@ -2829,7 +2852,9 @@ class CompletionManager: @unchecked Sendable {
         
         self.activeSmartReplyPID = self.accessibilityMonitor?.activeFocusPID
         self.pendingCandidate = nil
+        self.pendingCandidatePrefix = ""
         self.displayedCompletion = nil
+        self.displayedCompletionPrefix = ""
         
         DispatchQueue.main.async {
             if let rect = self.accessibilityMonitor?.getCurrentCaretRect() {
@@ -2911,10 +2936,12 @@ class CompletionManager: @unchecked Sendable {
         
         if commit.displayedText == pendingCandidate {
             displayedCompletion = commit.displayedText
+            displayedCompletionPrefix = pendingCandidatePrefix
             lastBufferSnapshot = accessibilityMonitor?.keystrokeBuffer ?? ""
             accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(true, reason: "render-commit")
         } else if !isStandardCompletion {
             displayedCompletion = commit.displayedText
+            displayedCompletionPrefix = pendingCandidatePrefix
             lastBufferSnapshot = accessibilityMonitor?.keystrokeBuffer ?? ""
             accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(true, reason: "render-commit-special")
         } else {
@@ -3188,10 +3215,12 @@ class CompletionManager: @unchecked Sendable {
             // --- Commit ghost state ONLY on verified success ---
             if acceptSuccess {
                 if remainder.isEmpty {
-                    clearCompletion(hideUI: true)
+                    clearCompletion(hideUI: true, reason: "tabAcceptFullyConsumed")
                 } else {
                     displayedCompletion = remainder
+                    displayedCompletionPrefix = displayedCompletionPrefix + acceptedChunk
                     pendingCandidate = remainder
+                    pendingCandidatePrefix = displayedCompletionPrefix
                     accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(true, reason: "tabAcceptRemainder")
                     overlayWindowController?.replaceGhostTextAfterAcceptance(inserted: acceptedChunk, remainder: remainder, source: "tabAccept")
                 }
@@ -3323,7 +3352,9 @@ class CompletionManager: @unchecked Sendable {
         }
         accessibilityMonitor?.setAcceptTapNeededForVisibleCompletion(false, reason: "clearCompletion:\(reason)")
         pendingCandidate = nil
+        pendingCandidatePrefix = ""
         displayedCompletion = nil
+        displayedCompletionPrefix = ""
         activeSpellCorrection = nil
         activeSnippetKey = nil
         activeRewriteText = nil
