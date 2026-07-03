@@ -109,8 +109,18 @@ devtools/
 ├── benchmarks/     # End-to-end automated benchmarks & harness shell scripts
 ├── probes/         # Isolated diagnostic scripts & UI/geometry verification probes
 ├── scripts/        # Utilities for log auditing, latency extraction & stress typing
+├── tests/          # Standalone core verification tests (test_overlap.swift, etc.)
 ├── reports/        # Generated evaluation logs, jsonl results & markdown reports
 └── scratch/        # Experimental code & temporary testing scratchpad
+```
+
+### Running Core Verification Tests
+Execute standalone unit verification suites directly from the repository root:
+```bash
+swift devtools/tests/test_promptbuilder.swift
+swift devtools/tests/test_overlap.swift
+swift devtools/tests/test_mem.swift
+swift devtools/tests/test_page_direct_matcher.swift
 ```
 
 ### Running Core Benchmarks
@@ -147,7 +157,7 @@ All benchmark runs automatically output structured JSON/JSONL results and human-
 - `TypeFlow/llama.cpp/`: Upstream C++ inference engine submodule.
 - `devtools/`: Developer tooling, automated test harnesses, diagnostic scripts, and benchmark reporting.
 - `tests/`: Unit test fixtures and regression test suites.
-- `test_*.swift`: Standalone core verification tests (`test_promptbuilder.swift`, `test_overlap.swift`, `test_mem.swift`, `test_page_direct_matcher.swift`).
+- `devtools/tests/`: Standalone core verification tests (`test_promptbuilder.swift`, `test_overlap.swift`, `test_mem.swift`, `test_page_direct_matcher.swift`).
 
 ---
 

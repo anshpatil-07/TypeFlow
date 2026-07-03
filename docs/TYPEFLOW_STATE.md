@@ -61,7 +61,7 @@ Input/Safety: AXUIElement + CGEvent (pass-through bounded)
 - overlay layerCountAfter > 1: 0
 - swallowed=true: 0
 - originalReturned=false: 0
-- Tests passed: `swift test_overlap.swift` (18/18 cases), `swift test_mem.swift`, `xcodebuild Debug build`
+- Tests passed: `swift devtools/tests/test_overlap.swift` (18/18 cases), `swift devtools/tests/test_mem.swift`, `xcodebuild Debug build`
 
 ## Current next stage
 Pause core pipeline changes. The responsiveness and quality stages are now in a good validated state. Next work should be release-candidate regression testing / product polish, not more prompt/model changes, unless a real quality issue appears.
@@ -79,8 +79,8 @@ Do not modify unless explicitly asked:
 - Stage 4B canonicalizer
 
 ## Testing commands
-- swift test_overlap.swift
-- swift test_mem.swift
+- swift devtools/tests/test_overlap.swift
+- swift devtools/tests/test_mem.swift
 - xcodebuild Debug build with full output redirected to a log file
 
 ## Log analysis workflow

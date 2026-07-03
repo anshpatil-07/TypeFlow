@@ -76,3 +76,10 @@ venv_gguf/
 .build_derived_data/
 .xcode-spm/
 *.dSYM/
+
+# Local editor and AI assistant rules / directories
+/.cursorrules
+/.windsurfrules
+/.cursor/
+/.windsurf/
+/.continue/

@@ -153,9 +153,9 @@ echo "Fixture SHA256 before run: $(hash_fixture)"
 TEST_STATUS="unknown"
 BUILD_STATUS="unknown"
 
-if swift "$ROOT_DIR/test_promptbuilder.swift" >"$TEST_LOG" 2>&1 && \
-   swift "$ROOT_DIR/test_overlap.swift" >>"$TEST_LOG" 2>&1 && \
-   swift "$ROOT_DIR/test_mem.swift" >>"$TEST_LOG" 2>&1; then
+if swift "$ROOT_DIR/devtools/tests/test_promptbuilder.swift" >"$TEST_LOG" 2>&1 && \
+   swift "$ROOT_DIR/devtools/tests/test_overlap.swift" >>"$TEST_LOG" 2>&1 && \
+   swift "$ROOT_DIR/devtools/tests/test_mem.swift" >>"$TEST_LOG" 2>&1; then
   TEST_STATUS="pass"
 else
   TEST_STATUS="fail"

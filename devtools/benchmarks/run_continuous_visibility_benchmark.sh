@@ -38,9 +38,9 @@ new_typeflow_pids() {
 }
 
 # Run tests
-swift "$ROOT_DIR/test_promptbuilder.swift" >/dev/null
-swift "$ROOT_DIR/test_overlap.swift" >/dev/null
-swift "$ROOT_DIR/test_mem.swift" >/dev/null
+swift "$ROOT_DIR/devtools/tests/test_promptbuilder.swift" >/dev/null
+swift "$ROOT_DIR/devtools/tests/test_overlap.swift" >/dev/null
+swift "$ROOT_DIR/devtools/tests/test_mem.swift" >/dev/null
 
 echo "Building TypeFlow..."
 xcodebuild build -project "$PROJECT" -scheme "$SCHEME" -derivedDataPath "$DERIVED_DATA" > "$ARTIFACT_DIR/build.log" 2>&1
