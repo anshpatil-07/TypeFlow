@@ -206,6 +206,7 @@ class AccessibilityMonitor {
     
     var acceptTap: CFMachPort?
     var acceptRunLoopSource: CFRunLoopSource?
+    var pendingDisableReason: String? = nil
     
     var onCaretMoved: ((CGRect) -> Void)?
     private var retryTimer: Timer?
@@ -918,41 +919,49 @@ class AccessibilityMonitor {
             options: .defaultTap,
             eventsOfInterest: CGEventMask(eventMask),
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                let callbackStart = CFAbsoluteTimeGetCurrent()
+                return autoreleasepool {
+                    let callbackStart = CFAbsoluteTimeGetCurrent()
 
-                if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
-                    return Unmanaged.passUnretained(event)
-                }
+                    if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
+                        return Unmanaged.passUnretained(event)
+                    }
 
-                guard let monitor = refcon else { return Unmanaged.passUnretained(event) }
-                let obj = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor).takeUnretainedValue()
-                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-                let currentCompletionNonEmpty = CompletionManager.shared.displayedCompletion?.isEmpty == false
-                let hasVisibleCompletion = currentCompletionNonEmpty && CompletionManager.shared.isOverlayVisible
+                    guard let monitor = refcon else { return Unmanaged.passUnretained(event) }
+                    let obj = Unmanaged<AccessibilityMonitor>.fromOpaque(monitor).takeUnretainedValue()
+                    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                    let currentCompletionNonEmpty = CompletionManager.shared.displayedCompletion?.isEmpty == false
+                    let hasVisibleCompletion = currentCompletionNonEmpty && CompletionManager.shared.isOverlayVisible
 
-                if type == .keyUp, obj.consumedKeyCodes.contains(keyCode) {
-                    obj.consumedKeyCodes.remove(keyCode)
-                    obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-accept-consumed-keyUp-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
-                    return nil
-                }
-
-                guard hasVisibleCompletion else {
-                    obj.setAcceptTapNeededForVisibleCompletion(false, reason: "dynamic-no-visible-completion")
-                    obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-no-completion-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
-                    return Unmanaged.passUnretained(event)
-                }
-
-                if type == .keyDown && keyCode == 48 {
-                    if CompletionManager.shared.handleTabPressed() {
-                        obj.clearKeystrokeBuffer()
-                        obj.consumedKeyCodes.insert(keyCode)
-                        obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-tab-visible-completion-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                    if type == .keyUp, obj.consumedKeyCodes.contains(keyCode) {
+                        obj.consumedKeyCodes.remove(keyCode)
+                        obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-accept-consumed-keyUp-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                        if obj.consumedKeyCodes.isEmpty, let pendingReason = obj.pendingDisableReason {
+                            obj.pendingDisableReason = nil
+                            DispatchQueue.main.async {
+                                obj.disableDynamicAcceptTapIfNeeded(reason: pendingReason)
+                            }
+                        }
                         return nil
                     }
-                }
 
-                obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-inspected-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
-                return Unmanaged.passUnretained(event)
+                    guard hasVisibleCompletion else {
+                        obj.setAcceptTapNeededForVisibleCompletion(false, reason: "dynamic-no-visible-completion")
+                        obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-no-completion-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                        return Unmanaged.passUnretained(event)
+                    }
+
+                    if type == .keyDown && keyCode == 48 {
+                        if CompletionManager.shared.handleTabPressed() {
+                            obj.clearKeystrokeBuffer()
+                            obj.consumedKeyCodes.insert(keyCode)
+                            obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-tab-visible-completion-swallowed", matchedShortcut: true, originalReturned: false, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                            return nil
+                        }
+                    }
+
+                    obj.enqueueInputAudit(tap: "accept", type: type, event: event, action: "dynamic-inspected-passThrough", matchedShortcut: false, originalReturned: true, callbackStart: callbackStart, completionActive: currentCompletionNonEmpty, overlayVisible: CompletionManager.shared.isOverlayVisible, currentCompletionNonEmpty: currentCompletionNonEmpty)
+                    return Unmanaged.passUnretained(event)
+                }
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         )
@@ -974,13 +983,17 @@ class AccessibilityMonitor {
 
     private func disableDynamicAcceptTapIfNeeded(reason: String) {
         guard InputIsolationMode.current.allowDynamicAcceptTap, let tap = acceptTap else { return }
+        if !consumedKeyCodes.isEmpty {
+            pendingDisableReason = reason
+            print("[TypeFlow-InputAudit] acceptTap=disableDeferred reason=\(reason) consumedKeyCodes=\(consumedKeyCodes)")
+            return
+        }
         CGEvent.tapEnable(tap: tap, enable: false)
         if let source = acceptRunLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
         }
         acceptTap = nil
         acceptRunLoopSource = nil
-        consumedKeyCodes.removeAll()
         print("[TypeFlow-InputAudit] acceptTap=dynamicDisabled enabled=false reason=\(reason)")
     }
     
@@ -1018,8 +1031,10 @@ class AccessibilityMonitor {
                 options: .listenOnly,
                 eventsOfInterest: CGEventMask(eventMask),
                 callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                let callbackStart = CFAbsoluteTimeGetCurrent()
-                let diagnosticMode = InputIsolationMode.current
+                return autoreleasepool {
+                    let callbackStart = CFAbsoluteTimeGetCurrent()
+                    let diagnosticMode = InputIsolationMode.current
+
 
                 if diagnosticMode.allowTextInjectorTapChecks {
                     if TextInjector.shared.isInjecting || event.getIntegerValueField(.eventSourceUserData) == 9999 {
@@ -1104,6 +1119,7 @@ class AccessibilityMonitor {
                 }
                 
                 return Unmanaged.passUnretained(event)
+                }
                 },
                 userInfo: Unmanaged.passUnretained(self).toOpaque()
             )
@@ -1124,7 +1140,8 @@ class AccessibilityMonitor {
                 options: .defaultTap,
                 eventsOfInterest: CGEventMask(eventMask),
                 callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                let callbackStart = CFAbsoluteTimeGetCurrent()
+                return autoreleasepool {
+                    let callbackStart = CFAbsoluteTimeGetCurrent()
                 let diagnosticMode = InputIsolationMode.current
                 if diagnosticMode.acceptTapPassThroughOnly {
                     if let monitor = refcon {
@@ -1281,6 +1298,7 @@ class AccessibilityMonitor {
                 }
                 
                 return Unmanaged.passUnretained(event)
+                }
                 },
                 userInfo: Unmanaged.passUnretained(self).toOpaque()
             )

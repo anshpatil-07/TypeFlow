@@ -273,6 +273,21 @@ struct SuggestionOverlayGeometry: Equatable {
             resolvedFieldStyle: resolvedFieldStyle
         )
     }
+
+    func withIsCorrection(_ isCorrection: Bool) -> SuggestionOverlayGeometry {
+        SuggestionOverlayGeometry(
+            caretRect: caretRect,
+            inputFrameRect: inputFrameRect,
+            caretQuality: caretQuality,
+            isCaretAtEndOfLine: isCaretAtEndOfLine,
+            observedCharWidth: observedCharWidth,
+            isRightToLeft: isRightToLeft,
+            focusChangeSequence: focusChangeSequence,
+            focusedInputIdentityKey: focusedInputIdentityKey,
+            isCorrection: isCorrection,
+            resolvedFieldStyle: resolvedFieldStyle
+        )
+    }
 }
 
 struct GhostFontSizeStabilizer {
@@ -1458,7 +1473,7 @@ class OverlayWindowController: NSWindowController {
 
         let geom: SuggestionOverlayGeometry
         if let existing = lastGeometry {
-            geom = existing
+            geom = existing.withIsCorrection(completionModel.isSpellCorrection)
         } else {
             guard lastCaretRect != .zero else { return false }
             let appKitCaretRect = appKitCaretRect(from: lastCaretRect)
@@ -1511,6 +1526,11 @@ class OverlayWindowController: NSWindowController {
             opacity: isStale ? 0.35 : 0.75,
             isCorrection: geom.isCorrection
         )
+
+        let isCorr = completionModel.isSpellCorrection
+        let isAppKitCorr = appKitView.isCorrection
+        let mismatch = (isCorr != isAppKitCorr)
+        print("[ColorDiagnostic] candidateKind=\(isCorr ? "spellcheckCorrection" : "autocomplete") renderedColorKind=\(isAppKitCorr ? "spellcheck" : "autocomplete") expectedColorKind=\(isCorr ? "spellcheck" : "autocomplete") colorMismatch=\(mismatch)")
 
         inlineAppKitView = appKitView
         overlayWindow.contentView = appKitView
@@ -1582,6 +1602,7 @@ class OverlayWindowController: NSWindowController {
     }
 
 	    private func applyUpdateGhostText(_ newText: String, isStale: Bool = false) {
+	        completionModel.isSpellCorrection = (CompletionManager.shared.activeSpellCorrection != nil)
 	        completionModel.text = newText
 	        
 	        guard !newText.isEmpty else {

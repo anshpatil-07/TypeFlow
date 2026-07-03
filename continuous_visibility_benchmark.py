@@ -115,7 +115,10 @@ def safari_eval_javascript(source):
     result = osascript(script, timeout=10)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "Safari JavaScript failed")
-    return result.stdout.strip()
+    stdout_val = result.stdout.strip()
+    if stdout_val.startswith('"') and stdout_val.endswith('"'):
+        stdout_val = '\\n'.join(stdout_val.split('\n'))
+    return stdout_val
 
 def wait_for_page_ready(timeout_seconds=5.0):
     deadline = time.time() + timeout_seconds

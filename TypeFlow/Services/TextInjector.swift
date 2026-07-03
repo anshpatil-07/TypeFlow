@@ -160,7 +160,8 @@ class TextInjector {
             ]
             if browserBundles.contains(bundle) { return true }
             // Fallback: any app whose bundle prefix suggests a web engine
-            if bundle.contains("webkit") || bundle.contains("browser") || bundle.contains("chrome") {
+            let lowerBundle = bundle.lowercased()
+            if lowerBundle.contains("webkit") || lowerBundle.contains("browser") || lowerBundle.contains("chrome") {
                 return true
             }
         }

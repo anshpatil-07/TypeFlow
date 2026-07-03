@@ -81,7 +81,10 @@ def safari_eval_javascript(source):
     result = osascript(script, timeout=10)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "Safari JavaScript failed")
-    return result.stdout.strip()
+    stdout_val = result.stdout.strip()
+    if stdout_val.startswith('"') and stdout_val.endswith('"'):
+        stdout_val = '\\n'.join(stdout_val.split('\n'))
+    return stdout_val
 
 def focus_and_clear():
     activate_safari()
@@ -142,44 +145,48 @@ def find_latest_ghost_matching(since_epoch, min_length=1):
         pass
     return None
 
-def find_accept_diagnostic(since_epoch):
-    log_file = Path(DIAGNOSTICS_LOG)
-    if not log_file.exists():
-        return None
-    try:
-        tail_output = subprocess.check_output(["tail", "-n", "1000", str(log_file)], text=True, errors="replace")
-        for line in reversed(tail_output.splitlines()):
-            if "[AcceptDiagnostic]" in line:
-                try:
-                    json_str = line.split("[AcceptDiagnostic] ")[1]
-                    diag = json.loads(json_str)
-                    epoch = float(diag.get("epochSeconds") or 0)
-                    if epoch >= since_epoch:
-                        return diag
-                except Exception:
-                    pass
-    except Exception:
-        pass
+def find_accept_diagnostic(since_epoch, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        log_file = Path(DIAGNOSTICS_LOG)
+        if log_file.exists():
+            try:
+                tail_output = subprocess.check_output(["tail", "-n", "1000", str(log_file)], text=True, errors="replace")
+                for line in reversed(tail_output.splitlines()):
+                    if "[AcceptDiagnostic]" in line:
+                        try:
+                            json_str = line.split("[AcceptDiagnostic] ")[1]
+                            diag = json.loads(json_str)
+                            epoch = float(diag.get("epochSeconds") or 0)
+                            if epoch >= since_epoch:
+                                return diag
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        time.sleep(0.05)
     return None
 
-def find_prefix_consumption_diagnostic(since_epoch):
-    log_file = Path(DIAGNOSTICS_LOG)
-    if not log_file.exists():
-        return None
-    try:
-        tail_output = subprocess.check_output(["tail", "-n", "1000", str(log_file)], text=True, errors="replace")
-        for line in reversed(tail_output.splitlines()):
-            if "[PrintableInputDiagnostic]" in line:
-                try:
-                    json_str = line.split("[PrintableInputDiagnostic] ")[1]
-                    diag = json.loads(json_str)
-                    epoch = float(diag.get("epochSeconds") or 0)
-                    if epoch >= since_epoch:
-                        return diag
-                except Exception:
-                    pass
-    except Exception:
-        pass
+def find_prefix_consumption_diagnostic(since_epoch, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        log_file = Path(DIAGNOSTICS_LOG)
+        if log_file.exists():
+            try:
+                tail_output = subprocess.check_output(["tail", "-n", "1000", str(log_file)], text=True, errors="replace")
+                for line in reversed(tail_output.splitlines()):
+                    if "[PrintableInputDiagnostic]" in line:
+                        try:
+                            json_str = line.split("[PrintableInputDiagnostic] ")[1]
+                            diag = json.loads(json_str)
+                            epoch = float(diag.get("epochSeconds") or 0)
+                            if epoch >= since_epoch:
+                                return diag
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        time.sleep(0.05)
     return None
 
 def main():
@@ -234,8 +241,14 @@ body { margin: 0; background: #fff; }
         {"name": "prose_1", "prefix": "The quick brown "},
         {"name": "prose_2", "prefix": "ok so it "},
         {"name": "email", "prefix": "Dear "},
-        {"name": "java", "prefix": "public class "},
-        {"name": "sql", "prefix": "SELECT * FROM "}
+        {"name": "java_class", "prefix": "public class "},
+        {"name": "java_method", "prefix": "public void testMethod() "},
+        {"name": "spring_boot", "prefix": "@RestController\nclass Controller "},
+        {"name": "sql_query", "prefix": "SELECT * FROM users WHERE "},
+        {"name": "junit_assert", "prefix": "assertEquals(expected, "},
+        {"name": "exception_log", "prefix": "try {\n    doSomething();\n} catch (Exception e) "},
+        {"name": "code_midword", "prefix": "public void print"},
+        {"name": "screen_code_copy", "prefix": "class Helper "}
     ]
 
     for case in latency_cases:
@@ -303,36 +316,47 @@ body { margin: 0; background: #fff; }
             final_latency = polled_latency_ms if tab_full_inserted_time else accept_to_full
             
             transform_verified = bool(diag.get("transformVerified") or diag.get("acceptSuccess") or False)
+        else:
+            accepted_chunk = ""
+            disp_after = displayed_completion
+            insertion_method = "unknown"
+            final_latency = polled_latency_ms
+            inserted_atomically = False
+            unrelated = False
+            accept_success = False
+            transform_verified = False
+            fail_reason = "telemetry-log-not-found"
+            final_latency = polled_latency_ms
 
-            # Pass criteria:
-            # 1. No existing text was replaced (critical correctness invariant).
-            # 2. Transform verified: lineAfter == lineBefore + acceptedChunk.
-            # 3. Latency <= 100ms (charByChar takes ~5ms/char so allow up to 100ms).
-            # 4. acceptSuccess reported by Swift.
-            # NOTE: insertedAtomically is NOT required — charByChar with a verified
-            # transform is equally correct. The old AX path was preferred but it was
-            # causing destructive insertions in browsers.
-            is_pass = accept_success and transform_verified and not unrelated
-            if final_latency > 100.0:
-                is_pass = False
-                fail_reason = f"latency-too-high ({final_latency:.1f}ms)"
-            if unrelated:
-                is_pass = False
-                fail_reason = "unrelated-text-changed"
+        # Pass criteria:
+        # 1. No existing text was replaced (critical correctness invariant).
+        # 2. Transform verified: lineAfter == lineBefore + acceptedChunk.
+        # 3. Latency <= 100ms (charByChar takes ~5ms/char so allow up to 100ms).
+        # 4. acceptSuccess reported by Swift.
+        # NOTE: insertedAtomically is NOT required — charByChar with a verified
+        # transform is equally correct. The old AX path was preferred but it was
+        # causing destructive insertions in browsers.
+        is_pass = accept_success and transform_verified and not unrelated
+        if final_latency > 100.0:
+            is_pass = False
+            fail_reason = f"latency-too-high ({final_latency:.1f}ms)"
+        if unrelated:
+            is_pass = False
+            fail_reason = "unrelated-text-changed"
                 
-            results["acceptance_latency"].append({
-                "case": case["name"],
-                "prefix": case["prefix"],
-                "displayedCompletionBefore": displayed_completion,
-                "acceptedChunk": accepted_chunk,
-                "displayedCompletionAfter": disp_after,
-                "insertionMethod": insertion_method,
-                "acceptToFullInsertedMs": final_latency,
-                "insertedAtomically": inserted_atomically,
-                "unrelatedTextChanged": unrelated,
-                "pass": is_pass,
-                "failReason": fail_reason
-            })
+        results["acceptance_latency"].append({
+            "case": case["name"],
+            "prefix": case["prefix"],
+            "displayedCompletionBefore": displayed_completion,
+            "acceptedChunk": accepted_chunk,
+            "displayedCompletionAfter": disp_after,
+            "insertionMethod": insertion_method,
+            "acceptToFullInsertedMs": final_latency,
+            "insertedAtomically": inserted_atomically,
+            "unrelatedTextChanged": unrelated,
+            "pass": is_pass,
+            "failReason": fail_reason
+        })
         time.sleep(0.5)
 
     # =========================================================================

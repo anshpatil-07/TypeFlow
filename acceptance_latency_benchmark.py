@@ -81,7 +81,10 @@ def safari_eval_javascript(source):
     result = osascript(script, timeout=10)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "Safari JavaScript failed")
-    return result.stdout.strip()
+    stdout_val = result.stdout.strip()
+    if stdout_val.startswith('"') and stdout_val.endswith('"'):
+        stdout_val = '\\n'.join(stdout_val.split('\n'))
+    return stdout_val
 
 def focus_and_clear():
     js = (
@@ -197,8 +200,14 @@ body { margin: 0; background: #fff; }
         {"name": "prose_1", "prefix": "The quick brown "},
         {"name": "prose_2", "prefix": "ok so it "},
         {"name": "email", "prefix": "Dear "},
-        {"name": "java", "prefix": "public class "},
-        {"name": "sql", "prefix": "SELECT * FROM "}
+        {"name": "java_class", "prefix": "public class "},
+        {"name": "java_method", "prefix": "public void testMethod() "},
+        {"name": "spring_boot", "prefix": "@RestController\nclass Controller "},
+        {"name": "sql_query", "prefix": "SELECT * FROM users WHERE "},
+        {"name": "junit_assert", "prefix": "assertEquals(expected, "},
+        {"name": "exception_log", "prefix": "try {\n    doSomething();\n} catch (Exception e) "},
+        {"name": "code_midword", "prefix": "public void print"},
+        {"name": "screen_code_copy", "prefix": "class Helper "}
     ]
 
     results = []

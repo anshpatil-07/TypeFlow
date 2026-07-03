@@ -494,13 +494,33 @@ class CompletionManager: @unchecked Sendable {
     /// Tracks the timestamp of the most recent keystroke for adaptive debounce.
     private var lastKeystrokeTime: Date = .distantPast
     
-    private var activeSpellCorrection: (misspelled: String, corrected: String)?
+    var activeSpellCorrection: (misspelled: String, corrected: String)?
     private var activeSnippetKey: String?
     var activeRewriteText: String?
     var activeRewritePID: pid_t?
     var activeRewriteApp: NSRunningApplication?
     var activeSmartReplyPID: pid_t?
     private var rewriteTask: Task<Void, Never>?
+    
+    private var requestCount: Int = 0
+    private var initialRSS: Double = 0.0
+    private var warmRSS: Double = 0.0
+    private var maxRSS: Double = 0.0
+
+    private func getRSSMemory() -> Double {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
+        let kerr: kern_return_t = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        if kerr == KERN_SUCCESS {
+            return Double(info.resident_size) / 1024.0 / 1024.0
+        } else {
+            return 0.0
+        }
+    }
     
     var isSuppressedUntilNextTyping = false
     private var lastBufferSnapshot: String = ""
@@ -1889,11 +1909,12 @@ class CompletionManager: @unchecked Sendable {
     }
     
     func onTextChanged(bufferFallback: String = "") {
-        if isRewrite || isSmartReply { return }
-        if TextInjector.shared.syntheticEventWithinLast(milliseconds: 1500.0) {
-            print("[TypeFlow-Debug] onTextChanged: ignoring text change because of recent synthetic injection")
-            return
-        }
+        autoreleasepool {
+            if isRewrite || isSmartReply { return }
+            if TextInjector.shared.syntheticEventWithinLast(milliseconds: 1500.0) {
+                print("[TypeFlow-Debug] onTextChanged: ignoring text change because of recent synthetic injection")
+                return
+            }
         
         // ── Dynamic Typing Invalidation / Prefix Consumption ──────────────────────────────────────
         // If an overlay is active, verify if user typed text matches the active prediction.
@@ -2164,6 +2185,7 @@ class CompletionManager: @unchecked Sendable {
         }
         debounceAuditScheduled(text: bufferFallback, textHash: debounceAudit.textHash, workID: scheduledWorkID, delayMs: debounceDelayMs)
         LatencyInstrumentation.shared.debounceScheduled(workID: scheduledWorkID, delayMs: debounceDelayMs)
+        }
     }
     
     private func triggerGeneration(with text: String? = nil, workID: UInt64? = nil) {
@@ -2180,15 +2202,27 @@ class CompletionManager: @unchecked Sendable {
                 return
             }
             
+            self.requestCount += 1
+            let currentRSS = self.getRSSMemory()
+            if self.initialRSS == 0.0 { self.initialRSS = currentRSS }
+            if self.requestCount == 5 && self.warmRSS == 0.0 { self.warmRSS = currentRSS }
+            if currentRSS > self.maxRSS { self.maxRSS = currentRSS }
+            let deltaFromWarm = self.warmRSS > 0.0 ? currentRSS - self.warmRSS : 0.0
+            
+            let historyCounts = UniversalContextManager.shared.contextHistory.count
+            let snapshotCounts = 1
+            let activeTaskCount = (self.workController.isGenerationRunning ? 1 : 0)
+            let subviewCount = self.overlayWindowController?.overlayWindow.contentView?.subviews.count ?? 0
+            
+            print("[MemoryDiagnostic] rssMB=\(String(format: "%.1f", currentRSS)) deltaFromWarmMB=\(String(format: "%.1f", deltaFromWarm)) requestCount=\(self.requestCount) historyCounts=\(historyCounts) snapshotCounts=\(snapshotCounts) activeTaskCount=\(activeTaskCount) overlaySubviewCount=\(subviewCount)")
+            
             print("[TypeFlow-Debug] triggerGeneration started. Cancelling any previous inflight task...")
-            // workController manages the current work ID and will cancel its own tasks.
             
             if let providedText = text {
                 logContextAudit("triggerGeneration source=providedText providedTextLen=\(providedText.count) providedText='\(contextAuditPreview(providedText))' liveBufferLen=0")
                 let snapshot = PredictionSnapshot(rawTextBeforeCaret: providedText, source: .providedText, liveBuffer: "")
                 self.continueGeneration(snapshot: snapshot)
             } else {
-                // We MUST fetch AX text on a background thread because kAXValue polling is extremely expensive.
                 LatencyInstrumentation.shared.axFetchStart(workID: workID)
                 self.recordAXHotPathGetTextRead(phase: "generation")
                 let textSnapshot = self.accessibilityMonitor?.getTextBeforeCaretSnapshot()
@@ -2198,59 +2232,17 @@ class CompletionManager: @unchecked Sendable {
                 let bufferAfterAX = self.accessibilityMonitor?.keystrokeBuffer ?? ""
                 logContextAudit("triggerGeneration afterAX axSource=\(axSource.rawValue) axTextLen=\(axText.count) axText='\(contextAuditPreview(axText))' keystrokeBufferLen=\(bufferAfterAX.count) keystrokeBuffer='\(contextAuditPreview(bufferAfterAX))'")
                 
-                let isBrowser = ["zen", "safari", "chrome", "brave", "edge", "arc", "firefox"].contains {
-                    NSWorkspace.shared.frontmostApplication?.localizedName?.lowercased().contains($0) == true ||
-                    NSWorkspace.shared.frontmostApplication?.bundleIdentifier?.lowercased().contains($0) == true
-                }
+                let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
+                let snapshot = PredictionSnapshot(
+                    rawTextBeforeCaret: !axText.isEmpty ? axText : liveBuffer,
+                    source: !axText.isEmpty ? axSource : .keystrokeBufferFallback,
+                    liveBuffer: liveBuffer
+                )
+                let finalLine = snapshot.rawTextBeforeCaret
                 
-                let isFIM = ModelProfile.current().promptMode == .fim
-                
-                if axText.count < 100 && isBrowser {
-                    Task {
-                        LatencyInstrumentation.shared.ocrStart(workID: workID)
-                        if let ocrText = await ScreenContextManager.shared.performRapidBrowserOCR() {
-                            LatencyInstrumentation.shared.ocrEnd(workID: workID, textLen: ocrText.count)
-                            DispatchQueue.main.async {
-                                // Append this OCR text to the === Screen Context === payload
-                                ScreenContextManager.shared.latestScreenText = ocrText
-                                let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                                let snapshot = PredictionSnapshot(
-                                    rawTextBeforeCaret: !axText.isEmpty ? axText : liveBuffer,
-                                    source: !axText.isEmpty ? axSource : .keystrokeBufferFallback,
-                                    liveBuffer: liveBuffer
-                                )
-                                let finalLine = snapshot.rawTextBeforeCaret
-                                self.logContextAudit("triggerGeneration dispatch viaBrowserOCR finalLineSource=\(snapshot.source.rawValue) axTextLen=\(axText.count) liveBufferLen=\(liveBuffer.count) finalLineLen=\(finalLine.count) finalLine='\(self.contextAuditPreview(finalLine))' liveBuffer='\(self.contextAuditPreview(liveBuffer))' ocrLen=\(ocrText.count)")
-                                self.continueGeneration(snapshot: snapshot)
-                            }
-                        } else {
-                            LatencyInstrumentation.shared.ocrEnd(workID: workID, textLen: 0)
-                            DispatchQueue.main.async {
-                                let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                                let snapshot = PredictionSnapshot(
-                                    rawTextBeforeCaret: !axText.isEmpty ? axText : liveBuffer,
-                                    source: !axText.isEmpty ? axSource : .keystrokeBufferFallback,
-                                    liveBuffer: liveBuffer
-                                )
-                                let finalLine = snapshot.rawTextBeforeCaret
-                                self.logContextAudit("triggerGeneration dispatch viaBrowserNoOCR finalLineSource=\(snapshot.source.rawValue) axTextLen=\(axText.count) liveBufferLen=\(liveBuffer.count) finalLineLen=\(finalLine.count) finalLine='\(self.contextAuditPreview(finalLine))' liveBuffer='\(self.contextAuditPreview(liveBuffer))'")
-                                self.continueGeneration(snapshot: snapshot)
-                            }
-                        }
-                    }
-                } else {
-                    let liveBuffer = self.accessibilityMonitor?.keystrokeBuffer ?? ""
-                    let snapshot = PredictionSnapshot(
-                        rawTextBeforeCaret: !axText.isEmpty ? axText : liveBuffer,
-                        source: !axText.isEmpty ? axSource : .keystrokeBufferFallback,
-                        liveBuffer: liveBuffer
-                    )
-                    let finalLine = snapshot.rawTextBeforeCaret
-                    
-                    DispatchQueue.main.async {
-                        self.logContextAudit("triggerGeneration dispatch direct finalLineSource=\(snapshot.source.rawValue) axTextLen=\(axText.count) liveBufferLen=\(liveBuffer.count) finalLineLen=\(finalLine.count) finalLine='\(self.contextAuditPreview(finalLine))' liveBuffer='\(self.contextAuditPreview(liveBuffer))'")
-                        self.continueGeneration(snapshot: snapshot)
-                    }
+                DispatchQueue.main.async {
+                    self.logContextAudit("triggerGeneration dispatch direct finalLineSource=\(snapshot.source.rawValue) axTextLen=\(axText.count) liveBufferLen=\(liveBuffer.count) finalLineLen=\(finalLine.count) finalLine='\(self.contextAuditPreview(finalLine))' liveBuffer='\(self.contextAuditPreview(liveBuffer))'")
+                    self.continueGeneration(snapshot: snapshot)
                 }
             }
         }
@@ -2688,6 +2680,57 @@ class CompletionManager: @unchecked Sendable {
         }
     }
     
+    struct EditorTextSnapshot {
+        let fullText: String?
+        let textBeforeCaret: String
+        let textAfterCaret: String
+        let selectedRange: CFRange?
+    }
+
+    private func getEditorTextSnapshot() -> EditorTextSnapshot {
+        guard let axElement = getFreshFocusedElement() else {
+            let before = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+            return EditorTextSnapshot(fullText: nil, textBeforeCaret: before, textAfterCaret: "", selectedRange: nil)
+        }
+        
+        var valueRef: CFTypeRef?
+        var fullText: String? = nil
+        if AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef) == .success,
+           let val = valueRef {
+            if let stringValue = val as? String {
+                fullText = stringValue
+            } else if CFGetTypeID(val) == CFAttributedStringGetTypeID() {
+                let attrStr = val as! CFAttributedString
+                fullText = CFAttributedStringGetString(attrStr) as String
+            }
+        }
+        
+        var rangeRef: CFTypeRef?
+        var selectedRange: CFRange? = nil
+        if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+           let rangeVal = rangeRef {
+            var range = CFRange(location: 0, length: 0)
+            if AXValueGetValue(rangeVal as! AXValue, .cfRange, &range) {
+                selectedRange = range
+            }
+        }
+        
+        let textBefore = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+        
+        if let fullText = fullText, let range = selectedRange {
+            let utf16 = fullText.utf16
+            let cursorIndex = range.location
+            let safeCursorIndex = max(0, min(cursorIndex, utf16.count))
+            if let sliceCaret = utf16.index(utf16.startIndex, offsetBy: safeCursorIndex, limitedBy: utf16.endIndex) {
+                let before = String(fullText[..<sliceCaret])
+                let after = String(fullText[sliceCaret...])
+                return EditorTextSnapshot(fullText: fullText, textBeforeCaret: before, textAfterCaret: after, selectedRange: range)
+            }
+        }
+        
+        return EditorTextSnapshot(fullText: nil, textBeforeCaret: textBefore, textAfterCaret: "", selectedRange: selectedRange)
+    }
+
     func handleTabPressed() -> Bool {
         let isVisible = overlayWindowController?.overlayWindow.isVisible ?? false
         let hasDisplayedCompletion = displayedCompletion != nil && !displayedCompletion!.isEmpty
@@ -2765,27 +2808,21 @@ class CompletionManager: @unchecked Sendable {
             clearCompletion()
             return true
         }
-        
+
         if let completion = displayedCompletion, !completion.isEmpty {
             let startTime = CFAbsoluteTimeGetCurrent()
             
             // --- Pre-insertion snapshot ---
-            let activeLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
+            let snapBefore = getEditorTextSnapshot()
+            let activeLine = snapBefore.textBeforeCaret
             let activeElement = getFreshFocusedElement()
             
             // Read selected range before insertion (for diagnostics and safety)
             var selectedRangeLocationBefore = -1
             var selectedRangeLengthBefore = -1
-            if let elem = activeElement {
-                var rangeRef: AnyObject?
-                let status = AXUIElementCopyAttributeValue(elem, kAXSelectedTextRangeAttribute as CFString, &rangeRef)
-                if status == .success, let axValue = rangeRef {
-                    var range = CFRange(location: 0, length: 0)
-                    if AXValueGetValue(axValue as! AXValue, .cfRange, &range) {
-                        selectedRangeLocationBefore = range.location
-                        selectedRangeLengthBefore = range.length
-                    }
-                }
+            if let range = snapBefore.selectedRange {
+                selectedRangeLocationBefore = range.location
+                selectedRangeLengthBefore = range.length
             }
             
             // Compute focused PID for diagnostics
@@ -2810,25 +2847,56 @@ class CompletionManager: @unchecked Sendable {
             let insertionAPIReportedSuccess = resultDict["insertionAPIReportedSuccess"] as? Bool ?? false
             
             // --- Post-insertion: poll for text to settle ---
-            // For char-by-char paths we need to wait for all keystrokes to land.
-            var updatedLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
-            var transformVerified = (updatedLine == expectedLineAfter)
+            var snapAfter = getEditorTextSnapshot()
+            var transformVerified = false
+            
+            if let fullBefore = snapBefore.fullText, let fullAfter = snapAfter.fullText {
+                let expectedFullText = snapBefore.textBeforeCaret + acceptedChunk + snapBefore.textAfterCaret
+                transformVerified = (fullAfter == expectedFullText)
+            } else {
+                let expectedLineAfter = snapBefore.textBeforeCaret + acceptedChunk
+                transformVerified = (snapAfter.textBeforeCaret == expectedLineAfter)
+            }
+            
             if !transformVerified {
                 for _ in 0..<30 {
                     RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
-                    updatedLine = accessibilityMonitor?.getTextBeforeCaret() ?? ""
-                    transformVerified = (updatedLine == expectedLineAfter)
+                    snapAfter = getEditorTextSnapshot()
+                    if let fullBefore = snapBefore.fullText, let fullAfter = snapAfter.fullText {
+                        let expectedFullText = snapBefore.textBeforeCaret + acceptedChunk + snapBefore.textAfterCaret
+                        transformVerified = (fullAfter == expectedFullText)
+                    } else {
+                        let expectedLineAfter = snapBefore.textBeforeCaret + acceptedChunk
+                        transformVerified = (snapAfter.textBeforeCaret == expectedLineAfter)
+                    }
                     if transformVerified { break }
                 }
             }
             
             // --- Transform verification ---
-            // Success ONLY if existing text was preserved and chunk was inserted exactly once.
+            let updatedLine = snapAfter.textBeforeCaret
             let replacedExistingText = !updatedLine.hasPrefix(activeLine)
-            let unrelatedTextChanged = replacedExistingText  // same check from caret perspective
+            let unrelatedTextChanged = replacedExistingText
             let duplicatedAcceptedChunk = updatedLine.hasSuffix(acceptedChunk + acceptedChunk)
             
-            var acceptSuccess = transformVerified && !replacedExistingText && !duplicatedAcceptedChunk
+            // Count deleted lines
+            var deletedLineCount = 0
+            if let fullBefore = snapBefore.fullText, let fullAfter = snapAfter.fullText {
+                let linesBefore = fullBefore.components(separatedBy: .newlines).count
+                let linesAfter = fullAfter.components(separatedBy: .newlines).count
+                deletedLineCount = max(0, linesBefore - linesAfter)
+            } else {
+                let linesBefore = snapBefore.textBeforeCaret.components(separatedBy: .newlines).count
+                let linesAfter = snapAfter.textBeforeCaret.components(separatedBy: .newlines).count
+                deletedLineCount = max(0, linesBefore - linesAfter)
+            }
+            
+            // Native Tab Leaked check
+            let tabsBefore = snapBefore.textBeforeCaret.filter { $0 == "\t" }.count
+            let tabsAfter = snapAfter.textBeforeCaret.filter { $0 == "\t" }.count
+            let nativeTabLeaked = tabsAfter > tabsBefore
+            
+            var acceptSuccess = transformVerified && !replacedExistingText && !duplicatedAcceptedChunk && deletedLineCount == 0 && !nativeTabLeaked
             var failReason = "none"
             var rollbackAttempted = false
             var rollbackSucceeded = false
@@ -2838,12 +2906,16 @@ class CompletionManager: @unchecked Sendable {
                     failReason = "destructiveInsertTransform"
                 } else if duplicatedAcceptedChunk {
                     failReason = "duplicatedChunk"
+                } else if deletedLineCount > 0 {
+                    failReason = "linesDeleted"
+                } else if nativeTabLeaked {
+                    failReason = "nativeTabLeaked"
                 } else if !transformVerified {
                     failReason = "transformNotVerified"
                 }
                 
                 // Attempt Cmd+Z rollback to restore text before giving up
-                if replacedExistingText || duplicatedAcceptedChunk {
+                if replacedExistingText || duplicatedAcceptedChunk || deletedLineCount > 0 || nativeTabLeaked {
                     rollbackAttempted = true
                     print("[TypeFlow-Debug] Destructive insertion detected — attempting Cmd+Z rollback. failReason=\(failReason)")
                     if let source = CGEventSource(stateID: .combinedSessionState),
@@ -2898,14 +2970,19 @@ class CompletionManager: @unchecked Sendable {
                 "expectedLineAfter": expectedLineAfter,
                 "selectedRangeLocationBefore": selectedRangeLocationBefore,
                 "selectedRangeLengthBefore": selectedRangeLengthBefore,
+                "selectedRangeLocationAfter": snapAfter.selectedRange?.location ?? -1,
+                "selectedRangeLengthAfter": snapAfter.selectedRange?.length ?? -1,
                 "insertionMethod": insertionMethod,
                 "insertionAPIReportedSuccess": insertionAPIReportedSuccess,
                 "isBrowser": isBrowser,
                 "transformVerified": transformVerified,
+                "fullTransformVerified": transformVerified,
                 "acceptSuccess": acceptSuccess,
                 "replacedExistingText": replacedExistingText,
                 "unrelatedTextChanged": unrelatedTextChanged,
                 "duplicatedAcceptedChunk": duplicatedAcceptedChunk,
+                "deletedLineCount": deletedLineCount,
+                "nativeTabLeaked": nativeTabLeaked,
                 "rollbackAttempted": rollbackAttempted,
                 "rollbackSucceeded": rollbackSucceeded,
                 "failReason": failReason,
@@ -3104,6 +3181,7 @@ final class SuggestionWorkController: @unchecked Sendable {
     private var generationTask: Task<Void, Never>?
     private var isGenTaskActive = false
     private var latestWorkID: UInt64 = 0
+    private var latestGenWorkID: UInt64 = 0
     private let lock = NSLock()
 
     var currentWorkID: UInt64 {
@@ -3121,6 +3199,7 @@ final class SuggestionWorkController: @unchecked Sendable {
     func setGenerationFinished() {
         lock.lock()
         isGenTaskActive = false
+        generationTask = nil
         lock.unlock()
     }
 
@@ -3131,12 +3210,18 @@ final class SuggestionWorkController: @unchecked Sendable {
     ) -> UInt64 {
         lock.lock()
         debounceTask?.cancel()
-        // Do NOT cancel generationTask here to allow continuous background generation.
         latestWorkID &+= 1
         let workID = latestWorkID
         lock.unlock()
 
         let task = Task {
+            defer {
+                lock.lock()
+                if self.latestWorkID == workID {
+                    self.debounceTask = nil
+                }
+                lock.unlock()
+            }
             let delayNanoseconds = UInt64(delayMilliseconds) * 1_000_000
             try? await Task.sleep(nanoseconds: delayNanoseconds)
             if Task.isCancelled || !isCurrent(workID) { return }
@@ -3156,15 +3241,23 @@ final class SuggestionWorkController: @unchecked Sendable {
         lock.lock()
         generationTask?.cancel()
         isGenTaskActive = true
+        latestGenWorkID = workID
+        lock.unlock()
+
         let task = Task {
             defer {
                 lock.lock()
                 self.isGenTaskActive = false
+                if self.latestGenWorkID == workID {
+                    self.generationTask = nil
+                }
                 lock.unlock()
             }
             if Task.isCancelled || !isCurrent(workID) { return }
             await operation()
         }
+        
+        lock.lock()
         generationTask = task
         lock.unlock()
     }
@@ -3177,6 +3270,7 @@ final class SuggestionWorkController: @unchecked Sendable {
         generationTask = nil
         isGenTaskActive = false
         latestWorkID &+= 1
+        latestGenWorkID &+= 1
         lock.unlock()
     }
 
