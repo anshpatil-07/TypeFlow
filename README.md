@@ -72,7 +72,7 @@ TypeFlow is engineered around total data sovereignty:
 ### Prerequisites
 - **macOS**: macOS 14.0 or later (Apple Silicon M1/M2/M3/M4 required for Metal/MLX hardware acceleration).
 - **Xcode**: Xcode 15.0+ (for building from source).
-- **Model File**: A compatible `.gguf` local model (e.g., Llama-3-8B-Instruct, Gemma-2B, or Qwen-1.5B/2.5B formatted for llama.cpp).
+- **Model File**: TypeFlow currently uses **`Qwen2.5-Coder-1.5B-Instruct`** quantized to 4-bit (`Qwen2.5-Coder-1.5B.Q4_K_M.gguf`) as its canonical model, leveraging native Fill-In-the-Middle (FIM) token support (`<|fim_prefix|>`, `<|fim_suffix|>`, `<|fim_middle|>`). Other GGUF models (such as Gemma-2B causal models) are also supported via profile selection.
 
 ### Build Instructions
 1. Clone the repository:
@@ -94,9 +94,9 @@ Upon initial launch, macOS will prompt for required system permissions:
    - *System Settings ──> Privacy & Security ──> Screen & System Audio Recording ──> Enable TypeFlow*
 
 ### Configuring the LLM
-1. Download a compatible quantized `.gguf` model file.
-2. Place the model file in `~/Documents/` or select it via the TypeFlow menu bar settings icon.
-3. Once loaded, TypeFlow will initialize the GPU KV-cache and display a ready status in the menu bar.
+1. Download the canonical **`Qwen2.5-Coder-1.5B.Q4_K_M.gguf`** model file (or another compatible GGUF model).
+2. Place the model file in `~/Documents/` (or configure its location via the TypeFlow menu bar settings icon or launch arguments).
+3. Once loaded, TypeFlow automatically selects the `qwenCoderFIM` profile, initializes the GPU KV-cache, and displays a ready status in the menu bar.
 
 ---
 
