@@ -42,6 +42,8 @@ DerivedData/
 benchmark_artifacts/
 devtools/reports/
 devtools/scratch/
+devtools/demo/
+docs/assets/demo-screenshots/
 
 # Generated binaries and compiled utilities
 type_text

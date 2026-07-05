@@ -12,6 +12,18 @@ TypeFlow is a native macOS menu bar application that monitors active text fields
 
 ---
 
+## Demo
+
+<p align="center">
+  <video src="docs/assets/typeflow-demo.mp4" controls muted loop playsinline width="100%">
+    Your browser does not support the video tag.
+  </video>
+</p>
+
+[Download the demo video](docs/assets/typeflow-demo.mp4)
+
+---
+
 ## Key Features
 
 - **Universal System-Wide Ghost Text**: Inline autocompletion that works seamlessly in Safari, Xcode, TextEdit, Notes, Mail, and other native macOS applications without custom input methods or browser extensions.
