@@ -15,12 +15,9 @@ TypeFlow is a native macOS menu bar application that monitors active text fields
 ## Demo
 
 <p align="center">
-  <video src="docs/assets/typeflow-demo.mp4" controls muted loop playsinline width="100%">
-    Your browser does not support the video tag.
-  </video>
 </p>
 
-[Download the demo video](docs/assets/typeflow-demo.mp4)
+https://github.com/user-attachments/assets/ebc79d29-ca34-42c3-aac4-66438a382eff
 
 ---
 
