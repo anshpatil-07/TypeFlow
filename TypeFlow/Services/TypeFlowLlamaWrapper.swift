@@ -312,6 +312,9 @@ actor TypeFlowLlamaWrapper {
         guard let smpl = llama_sampler_chain_init(sparams) else {
             throw NSError(domain: "TypeFlowLlamaWrapper", code: 6, userInfo: [NSLocalizedDescriptionKey: "Failed to init sampler"])
         }
+        defer {
+            llama_sampler_free(smpl)
+        }
         
         let testTopK = UserDefaults.standard.integer(forKey: "TestSamplerTopK")
         let testTopP = Float(UserDefaults.standard.double(forKey: "TestSamplerTopP"))
@@ -435,7 +438,6 @@ actor TypeFlowLlamaWrapper {
             n_cur += 1
         }
         
-        llama_sampler_free(smpl)
         let genT1 = CFAbsoluteTimeGetCurrent()
         if let workID = workID {
             LatencyInstrumentation.shared.setTokenizationMetrics(requestID: nil, workID: workID, promptTokens: Int(n_tokens), generatedTokens: generatedCount, tStart: t0, tEnd: t1, gEnd: genT1)
