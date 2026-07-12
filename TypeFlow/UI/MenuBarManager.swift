@@ -195,8 +195,13 @@ class SettingsTabViewController: NSTabViewController {
         // addTab(title: "Models", icon: "cpu", view: ModelsSettingsView())
         addTab(title: "Generation", icon: "person.text.rectangle", view: GenerationSettingsView())
         addTab(title: "Snippets", icon: "text.badge.plus", view: SnippetsSettingsView())
-        addTab(title: "Apps", icon: "app.badge", view: AppOverridesSettingsView())
-        addTab(title: "Behaviors", icon: "brain.head.profile", view: LearnedBehaviorsView())
+    }
+    
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        if selectedTabViewItemIndex >= tabViewItems.count {
+            selectedTabViewItemIndex = 0
+        }
     }
 }
 

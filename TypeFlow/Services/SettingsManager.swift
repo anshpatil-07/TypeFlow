@@ -17,7 +17,7 @@ class SettingsManager: ObservableObject {
     
     @AppStorage("tone") var tone: String = "Neutral"
     @AppStorage("snippetsData") var snippetsData: Data = Data()
-    @AppStorage("appConfigsData") var appConfigsData: Data = Data()
+
     // @AppStorage("activeModelId") var activeModelId: String = "mlx-community/gemma-4-E4B-it-4bit"
     var activeModelId: String {
         get { "mlx-community/gemma-4-E4B-it-4bit" }
@@ -123,22 +123,7 @@ class SettingsManager: ObservableObject {
         }
     }
     
-    func getAppConfigs() -> [String: AppConfig] {
-        if let decoded = try? JSONDecoder().decode([String: AppConfig].self, from: appConfigsData) {
-            return decoded
-        }
-        return [:]
-    }
-    
-    func saveAppConfigs(_ configs: [String: AppConfig]) {
-        if let encoded = try? JSONEncoder().encode(configs) {
-            appConfigsData = encoded
-        }
-    }
-    
     func getEffectiveConfig(for bundleId: String) -> (isEnabled: Bool, toneProfile: ToneProfile) {
-        let configs = getAppConfigs()
-        
         // Check old excluded list for backwards compatibility
         let excludedList = excludedApps.components(separatedBy: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -148,23 +133,8 @@ class SettingsManager: ObservableObject {
             return (false, getToneProfile(by: tone))
         }
         
-        if let specificConfig = configs[bundleId] {
-            let activeToneId = specificConfig.customTone ?? tone
-            var profile = getToneProfile(by: activeToneId)
-            if let customInst = specificConfig.customInstructions, !customInst.isEmpty {
-                profile.systemInstructions = customInst
-            }
-            return (specificConfig.isEnabled, profile)
-        }
-        
         return (true, getToneProfile(by: tone))
     }
-}
-
-struct AppConfig: Codable, Equatable {
-    var isEnabled: Bool
-    var customTone: String?
-    var customInstructions: String?
 }
 
 struct ToneProfile: Codable, Identifiable, Hashable {

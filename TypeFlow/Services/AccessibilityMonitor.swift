@@ -2014,34 +2014,7 @@ class AccessibilityMonitor {
         
         // Space (49), Tab (48), or Punctuation (comma 43, period 47) finishes a word
         if keyCode == 49 || keyCode == 48 || keyCode == 43 || keyCode == 47 {
-            let components = keystrokeBuffer.components(separatedBy: .whitespacesAndNewlines)
-            if let lastTyped = components.last, !lastTyped.isEmpty {
-                let cleanWord = lastTyped.trimmingCharacters(in: .punctuationCharacters)
-                if !cleanWord.isEmpty, let expansion = AdaptivePatternLearner.shared.behaviors.abbreviationExpansions[cleanWord] {
-                    print("[TypeFlow-Debug] Abbreviation match: \(cleanWord) -> \(expansion)")
-                    
-                    // deleteCount = abbreviation + 1 to also erase the trigger character
-                    // (the Space/Tab/punctuation that macOS rendered before this callback fired)
-                    let deleteCount = cleanWord.count + 1
-                    
-                    var delimiterStr = ""
-                    if keyCode == 49 { delimiterStr = " " }
-                    else if keyCode == 48 { delimiterStr = "\t" }
-                    else if keyCode == 43 { delimiterStr = "," }
-                    else if keyCode == 47 { delimiterStr = "." }
-                    
-                    self.isExpandingAbbreviation = true
-                    
-                    DispatchQueue.main.async {
-                        TextInjector.shared.injectBackspaces(count: deleteCount)
-                        TextInjector.shared.injectCharByChar(text: expansion + delimiterStr)
-                    }
-                    if let range = keystrokeBuffer.range(of: cleanWord, options: .backwards) {
-                        keystrokeBuffer.replaceSubrange(range, with: expansion)
-                    }
-                }
-            }
-            
+
             if let deleted = lastDeletedWord, !deleted.isEmpty {
                 let newWord = keystrokeBuffer.components(separatedBy: .whitespacesAndNewlines).last?.trimmingCharacters(in: .punctuationCharacters) ?? ""
                 let deletedClean = deleted.trimmingCharacters(in: .punctuationCharacters)

@@ -36,19 +36,16 @@
 		CD2054678B56A3613C654157 /* CompletionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABD0110E416006C8306149A5 /* CompletionManager.swift */; };
 		D2D8FD01A75262A948712809 /* TQBRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6092230FF1CD0D78AE17C832 /* TQBRunner.swift */; };
 		D90DE8A4C7A9E7157A7EBDB2 /* LLMEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38D78AF85D2B1D43C2A1F595 /* LLMEngine.swift */; };
-		D9C104D224C5F0B3772E57CD /* AdaptivePatternLearner.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5F8946E9A037E871848ECDF /* AdaptivePatternLearner.swift */; };
 		DC32341AB8E61D6CAA87EA7F /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 930FC5207F08E16538FF9FCC /* MLXLMCommon */; };
 		DD42EE3727880BAD2944DDBD /* VocabularyExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DA8D0EB4D14AB0FF483343F /* VocabularyExtractor.swift */; };
 		DF366A1484FDC2DA35E327DE /* ContextAggregator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 722E6C256A4D4FC5B357DDD1 /* ContextAggregator.swift */; };
 		FD219084BED8C025ECC15880 /* AppMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7B4E9B28ADC504259DA53D /* AppMonitor.swift */; };
-		FE5FF543AF91167183755F42 /* LearnedBehaviorsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20AAD04C1AC98590AEEFE12D /* LearnedBehaviorsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		05EB25D921ECA98753720733 /* OverlayWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlayWindowController.swift; sourceTree = "<group>"; };
 		17E10BBEE87D159A245810AF /* ScreenContextManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenContextManager.swift; sourceTree = "<group>"; };
 		19423817E14CF35EE0B7699D /* NSServicesProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NSServicesProvider.swift; sourceTree = "<group>"; };
-		20AAD04C1AC98590AEEFE12D /* LearnedBehaviorsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LearnedBehaviorsView.swift; sourceTree = "<group>"; };
 		3387A32BFC8B70680FF3F7F5 /* ClipboardContextManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardContextManager.swift; sourceTree = "<group>"; };
 		37F6084B1571AB92ADF8C9B0 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		38D78AF85D2B1D43C2A1F595 /* LLMEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMEngine.swift; sourceTree = "<group>"; };
@@ -73,7 +70,6 @@
 		DA7B4E9B28ADC504259DA53D /* AppMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppMonitor.swift; sourceTree = "<group>"; };
 		E1A8D17E99ED859EFDE816D5 /* TextInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextInjector.swift; sourceTree = "<group>"; };
 		E97BD28D7E190489A867F6EF /* UsageStatsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageStatsManager.swift; sourceTree = "<group>"; };
-		F5F8946E9A037E871848ECDF /* AdaptivePatternLearner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdaptivePatternLearner.swift; sourceTree = "<group>"; };
 		FEB5606EEAD68ADBA304CA98 /* SettingsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -108,7 +104,6 @@
 			isa = PBXGroup;
 			children = (
 				67EAAD9BB78FE825F2AE21C7 /* DashboardView.swift */,
-				20AAD04C1AC98590AEEFE12D /* LearnedBehaviorsView.swift */,
 				CA244C8BC5E5A8594E318714 /* MenuBarManager.swift */,
 				05EB25D921ECA98753720733 /* OverlayWindowController.swift */,
 				37F6084B1571AB92ADF8C9B0 /* SettingsView.swift */,
@@ -121,7 +116,6 @@
 			children = (
 				A17026642FE4517700C02A1C /* TypeFlowLlamaWrapper.swift */,
 				85A7FADC3F2C9C781749B83B /* AccessibilityMonitor.swift */,
-				F5F8946E9A037E871848ECDF /* AdaptivePatternLearner.swift */,
 				DA7B4E9B28ADC504259DA53D /* AppMonitor.swift */,
 				3387A32BFC8B70680FF3F7F5 /* ClipboardContextManager.swift */,
 				76BD928AE38AB519C015C492 /* ClipboardMonitor.swift */,
@@ -234,7 +228,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				52D1F78B4E8AF606FB483910 /* AccessibilityMonitor.swift in Sources */,
-				D9C104D224C5F0B3772E57CD /* AdaptivePatternLearner.swift in Sources */,
 				8395DE9AE3DC7455589E5AEF /* AppDelegate.swift in Sources */,
 				FD219084BED8C025ECC15880 /* AppMonitor.swift in Sources */,
 				45845ADBE8138022847D6781 /* ClipboardContextManager.swift in Sources */,
@@ -243,7 +236,6 @@
 				DF366A1484FDC2DA35E327DE /* ContextAggregator.swift in Sources */,
 				384367460111D281D086DF1E /* DashboardView.swift in Sources */,
 				D90DE8A4C7A9E7157A7EBDB2 /* LLMEngine.swift in Sources */,
-				FE5FF543AF91167183755F42 /* LearnedBehaviorsView.swift in Sources */,
 				A0A05B2E7890C9234E748576 /* MenuBarManager.swift in Sources */,
 				5A3529A21E7522D13D9FE0FA /* ModelManager.swift in Sources */,
 				4327031ECD65C79220C7BC65 /* NSServicesProvider.swift in Sources */,

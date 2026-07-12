@@ -533,14 +533,6 @@ class PromptBuilder {
         }
 
         var clipboardIncluded = false
-        // Inline clipboard injection on trigger keyword
-        if policy != .inlineActiveTextOnly && hasClipboardTrigger(textBeforeCaret: textBeforeCaret) {
-            let recentClipboard = Array(ClipboardMonitor.shared.recentItems.suffix(3))
-            if !recentClipboard.isEmpty {
-                suffix += "\n" + recentClipboard.joined(separator: "\n") + "\n"
-                clipboardIncluded = true
-            }
-        }
 
         // `textBeforeCaret` is canonicalized before it reaches PromptBuilder.
         // Do not append `liveBuffer` here; doing so creates a second merge site
@@ -663,12 +655,7 @@ class PromptBuilder {
         return isCode ? "// \(line)" : line
     }
 
-    // MARK: - Clipboard trigger helper
 
-    func hasClipboardTrigger(textBeforeCaret: String) -> Bool {
-        let clipboardTriggers = AdaptivePatternLearner.shared.behaviors.clipboardTriggers
-        return clipboardTriggers.contains { textBeforeCaret.lowercased().hasSuffix($0) }
-    }
 
     // MARK: - Code editor detection
 

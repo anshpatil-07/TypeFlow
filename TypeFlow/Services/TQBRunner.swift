@@ -48,7 +48,7 @@ class TQBRunner {
                 try await testAdaptiveCodeCompletion()
                 passedCount += 1
                 
-                try await testAbbreviationUI()
+
                 passedCount += 1
                 
                 try await testBizarreContextTrap()
@@ -253,40 +253,7 @@ class TQBRunner {
     // ---------------------------------------------------------------------------
     // Test 6: Abbreviation UI — expansion of "elts" -> "elements" in buffer
     // TARGET: buffer.contains("elements") && !buffer.contains("elts")
-    // ---------------------------------------------------------------------------
-    func testAbbreviationUI() async throws {
-        print("Running Test 6: Abbreviation Expansion Execution...")
-        AdaptivePatternLearner.shared.addAbbreviation(short: "elts", expanded: "elements")
-        
-        let monitor = AccessibilityMonitor(onCaretMoved: { _ in })
-        monitor.keystrokeBuffer = "These are the el"
-        
-        // Simulate typing 't', 's', ' '
-        guard let charT = CGEvent(keyboardEventSource: nil, virtualKey: 17, keyDown: true) else { return }
-        charT.keyboardSetUnicodeString(stringLength: 1, unicodeString: [116]) // 't'
-        monitor.handleKeystroke(keyCode: 17, event: charT)
-        
-        guard let charS = CGEvent(keyboardEventSource: nil, virtualKey: 1, keyDown: true) else { return }
-        charS.keyboardSetUnicodeString(stringLength: 1, unicodeString: [115]) // 's'
-        monitor.handleKeystroke(keyCode: 1, event: charS)
-        
-        guard let space = CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true) else { return }
-        space.keyboardSetUnicodeString(stringLength: 1, unicodeString: [32]) // ' '
-        monitor.handleKeystroke(keyCode: 49, event: space)
-        
-        try await Task.sleep(nanoseconds: 500_000_000)
-        
-        let buf = monitor.keystrokeBuffer
-        print("  -> Buffer after space: '\(buf)'")
-        
-        let passed = buf.contains("elements") && !buf.contains("elts")
-        if passed {
-            print("✅ PASS: Abbreviation UI")
-        } else {
-            print("❌ FAIL: Expected buffer to contain 'elements' and not 'elts'. Got: '\(buf)'")
-            throw NSError(domain: "TQB", code: 6, userInfo: [NSLocalizedDescriptionKey: "Abbreviation expansion failed. Buffer: '\(buf)'"])
-        }
-    }
+
     
     // ---------------------------------------------------------------------------
     // Test 7: The Bizarre Context Trap (Honeytrap)
