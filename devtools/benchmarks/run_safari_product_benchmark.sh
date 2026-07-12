@@ -9,7 +9,7 @@ BUILD_STATUS_JSON="$ARTIFACT_DIR/build_status.json"
 STARTUP_STATUS_JSON="$ARTIFACT_DIR/startup_status.json"
 RESULTS_JSON="$ARTIFACT_DIR/benchmark_results.json"
 REPORT_MD="$ARTIFACT_DIR/benchmark_report.md"
-DERIVED_DATA="$ARTIFACT_DIR/DerivedData"
+DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/typeflow-deriveddata.XXXXXX")"
 BUILD_LOG="$ARTIFACT_DIR/xcodebuild_build.log"
 TEST_LOG="$ARTIFACT_DIR/xcodebuild_test.log"
 STARTUP_LOG="$ARTIFACT_DIR/typeflow_startup.log"
@@ -29,6 +29,10 @@ cleanup() {
       kill "$pid" 2>/dev/null || true
     done <<< "$BENCHMARK_TYPEFLOW_PIDS"
   fi
+  if [[ -n "${DERIVED_DATA:-}" && -d "$DERIVED_DATA" && "$DERIVED_DATA" != "/" && "$DERIVED_DATA" != "$HOME" && "$DERIVED_DATA" != "$ROOT_DIR" && "$DERIVED_DATA" == *"/typeflow-deriveddata."* ]]; then
+    rm -rf "$DERIVED_DATA"
+  fi
+
 }
 
 trap cleanup EXIT INT TERM

@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ARTIFACT_DIR="$ROOT_DIR/devtools/reports/benchmark_artifacts/acceptance_latency"
 DIAGNOSTICS_LOG="$ARTIFACT_DIR/typeflow_diagnostics.log"
 TYPEFLOW_MODEL_READY_FILE="$HOME/Library/Application Support/TypeFlow/model_ready.json"
-DERIVED_DATA="$ARTIFACT_DIR/DerivedData"
+DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/typeflow-deriveddata.XXXXXX")"
 SCHEME="TypeFlow"
 PROJECT="$ROOT_DIR/TypeFlow.xcodeproj"
 
@@ -23,6 +23,10 @@ cleanup() {
       kill "$pid" 2>/dev/null || true
     done <<< "$BENCHMARK_TYPEFLOW_PIDS"
   fi
+  if [[ -n "${DERIVED_DATA:-}" && -d "$DERIVED_DATA" && "$DERIVED_DATA" != "/" && "$DERIVED_DATA" != "$HOME" && "$DERIVED_DATA" != "$ROOT_DIR" && "$DERIVED_DATA" == *"/typeflow-deriveddata."* ]]; then
+    rm -rf "$DERIVED_DATA"
+  fi
+
 }
 trap cleanup EXIT INT TERM
 
